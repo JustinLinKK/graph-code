@@ -203,6 +203,20 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Node / TypeScript
+node_modules/
+coverage/
+*.tsbuildinfo
+
+# GraphCode local runtime state
+.graphcode/
+apps/local-server/data/
+*.sqlite-shm
+*.sqlite-wal
+
+# Vite
+apps/web/dist/
+
 # Ruff stuff:
 .ruff_cache/
 

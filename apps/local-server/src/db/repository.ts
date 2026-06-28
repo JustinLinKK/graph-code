@@ -1,0 +1,3311 @@
+import crypto from "node:crypto";
+import {
+  BASIC_DETAIL_NODE_KINDS,
+  type BasicBlockDetails,
+  type BasicDetailNodeKind,
+  type BoundaryMutation,
+  type BoundaryUpdate,
+  type CanvasGraph,
+  type CreateCustomBlockType,
+  type CustomBlockType,
+  type CustomBlockTypeUpdate,
+  DEPENDENCY_KINDS,
+  DOMAIN_NODE_KINDS,
+  type DependencyDetails,
+  type DependencyKind,
+  type EdgeMutation,
+  type EdgeUpdate,
+  FORMAT_KINDS,
+  type FormatDetails,
+  type FormatKind,
+  GRAPH_EDGE_KINDS,
+  type GraphBoundary,
+  type GraphEdge,
+  type GraphEdgeKind,
+  type GraphNode,
+  type GraphNodeKind,
+  type GraphNodeReuse,
+  type GraphTag,
+  type HierarchyBoundaryGroup,
+  type HierarchyBoundaryLabel,
+  type HierarchyNode,
+  IO_KINDS,
+  type IoDetails,
+  type IoKind,
+  type LayoutPatch,
+  LANGUAGE_TYPES,
+  type LanguageType,
+  type NodeDetail,
+  type NodeMutation,
+  type NodeReuseMutation,
+  type NodeTypeStyle,
+  type NodeTypeStyleUpdate,
+  type NodeUpdate,
+  PROCESS_KINDS,
+  type ProcessDetails,
+  type ProcessKind,
+  type Project,
+  type TagAssignment,
+  type TagMutation,
+  isAttachmentNodeKind,
+  isDomainNodeKind
+} from "@graphcode/graph-model";
+import type { GraphDatabase } from "./connection";
+import { layoutCanvasWithBoundaryGroups } from "../layout/elk";
+
+type ProjectRow = {
+  id: string;
+  name: string;
+  root_path: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type NodeRow = {
+  id: string;
+  project_id: string;
+  kind: GraphNodeKind;
+  name: string;
+  summary: string;
+  code_context: string;
+  code_directory: string | null;
+  code_start_line: number | null;
+  code_end_line: number | null;
+  language: LanguageType;
+  parent_id: string | null;
+  attached_to_id: string | null;
+  custom_type_id: string | null;
+  source_path: string | null;
+  source_start_line: number | null;
+  source_end_line: number | null;
+  ui_x: number;
+  ui_y: number;
+  ui_width: number;
+  ui_height: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type CustomBlockTypeRow = {
+  id: string;
+  project_id: string;
+  name: string;
+  description: string;
+  color: string;
+  icon: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type EdgeRow = {
+  id: string;
+  project_id: string;
+  kind: GraphEdgeKind;
+  source_node_id: string;
+  target_node_id: string;
+  label: string | null;
+  code_context: string;
+  color: string;
+  animated: 0 | 1;
+  created_at: string;
+};
+
+type BoundaryRow = {
+  id: string;
+  project_id: string;
+  scope_node_id: string;
+  name: string;
+  summary: string;
+  code_context: string;
+  color: string;
+  ui_x: number;
+  ui_y: number;
+  ui_width: number;
+  ui_height: number;
+  created_at: string;
+  updated_at: string;
+};
+
+type NodeTypeStyleRow = {
+  project_id: string;
+  node_kind: GraphNodeKind;
+  color: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type TagRow = {
+  id: string;
+  project_id: string;
+  name: string;
+  normalized_name: string;
+  color: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type NodeReuseRow = {
+  id: string;
+  project_id: string;
+  scope_node_id: string;
+  node_id: string;
+  label: string;
+  context: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type DependencyRow = {
+  node_id: string;
+  dependency_kind: DependencyKind;
+  spec: string;
+  version: string | null;
+  required: 0 | 1;
+  notes: string;
+};
+
+type IoRow = {
+  node_id: string;
+  io_kind: IoKind;
+  channel: string;
+  schema_hint: string | null;
+  notes: string;
+};
+
+type ProcessRow = {
+  node_id: string;
+  process_kind: ProcessKind;
+  trigger: string | null;
+  notes: string;
+};
+
+type FormatRow = {
+  node_id: string;
+  format_kind: FormatKind;
+  spec: string;
+  example: string | null;
+  notes: string;
+};
+
+type BasicBlockRow = {
+  node_id: string;
+  basic_kind: BasicDetailNodeKind;
+  key: string;
+  value_hint: string | null;
+  required: 0 | 1;
+  notes: string;
+};
+
+type LayoutRow = {
+  node_id: string;
+  ui_x: number;
+  ui_y: number;
+  ui_width: number;
+  ui_height: number;
+};
+
+export type NewGraphNode = {
+  id: string;
+  projectId: string;
+  kind: GraphNodeKind;
+  name: string;
+  summary?: string;
+  codeContext?: string;
+  codeDirectory?: string | null;
+  codeStartLine?: number | null;
+  codeEndLine?: number | null;
+  language?: LanguageType;
+  parentId?: string | null;
+  attachedToId?: string | null;
+  customTypeId?: string | null;
+  sourcePath?: string | null;
+  sourceStartLine?: number | null;
+  sourceEndLine?: number | null;
+  position?: { x: number; y: number };
+  size?: { width: number; height: number };
+};
+
+type NewGraphEdge = {
+  id: string;
+  projectId: string;
+  kind: GraphEdgeKind;
+  sourceNodeId: string;
+  targetNodeId: string;
+  label?: string | null;
+  codeContext?: string;
+  color?: string;
+  animated?: boolean;
+};
+
+type NewGraphBoundary = {
+  id: string;
+  projectId: string;
+  scopeNodeId: string;
+  name: string;
+  summary?: string;
+  codeContext?: string;
+  color?: string;
+  position: { x: number; y: number };
+  size: { width: number; height: number };
+};
+
+type NewDependencyDetails = {
+  nodeId: string;
+  dependencyKind: DependencyKind;
+  spec: string;
+  version?: string | null;
+  required?: boolean;
+  notes?: string;
+};
+
+type NewIoDetails = {
+  nodeId: string;
+  ioKind: IoKind;
+  channel: string;
+  schemaHint?: string | null;
+  notes?: string;
+};
+
+type NewProcessDetails = {
+  nodeId: string;
+  processKind: ProcessKind;
+  trigger?: string | null;
+  notes?: string;
+};
+
+type NewFormatDetails = {
+  nodeId: string;
+  formatKind: FormatKind;
+  spec: string;
+  example?: string | null;
+  notes?: string;
+};
+
+type NewBasicBlockDetails = {
+  nodeId: string;
+  basicKind: BasicDetailNodeKind;
+  key?: string;
+  valueHint?: string | null;
+  required?: boolean;
+  notes?: string;
+};
+
+export class GraphRepository {
+  constructor(private readonly db: GraphDatabase) {}
+
+  listProjects(): Project[] {
+    const rows = this.db.prepare("SELECT * FROM projects ORDER BY created_at ASC").all() as ProjectRow[];
+    return rows.map(mapProject);
+  }
+
+  clearAllGraphData(): void {
+    this.db.exec("DELETE FROM projects;");
+  }
+
+  listCustomBlockTypes(projectId: string): CustomBlockType[] {
+    this.getProject(projectId);
+    const rows = this.db
+      .prepare("SELECT * FROM custom_block_types WHERE project_id = ? ORDER BY name ASC")
+      .all(projectId) as CustomBlockTypeRow[];
+    return rows.map(mapCustomBlockType);
+  }
+
+  createCustomBlockType(projectId: string, input: CreateCustomBlockType): CustomBlockType {
+    this.getProject(projectId);
+    const id = `custom-type-${crypto.randomUUID()}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO custom_block_types (id, project_id, name, description, color, icon)
+        VALUES (@id, @projectId, @name, @description, @color, @icon)
+      `
+      )
+      .run({
+        id,
+        projectId,
+        name: input.name,
+        description: input.description ?? "",
+        color: input.color ?? "#475569",
+        icon: input.icon ?? "square"
+      });
+    return mapCustomBlockType(this.db.prepare("SELECT * FROM custom_block_types WHERE id = ?").get(id) as CustomBlockTypeRow);
+  }
+
+  updateCustomBlockType(customTypeId: string, input: CustomBlockTypeUpdate): CustomBlockType {
+    const existing = this.getCustomBlockType(customTypeId);
+    this.db
+      .prepare(
+        `
+        UPDATE custom_block_types
+        SET
+          name = @name,
+          description = @description,
+          color = @color,
+          icon = @icon,
+          updated_at = datetime('now')
+        WHERE id = @id
+      `
+      )
+      .run({
+        id: customTypeId,
+        name: input.name ?? existing.name,
+        description: input.description ?? existing.description,
+        color: input.color ?? existing.color,
+        icon: input.icon ?? existing.icon
+      });
+    return this.getCustomBlockType(customTypeId);
+  }
+
+  getCustomBlockType(customTypeId: string): CustomBlockType {
+    const row = this.db.prepare("SELECT * FROM custom_block_types WHERE id = ?").get(customTypeId) as CustomBlockTypeRow | undefined;
+    if (!row) {
+      throw notFound(`Custom block type not found: ${customTypeId}`);
+    }
+    return mapCustomBlockType(row);
+  }
+
+  listNodeTypeStyles(projectId: string): NodeTypeStyle[] {
+    this.getProject(projectId);
+    const rows = this.db
+      .prepare("SELECT * FROM graph_node_type_styles WHERE project_id = ? ORDER BY node_kind ASC")
+      .all(projectId) as NodeTypeStyleRow[];
+    return rows.map(mapNodeTypeStyle);
+  }
+
+  updateNodeTypeStyle(projectId: string, nodeKind: GraphNodeKind, input: NodeTypeStyleUpdate): NodeTypeStyle {
+    this.getProject(projectId);
+    if (!DOMAIN_NODE_KINDS.includes(nodeKind as never) && !isAttachmentNodeKind(nodeKind)) {
+      throw validationError(`Invalid node kind: ${nodeKind}`);
+    }
+    this.db
+      .prepare(
+        `
+        INSERT INTO graph_node_type_styles (project_id, node_kind, color, created_at, updated_at)
+        VALUES (@projectId, @nodeKind, @color, datetime('now'), datetime('now'))
+        ON CONFLICT(project_id, node_kind)
+        DO UPDATE SET color = excluded.color, updated_at = datetime('now')
+      `
+      )
+      .run({
+        projectId,
+        nodeKind,
+        color: input.color
+      });
+    const row = this.db
+      .prepare("SELECT * FROM graph_node_type_styles WHERE project_id = ? AND node_kind = ?")
+      .get(projectId, nodeKind) as NodeTypeStyleRow;
+    return mapNodeTypeStyle(row);
+  }
+
+  setNodeTags(nodeId: string, input: TagAssignment): GraphNode {
+    const node = this.getNode(nodeId);
+    const tags = this.upsertTags(node.projectId, input.tags);
+    this.replaceTagLinks("node", node.id, tags.map((tag) => tag.id));
+    return this.getNode(node.id);
+  }
+
+  setEdgeTags(edgeId: string, input: TagAssignment): GraphEdge {
+    const edge = this.getEdge(edgeId);
+    const tags = this.upsertTags(edge.projectId, input.tags);
+    this.replaceTagLinks("edge", edge.id, tags.map((tag) => tag.id));
+    return this.getEdge(edge.id);
+  }
+
+  setBoundaryTags(boundaryId: string, input: TagAssignment): GraphBoundary {
+    const boundary = this.getBoundary(boundaryId);
+    const tags = this.upsertTags(boundary.projectId, input.tags);
+    this.replaceTagLinks("boundary", boundary.id, tags.map((tag) => tag.id));
+    return this.getBoundary(boundary.id);
+  }
+
+  createNodeReuse(projectId: string, input: NodeReuseMutation): GraphNodeReuse {
+    this.getProject(projectId);
+    const scopeNode = this.getNode(input.scopeNodeId);
+    const node = this.getNode(input.nodeId);
+    if (scopeNode.projectId !== projectId || node.projectId !== projectId) {
+      throw validationError("Reuse scope and node must belong to the same project.");
+    }
+    if (!isDomainNodeKind(scopeNode.kind) || !isDomainNodeKind(node.kind) || node.kind === "framework") {
+      throw validationError("Reusable placements must place a domain node inside a domain scope.");
+    }
+    if (scopeNode.id === node.id) {
+      throw validationError("A node cannot be reused inside itself.");
+    }
+
+    const id = `reuse-${hashId(`${projectId}:${scopeNode.id}:${node.id}`)}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO graph_node_reuses (id, project_id, scope_node_id, node_id, label, context, created_at, updated_at)
+        VALUES (@id, @projectId, @scopeNodeId, @nodeId, @label, @context, datetime('now'), datetime('now'))
+        ON CONFLICT(project_id, scope_node_id, node_id)
+        DO UPDATE SET
+          label = excluded.label,
+          context = excluded.context,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        id,
+        projectId,
+        scopeNodeId: scopeNode.id,
+        nodeId: node.id,
+        label: input.label ?? "",
+        context: input.context ?? ""
+      });
+    return this.getNodeReuse(id);
+  }
+
+  deleteNodeReuse(reuseId: string): void {
+    this.getNodeReuse(reuseId);
+    this.db.prepare("DELETE FROM graph_node_reuses WHERE id = ?").run(reuseId);
+  }
+
+  getNodeReuse(reuseId: string): GraphNodeReuse {
+    const row = this.db.prepare("SELECT * FROM graph_node_reuses WHERE id = ?").get(reuseId) as NodeReuseRow | undefined;
+    if (!row) {
+      throw notFound(`Reusable placement not found: ${reuseId}`);
+    }
+    return mapNodeReuse(row);
+  }
+
+  createProject(input: { id: string; name: string; rootPath: string }): Project {
+    this.db
+      .prepare(
+        `
+        INSERT INTO projects (id, name, root_path)
+        VALUES (@id, @name, @rootPath)
+      `
+      )
+      .run(input);
+    return this.getProject(input.id);
+  }
+
+  createBlankProject(input: { name: string; rootPath: string }): Project {
+    return this.createProject({
+      id: `workspace-${hashId(input.rootPath)}`,
+      name: input.name,
+      rootPath: input.rootPath
+    });
+  }
+
+  getProject(projectId: string): Project {
+    const row = this.db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as ProjectRow | undefined;
+    if (!row) {
+      throw notFound(`Project not found: ${projectId}`);
+    }
+    return mapProject(row);
+  }
+
+  createNode(input: NewGraphNode): GraphNode {
+    this.assertValidNode(input);
+    const codeDirectory = input.codeDirectory ?? input.sourcePath ?? null;
+    const codeStartLine = input.codeStartLine ?? input.sourceStartLine ?? null;
+    const codeEndLine = input.codeEndLine ?? input.sourceEndLine ?? null;
+    this.db
+      .prepare(
+        `
+        INSERT INTO graph_nodes (
+          id, project_id, kind, name, summary,
+          code_context, code_directory, code_start_line, code_end_line, language,
+          parent_id, attached_to_id, custom_type_id,
+          source_path, source_start_line, source_end_line, ui_x, ui_y,
+          ui_width, ui_height
+        )
+        VALUES (
+          @id, @projectId, @kind, @name, @summary,
+          @codeContext, @codeDirectory, @codeStartLine, @codeEndLine, @language,
+          @parentId, @attachedToId, @customTypeId,
+          @sourcePath, @sourceStartLine, @sourceEndLine, @uiX, @uiY,
+          @uiWidth, @uiHeight
+        )
+      `
+      )
+      .run({
+        id: input.id,
+        projectId: input.projectId,
+        kind: input.kind,
+        name: input.name,
+        summary: input.summary ?? "",
+        codeContext: input.codeContext ?? input.summary ?? "",
+        codeDirectory,
+        codeStartLine,
+        codeEndLine,
+        language: input.language ?? "unknown",
+        parentId: input.parentId ?? null,
+        attachedToId: input.attachedToId ?? null,
+        customTypeId: input.customTypeId ?? null,
+        sourcePath: input.sourcePath ?? codeDirectory,
+        sourceStartLine: input.sourceStartLine ?? codeStartLine,
+        sourceEndLine: input.sourceEndLine ?? codeEndLine,
+        uiX: input.position?.x ?? 0,
+        uiY: input.position?.y ?? 0,
+        uiWidth: input.size?.width ?? defaultSizeForKind(input.kind).width,
+        uiHeight: input.size?.height ?? defaultSizeForKind(input.kind).height
+      });
+    return this.getNode(input.id);
+  }
+
+  createNodeFromMutation(projectId: string, input: NodeMutation): GraphNode {
+    return this.createNode({
+      id: `node-${crypto.randomUUID()}`,
+      projectId,
+      kind: input.kind,
+      name: input.name,
+      summary: input.summary ?? "",
+      codeContext: input.codeContext ?? input.summary ?? "",
+      codeDirectory: input.codeDirectory ?? null,
+      codeStartLine: input.codeStartLine ?? null,
+      codeEndLine: input.codeEndLine ?? null,
+      language: input.language ?? "unknown",
+      parentId: input.parentId ?? null,
+      attachedToId: input.attachedToId ?? null,
+      customTypeId: input.customTypeId ?? null,
+      sourcePath: input.codeDirectory ?? null,
+      sourceStartLine: input.codeStartLine ?? null,
+      sourceEndLine: input.codeEndLine ?? null,
+      position: input.position,
+      size: input.size
+    });
+  }
+
+  updateNode(nodeId: string, input: NodeUpdate): GraphNode {
+    const existing = this.getNode(nodeId);
+    const next: NewGraphNode = {
+      id: existing.id,
+      projectId: existing.projectId,
+      kind: input.kind ?? existing.kind,
+      name: input.name ?? existing.name,
+      summary: input.summary ?? existing.summary,
+      codeContext: input.codeContext ?? existing.code.context,
+      codeDirectory: input.codeDirectory === undefined ? existing.code.directory : input.codeDirectory,
+      codeStartLine: input.codeStartLine === undefined ? existing.code.startLine : input.codeStartLine,
+      codeEndLine: input.codeEndLine === undefined ? existing.code.endLine : input.codeEndLine,
+      language: input.language ?? existing.code.language,
+      parentId: input.parentId === undefined ? existing.parentId : input.parentId,
+      attachedToId: input.attachedToId === undefined ? existing.attachedToId : input.attachedToId,
+      customTypeId: input.customTypeId === undefined ? existing.customTypeId : input.customTypeId,
+      position: input.position ?? existing.position,
+      size: input.size ?? existing.size
+    };
+    this.assertValidNode(next, nodeId);
+
+    this.db
+      .prepare(
+        `
+        UPDATE graph_nodes
+        SET
+          kind = @kind,
+          name = @name,
+          summary = @summary,
+          code_context = @codeContext,
+          code_directory = @codeDirectory,
+          code_start_line = @codeStartLine,
+          code_end_line = @codeEndLine,
+          language = @language,
+          parent_id = @parentId,
+          attached_to_id = @attachedToId,
+          custom_type_id = @customTypeId,
+          source_path = @codeDirectory,
+          source_start_line = @codeStartLine,
+          source_end_line = @codeEndLine,
+          ui_x = @uiX,
+          ui_y = @uiY,
+          ui_width = @uiWidth,
+          ui_height = @uiHeight,
+          updated_at = datetime('now')
+        WHERE id = @id
+      `
+      )
+      .run({
+        id: next.id,
+        kind: next.kind,
+        name: next.name,
+        summary: next.summary ?? "",
+        codeContext: next.codeContext ?? "",
+        codeDirectory: next.codeDirectory ?? null,
+        codeStartLine: next.codeStartLine ?? null,
+        codeEndLine: next.codeEndLine ?? null,
+        language: next.language ?? "unknown",
+        parentId: next.parentId ?? null,
+        attachedToId: next.attachedToId ?? null,
+        customTypeId: next.customTypeId ?? null,
+        uiX: next.position?.x ?? existing.position.x,
+        uiY: next.position?.y ?? existing.position.y,
+        uiWidth: next.size?.width ?? existing.size.width,
+        uiHeight: next.size?.height ?? existing.size.height
+      });
+
+    return this.getNode(nodeId);
+  }
+
+  createEdge(input: NewGraphEdge): GraphEdge {
+    if (!GRAPH_EDGE_KINDS.includes(input.kind)) {
+      throw validationError(`Unsupported edge kind: ${input.kind}`);
+    }
+
+    const source = this.getNode(input.sourceNodeId);
+    const target = this.getNode(input.targetNodeId);
+    if (source.projectId !== input.projectId || target.projectId !== input.projectId) {
+      throw validationError("Edges must connect nodes within the same project.");
+    }
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated)
+        VALUES (@id, @projectId, @kind, @sourceNodeId, @targetNodeId, @label, @codeContext, @color, @animated)
+      `
+      )
+      .run({
+        ...input,
+        label: input.label ?? null,
+        codeContext: input.codeContext ?? "",
+        color: input.color ?? defaultEdgeColor(input.kind),
+        animated: input.animated === true ? 1 : 0
+      });
+    return this.getEdge(input.id);
+  }
+
+  createEdgeFromMutation(projectId: string, input: EdgeMutation): GraphEdge {
+    return this.createEdge({
+      id: `edge-${crypto.randomUUID()}`,
+      projectId,
+      kind: input.kind,
+      sourceNodeId: input.sourceNodeId,
+      targetNodeId: input.targetNodeId,
+      label: input.label ?? null,
+      codeContext: input.codeContext ?? "",
+      color: input.color,
+      animated: input.animated
+    });
+  }
+
+  getEdge(edgeId: string): GraphEdge {
+    const row = this.db.prepare("SELECT * FROM graph_edges WHERE id = ?").get(edgeId) as EdgeRow | undefined;
+    if (!row) {
+      throw notFound(`Edge not found: ${edgeId}`);
+    }
+    return mapEdge(row, this.getTagsForEntity("edge", row.id));
+  }
+
+  updateEdge(edgeId: string, input: EdgeUpdate): GraphEdge {
+    const existing = this.getEdge(edgeId);
+    const next = {
+      id: existing.id,
+      projectId: existing.projectId,
+      kind: input.kind ?? existing.kind,
+      sourceNodeId: input.sourceNodeId ?? existing.sourceNodeId,
+      targetNodeId: input.targetNodeId ?? existing.targetNodeId,
+      label: input.label === undefined ? existing.label : input.label,
+      codeContext: input.codeContext ?? existing.codeContext,
+      color: input.color ?? existing.color,
+      animated: input.animated ?? existing.animated
+    };
+
+    if (!GRAPH_EDGE_KINDS.includes(next.kind)) {
+      throw validationError(`Unsupported edge kind: ${next.kind}`);
+    }
+    const source = this.getNode(next.sourceNodeId);
+    const target = this.getNode(next.targetNodeId);
+    if (source.projectId !== next.projectId || target.projectId !== next.projectId) {
+      throw validationError("Edges must connect nodes within the same project.");
+    }
+
+    this.db
+      .prepare(
+        `
+        UPDATE graph_edges
+        SET
+          kind = @kind,
+          source_node_id = @sourceNodeId,
+          target_node_id = @targetNodeId,
+          label = @label,
+          code_context = @codeContext,
+          color = @color,
+          animated = @animated
+        WHERE id = @id
+      `
+      )
+      .run({
+        id: next.id,
+        kind: next.kind,
+        sourceNodeId: next.sourceNodeId,
+        targetNodeId: next.targetNodeId,
+        label: next.label ?? null,
+        codeContext: next.codeContext ?? "",
+        color: next.color,
+        animated: next.animated ? 1 : 0
+      });
+
+    return this.getEdge(edgeId);
+  }
+
+  deleteEdge(edgeId: string): void {
+    this.getEdge(edgeId);
+    this.db.prepare("DELETE FROM graph_edges WHERE id = ?").run(edgeId);
+  }
+
+  createBoundary(projectId: string, input: BoundaryMutation): GraphBoundary {
+    return this.createBoundaryRow({
+      id: `boundary-${crypto.randomUUID()}`,
+      projectId,
+      scopeNodeId: input.scopeNodeId,
+      name: input.name,
+      summary: input.summary ?? "",
+      codeContext: input.codeContext ?? "",
+      color: input.color,
+      position: input.position,
+      size: input.size
+    });
+  }
+
+  getBoundary(boundaryId: string): GraphBoundary {
+    const row = this.db.prepare("SELECT * FROM graph_boundaries WHERE id = ?").get(boundaryId) as BoundaryRow | undefined;
+    if (!row) {
+      throw notFound(`Boundary not found: ${boundaryId}`);
+    }
+    return this.mapBoundary(row);
+  }
+
+  updateBoundary(boundaryId: string, input: BoundaryUpdate): GraphBoundary {
+    const existing = this.getBoundary(boundaryId);
+    const next = {
+      id: existing.id,
+      projectId: existing.projectId,
+      scopeNodeId: input.scopeNodeId ?? existing.scopeNodeId,
+      name: input.name ?? existing.name,
+      summary: input.summary ?? existing.summary,
+      codeContext: input.codeContext ?? existing.codeContext,
+      color: input.color ?? existing.color,
+      position: input.position ?? existing.position,
+      size: input.size ?? existing.size
+    };
+    this.assertValidBoundary(next);
+
+    this.db
+      .prepare(
+        `
+        UPDATE graph_boundaries
+        SET
+          scope_node_id = @scopeNodeId,
+          name = @name,
+          summary = @summary,
+          code_context = @codeContext,
+          color = @color,
+          ui_x = @uiX,
+          ui_y = @uiY,
+          ui_width = @uiWidth,
+          ui_height = @uiHeight,
+          updated_at = datetime('now')
+        WHERE id = @id
+      `
+      )
+      .run({
+        id: next.id,
+        scopeNodeId: next.scopeNodeId,
+        name: next.name,
+        summary: next.summary,
+        codeContext: next.codeContext,
+        color: next.color,
+        uiX: next.position.x,
+        uiY: next.position.y,
+        uiWidth: next.size.width,
+        uiHeight: next.size.height
+      });
+    this.recomputeBoundaryMembership(boundaryId);
+    return this.getBoundary(boundaryId);
+  }
+
+  deleteBoundary(boundaryId: string): void {
+    this.getBoundary(boundaryId);
+    this.db.prepare("DELETE FROM graph_boundaries WHERE id = ?").run(boundaryId);
+  }
+
+  private createBoundaryRow(input: NewGraphBoundary): GraphBoundary {
+    this.assertValidBoundary(input);
+    this.db
+      .prepare(
+        `
+        INSERT INTO graph_boundaries (
+          id, project_id, scope_node_id, name, summary,
+          code_context, color, ui_x, ui_y, ui_width, ui_height
+        )
+        VALUES (
+          @id, @projectId, @scopeNodeId, @name, @summary,
+          @codeContext, @color, @uiX, @uiY, @uiWidth, @uiHeight
+        )
+      `
+      )
+      .run({
+        id: input.id,
+        projectId: input.projectId,
+        scopeNodeId: input.scopeNodeId,
+        name: input.name,
+        summary: input.summary ?? "",
+        codeContext: input.codeContext ?? "",
+        color: input.color ?? defaultBoundaryColor(input.id),
+        uiX: input.position.x,
+        uiY: input.position.y,
+        uiWidth: input.size.width,
+        uiHeight: input.size.height
+      });
+    this.recomputeBoundaryMembership(input.id);
+    return this.getBoundary(input.id);
+  }
+
+  createDependencyDetails(input: NewDependencyDetails): DependencyDetails {
+    if (!DEPENDENCY_KINDS.includes(input.dependencyKind)) {
+      throw validationError(`Unsupported dependency kind: ${input.dependencyKind}`);
+    }
+
+    const node = this.getNode(input.nodeId);
+    if (node.kind !== "dependency") {
+      throw validationError("Dependency details can only be attached to dependency nodes.");
+    }
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO dependency_details (node_id, dependency_kind, spec, version, required, notes)
+        VALUES (@nodeId, @dependencyKind, @spec, @version, @required, @notes)
+      `
+      )
+      .run({
+        nodeId: input.nodeId,
+        dependencyKind: input.dependencyKind,
+        spec: input.spec,
+        version: input.version ?? null,
+        required: input.required === false ? 0 : 1,
+        notes: input.notes ?? ""
+      });
+    return this.getDependencyDetail(input.nodeId);
+  }
+
+  createIoDetails(input: NewIoDetails): IoDetails {
+    if (!IO_KINDS.includes(input.ioKind)) {
+      throw validationError(`Unsupported I/O kind: ${input.ioKind}`);
+    }
+
+    const node = this.getNode(input.nodeId);
+    if (node.kind !== "input" && node.kind !== "output") {
+      throw validationError("I/O details can only be attached to input or output nodes.");
+    }
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO io_details (node_id, io_kind, channel, schema_hint, notes)
+        VALUES (@nodeId, @ioKind, @channel, @schemaHint, @notes)
+      `
+      )
+      .run({
+        nodeId: input.nodeId,
+        ioKind: input.ioKind,
+        channel: input.channel,
+        schemaHint: input.schemaHint ?? null,
+        notes: input.notes ?? ""
+      });
+    return this.getIoDetail(input.nodeId);
+  }
+
+  createProcessDetails(input: NewProcessDetails): ProcessDetails {
+    if (!PROCESS_KINDS.includes(input.processKind)) {
+      throw validationError(`Unsupported process kind: ${input.processKind}`);
+    }
+
+    const node = this.getNode(input.nodeId);
+    if (node.kind !== "process") {
+      throw validationError("Process details can only be attached to process nodes.");
+    }
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO process_details (node_id, process_kind, trigger, notes)
+        VALUES (@nodeId, @processKind, @trigger, @notes)
+      `
+      )
+      .run({
+        nodeId: input.nodeId,
+        processKind: input.processKind,
+        trigger: input.trigger ?? null,
+        notes: input.notes ?? ""
+      });
+    return this.getProcessDetail(input.nodeId);
+  }
+
+  createFormatDetails(input: NewFormatDetails): FormatDetails {
+    if (!FORMAT_KINDS.includes(input.formatKind)) {
+      throw validationError(`Unsupported format kind: ${input.formatKind}`);
+    }
+
+    const node = this.getNode(input.nodeId);
+    if (node.kind !== "format") {
+      throw validationError("Format details can only be attached to format nodes.");
+    }
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO format_details (node_id, format_kind, spec, example, notes)
+        VALUES (@nodeId, @formatKind, @spec, @example, @notes)
+      `
+      )
+      .run({
+        nodeId: input.nodeId,
+        formatKind: input.formatKind,
+        spec: input.spec,
+        example: input.example ?? null,
+        notes: input.notes ?? ""
+    });
+    return this.getFormatDetail(input.nodeId);
+  }
+
+  createBasicBlockDetails(input: NewBasicBlockDetails): BasicBlockDetails {
+    if (!BASIC_DETAIL_NODE_KINDS.includes(input.basicKind)) {
+      throw validationError(`Unsupported basic block kind: ${input.basicKind}`);
+    }
+
+    const node = this.getNode(input.nodeId);
+    if (node.kind !== input.basicKind) {
+      throw validationError("Basic block details must match the node kind.");
+    }
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO basic_block_details (node_id, basic_kind, key, value_hint, required, notes)
+        VALUES (@nodeId, @basicKind, @key, @valueHint, @required, @notes)
+      `
+      )
+      .run({
+        nodeId: input.nodeId,
+        basicKind: input.basicKind,
+        key: input.key ?? node.name,
+        valueHint: input.valueHint ?? null,
+        required: input.required === true ? 1 : 0,
+        notes: input.notes ?? ""
+      });
+    return this.getBasicBlockDetail(input.nodeId);
+  }
+
+  getNode(nodeId: string): GraphNode {
+    const row = this.db.prepare("SELECT * FROM graph_nodes WHERE id = ?").get(nodeId) as NodeRow | undefined;
+    if (!row) {
+      throw notFound(`Node not found: ${nodeId}`);
+    }
+    return mapNode(row, this.getChildCount(row.id), this.getTagsForEntity("node", row.id));
+  }
+
+  getHierarchy(projectId: string): HierarchyNode[] {
+    const nodes = this.listNodes(projectId).filter((node) => isDomainNodeKind(node.kind));
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const boundaryRows = this.db.prepare("SELECT * FROM graph_boundaries WHERE project_id = ? ORDER BY name ASC").all(projectId) as BoundaryRow[];
+    const boundaries = boundaryRows.map((row) => this.mapBoundary(row));
+    const boundaryLabelsByNodeId = new Map<string, HierarchyBoundaryLabel[]>();
+    const boundaryGroupsByScopeId = new Map<string, HierarchyBoundaryGroup[]>();
+
+    for (const boundary of boundaries) {
+      const label = { id: boundary.id, name: boundary.name, color: boundary.color };
+      for (const nodeId of boundary.memberNodeIds) {
+        const labels = boundaryLabelsByNodeId.get(nodeId) ?? [];
+        labels.push(label);
+        boundaryLabelsByNodeId.set(nodeId, labels);
+      }
+      const groups = boundaryGroupsByScopeId.get(boundary.scopeNodeId) ?? [];
+      groups.push({
+        id: boundary.id,
+        scopeNodeId: boundary.scopeNodeId,
+        name: boundary.name,
+        summary: boundary.summary,
+        color: boundary.color,
+        memberNodeIds: boundary.memberNodeIds,
+        memberNames: boundary.memberNodeIds.map((nodeId) => nodeById.get(nodeId)?.name ?? nodeId)
+      });
+      boundaryGroupsByScopeId.set(boundary.scopeNodeId, groups);
+    }
+
+    const byParent = new Map<string | null, HierarchyNode[]>();
+    for (const node of nodes) {
+      const treeNode: HierarchyNode = {
+        ...node,
+        children: [],
+        boundaryLabels: boundaryLabelsByNodeId.get(node.id) ?? [],
+        boundaryGroups: boundaryGroupsByScopeId.get(node.id) ?? []
+      };
+      const siblings = byParent.get(node.parentId) ?? [];
+      siblings.push(treeNode);
+      byParent.set(node.parentId, siblings);
+    }
+
+    const attachChildren = (node: HierarchyNode): HierarchyNode => ({
+      ...node,
+      children: (byParent.get(node.id) ?? []).sort(sortHierarchyNodes).map(attachChildren)
+    });
+
+    return (byParent.get(null) ?? []).sort(sortHierarchyNodes).map(attachChildren);
+  }
+
+  async getCanvasGraph(input: {
+    projectId: string;
+    rootNodeId?: string | null;
+    depth?: number | null;
+    includeAttachments?: boolean;
+  }): Promise<CanvasGraph> {
+    const project = this.getProject(input.projectId);
+    const allNodes = this.listNodes(project.id);
+    const scopeNode = this.resolveScopeNode(project, allNodes, input.rootNodeId ?? null);
+    let canvas = this.buildCanvasGraph(project, allNodes, scopeNode?.id ?? null, input.includeAttachments ?? true, true);
+
+    if (scopeNode && canvas.nodes.length > 0 && this.countSavedLayouts(project.id, scopeNode.id, canvas.nodes.map((node) => node.id)) === 0) {
+      canvas = await this.autoLayoutScope({ projectId: project.id, scopeNodeId: scopeNode.id, includeAttachments: input.includeAttachments ?? true });
+    }
+
+    return canvas;
+  }
+
+  async autoLayoutScope(input: { projectId: string; scopeNodeId?: string | null; includeAttachments?: boolean }): Promise<CanvasGraph> {
+    const project = this.getProject(input.projectId);
+    const allNodes = this.listNodes(project.id);
+    const scopeNode = this.resolveScopeNode(project, allNodes, input.scopeNodeId ?? null);
+    const canvas = this.buildCanvasGraph(project, allNodes, scopeNode?.id ?? null, input.includeAttachments ?? true, true);
+    const layout = await layoutCanvasWithBoundaryGroups(canvas.nodes, canvas.edges, canvas.boundaries);
+
+    const save = this.db.transaction(() => {
+      for (const [nodeId, value] of layout.nodeLayouts.entries()) {
+        this.upsertNodeLayout(nodeId, {
+          scopeNodeId: canvas.scopeNodeId ?? nodeId,
+          position: value.position,
+          size: value.size
+        });
+      }
+      for (const [boundaryId, value] of layout.boundaryLayouts.entries()) {
+        this.updateBoundaryLayoutOnly(boundaryId, value);
+      }
+    });
+    save();
+
+    const refreshedNodes = this.listNodes(project.id);
+    return this.buildCanvasGraph(project, refreshedNodes, scopeNode?.id ?? null, input.includeAttachments ?? true, true);
+  }
+
+  updateNodeLayout(nodeId: string, patch: LayoutPatch): GraphNode {
+    this.upsertNodeLayout(nodeId, patch);
+    return this.getNode(nodeId);
+  }
+
+  getNodeDetail(nodeId: string): NodeDetail {
+    const node = this.getNode(nodeId);
+    const attachmentRows = this.db
+      .prepare("SELECT * FROM graph_nodes WHERE attached_to_id = ? ORDER BY kind ASC, name ASC")
+      .all(node.id) as NodeRow[];
+    const attachmentTags = this.getTagsForEntityIds("node", attachmentRows.map((row) => row.id));
+    const attachments = attachmentRows.map((row) => mapNode(row, this.getChildCount(row.id), attachmentTags.get(row.id) ?? []));
+    const detailNodes = [node, ...attachments];
+    const detailNodeById = new Map(detailNodes.map((detailNode) => [detailNode.id, detailNode]));
+    const detailNodeIds = detailNodes.map((detailNode) => detailNode.id);
+    const dependencyRows = this.getDependencyDetailsForNodes(detailNodeIds);
+    const ioRows = this.getIoDetailsForNodes(detailNodeIds);
+    const processRows = this.getProcessDetailsForNodes(detailNodeIds);
+    const formatRows = this.getFormatDetailsForNodes(detailNodeIds);
+    const basicRows = this.getBasicBlockDetailsForNodes(detailNodeIds);
+
+    const incomingEdges = this.db
+      .prepare("SELECT * FROM graph_edges WHERE target_node_id = ? ORDER BY kind ASC")
+      .all(node.id) as EdgeRow[];
+    const outgoingEdges = this.db
+      .prepare("SELECT * FROM graph_edges WHERE source_node_id = ? ORDER BY kind ASC")
+      .all(node.id) as EdgeRow[];
+    const edgeTags = this.getTagsForEntityIds("edge", [...incomingEdges, ...outgoingEdges].map((edge) => edge.id));
+    const relatedIds = new Set<string>();
+    for (const edge of incomingEdges) {
+      relatedIds.add(edge.source_node_id);
+    }
+    for (const edge of outgoingEdges) {
+      relatedIds.add(edge.target_node_id);
+    }
+
+    return {
+      node,
+      childCount: node.childCount,
+      hasChildren: node.hasChildren,
+      dependencies: dependencyRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
+      inputs: ioRows.filter((details) => detailNodeById.get(details.nodeId)?.kind === "input").map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
+      outputs: ioRows.filter((details) => detailNodeById.get(details.nodeId)?.kind === "output").map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
+      processes: processRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
+      formats: formatRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
+      basicDetails: basicRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
+      incomingEdges: incomingEdges.map((edge) => mapEdge(edge, edgeTags.get(edge.id) ?? [])),
+      outgoingEdges: outgoingEdges.map((edge) => mapEdge(edge, edgeTags.get(edge.id) ?? [])),
+      relatedNodes: [...relatedIds].map((id) => this.getNode(id)),
+      reusedIn: this.listReusesForNode(node.projectId, node.id)
+    };
+  }
+
+  seedSelfGraph(rootPath: string): Project {
+    const seed = this.db.transaction(() => {
+      this.clearAllGraphData();
+
+      const project = this.createProject({
+        id: "graphcode-self",
+        name: "graph-code",
+        rootPath
+      });
+
+      this.db
+        .prepare(
+          `
+          INSERT INTO custom_block_types (id, project_id, name, description, color, icon)
+          VALUES (
+            'custom-type-test-scenario',
+            @projectId,
+            'Test Scenario',
+            'Curated self-repo blocks used to exercise GraphCode workspace behavior.',
+            '#0f766e',
+            'flask-conical'
+          )
+        `
+        )
+        .run({ projectId: project.id });
+
+      this.db
+        .prepare(
+          `
+          INSERT INTO graph_node_type_styles (project_id, node_kind, color)
+          VALUES
+            (@projectId, 'website', '#0284c7'),
+            (@projectId, 'ui_component', '#db2777'),
+            (@projectId, 'module', '#059669')
+          `
+        )
+        .run({ projectId: project.id });
+
+      const nodes: NewGraphNode[] = [
+        {
+          id: "framework-graphcode-self",
+          projectId: project.id,
+          kind: "framework",
+          name: "GraphCode Self Workspace",
+          summary: "Curated graph of this repository, used as the primary local test workspace.",
+          sourcePath: "README.md",
+          language: "markdown",
+          position: { x: 120, y: 80 },
+          size: { width: 300, height: 144 }
+        },
+        {
+          id: "module-web",
+          projectId: project.id,
+          kind: "module",
+          name: "Web Workspace",
+          summary: "React client for workspace loading, hierarchy navigation, canvas rendering, and block editing.",
+          parentId: "framework-graphcode-self",
+          sourcePath: "apps/web",
+          language: "typescript",
+          position: { x: 80, y: 320 }
+        },
+        {
+          id: "module-local-server",
+          projectId: project.id,
+          kind: "module",
+          name: "Local Server",
+          summary: "Fastify service that owns workspace opening, SQLite persistence, seeding, routes, and layout APIs.",
+          parentId: "framework-graphcode-self",
+          sourcePath: "apps/local-server",
+          language: "typescript",
+          position: { x: 450, y: 320 }
+        },
+        {
+          id: "module-model",
+          projectId: project.id,
+          kind: "module",
+          name: "Graph Model",
+          summary: "Shared TypeScript and Zod contract package for graph nodes, edges, canvas payloads, and details.",
+          parentId: "framework-graphcode-self",
+          sourcePath: "packages/graph-model",
+          language: "typescript",
+          position: { x: 820, y: 320 }
+        },
+        {
+          id: "module-parser-planned",
+          projectId: project.id,
+          kind: "module",
+          name: "Parser Package",
+          summary: "Planned Tree-sitter extraction package reserved for future repository indexing work.",
+          parentId: "framework-graphcode-self",
+          sourcePath: "packages/parser",
+          language: "markdown",
+          position: { x: 1190, y: 320 }
+        },
+        {
+          id: "module-agent-runtime-planned",
+          projectId: project.id,
+          kind: "module",
+          name: "Agent Runtime",
+          summary: "Planned local/global proposal orchestration package for review-first AI workflows.",
+          parentId: "framework-graphcode-self",
+          sourcePath: "packages/agent-runtime",
+          language: "markdown",
+          position: { x: 1560, y: 320 }
+        },
+        {
+          id: "module-docs-research",
+          projectId: project.id,
+          kind: "module",
+          name: "Docs and Research",
+          summary: "Repository documentation, architecture notes, prior-art assessment, and product rationale.",
+          parentId: "framework-graphcode-self",
+          sourcePath: "docs",
+          language: "markdown",
+          position: { x: 1930, y: 320 }
+        },
+        {
+          id: "module-dev-tooling",
+          projectId: project.id,
+          kind: "module",
+          name: "Developer Tooling",
+          summary: "Workspace scripts, tests, fixtures, package manager files, and generated artifacts.",
+          parentId: "framework-graphcode-self",
+          sourcePath: ".",
+          language: "json",
+          position: { x: 2300, y: 320 }
+        },
+        {
+          id: "module-web-api",
+          projectId: project.id,
+          kind: "module",
+          name: "Browser API Client",
+          summary: "Typed fetch wrappers for projects, workspaces, canvas scopes, nodes, and dev reset.",
+          parentId: "module-web",
+          sourcePath: "apps/web/src/api.ts",
+          sourceStartLine: 1,
+          sourceEndLine: 124,
+          language: "typescript",
+          position: { x: 0, y: 560 }
+        },
+        {
+          id: "website-web-workspace",
+          projectId: project.id,
+          kind: "website",
+          name: "GraphCode Web App",
+          summary: "Browser workspace for graph editing and inspection.",
+          parentId: "module-web",
+          sourcePath: "apps/web/index.html",
+          language: "html",
+          position: { x: 300, y: 520 },
+          size: { width: 280, height: 144 }
+        },
+        {
+          id: "module-app-state",
+          projectId: project.id,
+          kind: "module",
+          name: "App State Orchestrator",
+          summary: "Top-level React state machine for bootstrapping projects, loading scopes, and saving blocks.",
+          parentId: "module-web",
+          sourcePath: "apps/web/src/App.tsx",
+          sourceStartLine: 20,
+          sourceEndLine: 342,
+          language: "typescript",
+          position: { x: 300, y: 560 }
+        },
+        {
+          id: "module-app-shell",
+          projectId: project.id,
+          kind: "module",
+          name: "Application Shell",
+          summary: "Three-pane UI chrome with hierarchy search, canvas actions, and node inspector wiring.",
+          parentId: "module-web",
+          sourcePath: "apps/web/src/components/AppShell.tsx",
+          sourceStartLine: 1,
+          sourceEndLine: 171,
+          language: "typescript",
+          position: { x: 600, y: 560 }
+        },
+        {
+          id: "module-workspace-canvas",
+          projectId: project.id,
+          kind: "module",
+          name: "Canvas Layer",
+          summary: "React Flow rendering layer for pan, zoom, selection, dependency blocks, and I/O boundary blocks.",
+          parentId: "module-web",
+          sourcePath: "apps/web/src/components/WorkspaceCanvas.tsx",
+          sourceStartLine: 1,
+          sourceEndLine: 267,
+          language: "typescript",
+          position: { x: 900, y: 560 }
+        },
+        {
+          id: "module-block-editor",
+          projectId: project.id,
+          kind: "module",
+          name: "Block Editor Dialog",
+          summary: "Modal editor for creating and updating domain, attachment, and custom graph blocks.",
+          parentId: "module-web",
+          sourcePath: "apps/web/src/components/BlockEditorDialog.tsx",
+          sourceStartLine: 1,
+          sourceEndLine: 273,
+          language: "typescript",
+          position: { x: 1200, y: 560 }
+        },
+        {
+          id: "ui-app-shell",
+          projectId: project.id,
+          kind: "ui_component",
+          name: "AppShell",
+          summary: "Top navigation and three-pane workspace layout.",
+          parentId: "website-web-workspace",
+          sourcePath: "apps/web/src/components/AppShell.tsx",
+          sourceStartLine: 1,
+          language: "typescript",
+          position: { x: 80, y: 120 }
+        },
+        {
+          id: "ui-workspace-canvas",
+          projectId: project.id,
+          kind: "ui_component",
+          name: "WorkspaceCanvas",
+          summary: "Interactive graph canvas and draw modes.",
+          parentId: "website-web-workspace",
+          sourcePath: "apps/web/src/components/WorkspaceCanvas.tsx",
+          sourceStartLine: 1,
+          language: "typescript",
+          position: { x: 360, y: 120 }
+        },
+        {
+          id: "ui-hierarchy-tree",
+          projectId: project.id,
+          kind: "ui_component",
+          name: "HierarchyTree",
+          summary: "Left navigation tree with boundary labels.",
+          parentId: "website-web-workspace",
+          sourcePath: "apps/web/src/components/HierarchyTree.tsx",
+          sourceStartLine: 1,
+          language: "typescript",
+          position: { x: 640, y: 120 }
+        },
+        {
+          id: "ui-inspector",
+          projectId: project.id,
+          kind: "ui_component",
+          name: "Inspector",
+          summary: "Right details panel and style controls.",
+          parentId: "website-web-workspace",
+          sourcePath: "apps/web/src/components/Inspector.tsx",
+          sourceStartLine: 1,
+          language: "typescript",
+          position: { x: 920, y: 120 }
+        },
+        {
+          id: "ui-block-editor",
+          projectId: project.id,
+          kind: "ui_component",
+          name: "BlockEditorDialog",
+          summary: "Block creation and update dialog.",
+          parentId: "website-web-workspace",
+          sourcePath: "apps/web/src/components/BlockEditorDialog.tsx",
+          sourceStartLine: 1,
+          language: "typescript",
+          position: { x: 80, y: 310 }
+        },
+        {
+          id: "ui-edge-editor",
+          projectId: project.id,
+          kind: "ui_component",
+          name: "EdgeEditorDialog",
+          summary: "Edge description and context dialog.",
+          parentId: "website-web-workspace",
+          sourcePath: "apps/web/src/components/EdgeEditorDialog.tsx",
+          sourceStartLine: 1,
+          language: "typescript",
+          position: { x: 360, y: 310 }
+        },
+        {
+          id: "ui-boundary-editor",
+          projectId: project.id,
+          kind: "ui_component",
+          name: "BoundaryEditorDialog",
+          summary: "Boundary metadata and geometry dialog.",
+          parentId: "website-web-workspace",
+          sourcePath: "apps/web/src/components/BoundaryEditorDialog.tsx",
+          sourceStartLine: 1,
+          language: "typescript",
+          position: { x: 640, y: 310 }
+        },
+        {
+          id: "module-runtime",
+          projectId: project.id,
+          kind: "module",
+          name: "Runtime Boundary",
+          summary: "Server startup and workspace switching boundary that preserves local graph state.",
+          parentId: "module-local-server",
+          sourcePath: "apps/local-server/src",
+          language: "typescript",
+          position: { x: 360, y: 560 }
+        },
+        {
+          id: "module-routes",
+          projectId: project.id,
+          kind: "module",
+          name: "HTTP Routes",
+          summary: "Fastify route registration for projects, workspaces, canvas scopes, nodes, layout, and seed reset.",
+          parentId: "module-local-server",
+          sourcePath: "apps/local-server/src/routes.ts",
+          sourceStartLine: 1,
+          sourceEndLine: 113,
+          language: "typescript",
+          position: { x: 660, y: 560 }
+        },
+        {
+          id: "module-db-repository",
+          projectId: project.id,
+          kind: "module",
+          name: "Graph Repository",
+          summary: "SQLite-backed repository for graph CRUD, hierarchy, canvas composition, details, seeds, and layout persistence.",
+          parentId: "module-local-server",
+          sourcePath: "apps/local-server/src/db/repository.ts",
+          language: "typescript",
+          position: { x: 960, y: 560 }
+        },
+        {
+          id: "module-db-schema",
+          projectId: project.id,
+          kind: "module",
+          name: "SQLite Schema",
+          summary: "Migration helpers and table definitions for graph nodes, edges, details, layouts, and revisions.",
+          parentId: "module-local-server",
+          sourcePath: "apps/local-server/src/db/schema.ts",
+          sourceStartLine: 1,
+          sourceEndLine: 244,
+          language: "typescript",
+          position: { x: 1260, y: 560 }
+        },
+        {
+          id: "module-layout",
+          projectId: project.id,
+          kind: "module",
+          name: "ELK Layout",
+          summary: "Canvas auto-layout adapter that translates graph nodes and edges into ELK layout input.",
+          parentId: "module-local-server",
+          sourcePath: "apps/local-server/src/layout/elk.ts",
+          sourceStartLine: 1,
+          sourceEndLine: 67,
+          language: "typescript",
+          position: { x: 1560, y: 560 }
+        },
+        {
+          id: "module-cli-seed",
+          projectId: project.id,
+          kind: "module",
+          name: "Seed CLI",
+          summary: "Command-line entrypoint that rebuilds the local self workspace database and workspace metadata.",
+          parentId: "module-local-server",
+          sourcePath: "apps/local-server/src/cli/seed.ts",
+          sourceStartLine: 1,
+          sourceEndLine: 31,
+          language: "typescript",
+          position: { x: 1860, y: 560 }
+        },
+        {
+          id: "module-graph-contract",
+          projectId: project.id,
+          kind: "module",
+          name: "Graph Contract",
+          summary: "Node kind enums, Zod schemas, DTO types, and type guards shared across frontend and backend.",
+          parentId: "module-model",
+          sourcePath: "packages/graph-model/src/index.ts",
+          sourceStartLine: 1,
+          sourceEndLine: 304,
+          language: "typescript",
+          position: { x: 820, y: 560 }
+        },
+        {
+          id: "module-research-notes",
+          projectId: project.id,
+          kind: "module",
+          name: "Research Notes",
+          summary: "Prior-art assessment and prototype proposal that frame the product and evaluation direction.",
+          parentId: "module-docs-research",
+          sourcePath: "docs/research/graphcode-assessment.md",
+          language: "markdown",
+          position: { x: 1930, y: 560 }
+        },
+        {
+          id: "module-test-suite",
+          projectId: project.id,
+          kind: "module",
+          name: "Test Suite",
+          summary: "Vitest coverage for graph-model contracts, repository behavior, routes, and the web shell.",
+          parentId: "module-dev-tooling",
+          sourcePath: ".",
+          language: "typescript",
+          position: { x: 2300, y: 560 }
+        },
+        {
+          id: "module-workspace-config",
+          projectId: project.id,
+          kind: "module",
+          name: "Workspace Config",
+          summary: "pnpm workspace, package scripts, lockfile, TypeScript config, git ignores, and build outputs.",
+          parentId: "module-dev-tooling",
+          sourcePath: ".",
+          language: "json",
+          position: { x: 2600, y: 560 }
+        },
+        { id: "function-app", projectId: project.id, kind: "function", name: "App", summary: "Bootstraps projects, loads hierarchy/canvas data, tracks selection, and routes user actions.", parentId: "module-app-state", sourcePath: "apps/web/src/App.tsx", sourceStartLine: 20, sourceEndLine: 340, language: "typescript", position: { x: 260, y: 820 } },
+        { id: "function-load-project", projectId: project.id, kind: "function", name: "loadProject", summary: "Fetches hierarchy and canvas data for a project and selects an initial node detail.", parentId: "module-app-state", sourcePath: "apps/web/src/App.tsx", sourceStartLine: 42, sourceEndLine: 67, language: "typescript", position: { x: 540, y: 820 } },
+        { id: "function-open-workspace-client", projectId: project.id, kind: "function", name: "openWorkspace", summary: "Posts a local root path to the server and handles missing workspace responses.", parentId: "module-web-api", sourcePath: "apps/web/src/api.ts", sourceStartLine: 37, sourceEndLine: 52, language: "typescript", position: { x: -20, y: 820 } },
+        { id: "function-get-canvas-client", projectId: project.id, kind: "function", name: "getCanvasGraph", summary: "Builds canvas query parameters and fetches a CanvasGraph DTO from the local API.", parentId: "module-web-api", sourcePath: "apps/web/src/api.ts", sourceStartLine: 59, sourceEndLine: 72, language: "typescript", position: { x: 120, y: 820 } },
+        { id: "function-app-shell", projectId: project.id, kind: "function", name: "AppShell", summary: "Renders the top bar, hierarchy panel, canvas panel, inspector, and workspace controls.", parentId: "module-app-shell", sourcePath: "apps/web/src/components/AppShell.tsx", sourceStartLine: 32, sourceEndLine: 156, language: "typescript", position: { x: 660, y: 820 } },
+        { id: "function-workspace-canvas", projectId: project.id, kind: "function", name: "WorkspaceCanvas", summary: "Wraps the React Flow canvas provider and renders the active workspace scope.", parentId: "module-workspace-canvas", sourcePath: "apps/web/src/components/WorkspaceCanvas.tsx", sourceStartLine: 33, sourceEndLine: 39, language: "typescript", position: { x: 880, y: 820 } },
+        { id: "function-to-flow-edges", projectId: project.id, kind: "function", name: "toFlowEdges", summary: "Converts semantic graph edges and attachment links into React Flow edge objects.", parentId: "module-workspace-canvas", sourcePath: "apps/web/src/components/WorkspaceCanvas.tsx", sourceStartLine: 200, sourceEndLine: 252, language: "typescript", position: { x: 1120, y: 820 } },
+        { id: "function-block-editor", projectId: project.id, kind: "function", name: "BlockEditorDialog", summary: "Builds node mutation payloads for domain, attachment, and custom block editing.", parentId: "module-block-editor", sourcePath: "apps/web/src/components/BlockEditorDialog.tsx", sourceStartLine: 38, sourceEndLine: 248, language: "typescript", position: { x: 1320, y: 820 } },
+        { id: "function-build-server", projectId: project.id, kind: "function", name: "buildServer", summary: "Constructs the Fastify app and preserves existing database content unless explicitly seeding.", parentId: "module-runtime", sourcePath: "apps/local-server/src/server.ts", sourceStartLine: 8, sourceEndLine: 37, language: "typescript", position: { x: 320, y: 820 } },
+        { id: "object-workspace-runtime", projectId: project.id, kind: "object", name: "WorkspaceRuntime", summary: "Keeps the active SQLite connection and switches it when a repository workspace is opened.", parentId: "module-runtime", sourcePath: "apps/local-server/src/workspace.ts", sourceStartLine: 9, sourceEndLine: 83, language: "typescript", position: { x: 560, y: 820 } },
+        { id: "function-open-workspace", projectId: project.id, kind: "function", name: "openWorkspace", summary: "Validates a repository path, opens or creates its .graphcode database, and writes workspace metadata.", parentId: "module-runtime", sourcePath: "apps/local-server/src/workspace.ts", sourceStartLine: 27, sourceEndLine: 75, language: "typescript", position: { x: 800, y: 820 } },
+        { id: "function-register-routes", projectId: project.id, kind: "function", name: "registerApiRoutes", summary: "Registers health, project, workspace, canvas, layout, custom type, node, and dev seed routes.", parentId: "module-routes", sourcePath: "apps/local-server/src/routes.ts", sourceStartLine: 35, sourceEndLine: 112, language: "typescript", position: { x: 680, y: 820 } },
+        { id: "object-graph-repository", projectId: project.id, kind: "object", name: "GraphRepository", summary: "Database repository class for projects, nodes, details, canvas scopes, layouts, and self seeding.", parentId: "module-db-repository", sourcePath: "apps/local-server/src/db/repository.ts", sourceStartLine: 215, sourceEndLine: 1643, language: "typescript", position: { x: 940, y: 820 } },
+        { id: "function-seed-self-graph", projectId: project.id, kind: "function", name: "seedSelfGraph", summary: "Rebuilds .graphcode graph storage with this repository's curated self-test workspace.", parentId: "module-db-repository", sourcePath: "apps/local-server/src/db/repository.ts", sourceStartLine: 700, language: "typescript", position: { x: 1180, y: 820 } },
+        { id: "function-get-canvas-graph", projectId: project.id, kind: "function", name: "getCanvasGraph", summary: "Resolves a scope, composes next-layer nodes and attachments, and applies saved layouts.", parentId: "module-db-repository", sourcePath: "apps/local-server/src/db/repository.ts", sourceStartLine: 568, sourceEndLine: 585, language: "typescript", position: { x: 1420, y: 820 } },
+        { id: "function-migrate", projectId: project.id, kind: "function", name: "migrate", summary: "Creates and repairs SQLite graph tables, detail tables, indexes, layouts, and revisions.", parentId: "module-db-schema", sourcePath: "apps/local-server/src/db/schema.ts", sourceStartLine: 70, sourceEndLine: 163, language: "typescript", position: { x: 1260, y: 820 } },
+        { id: "function-layout-elk", projectId: project.id, kind: "function", name: "layoutCanvasWithElk", summary: "Runs ELK layered layout and returns per-node canvas positions and dimensions.", parentId: "module-layout", sourcePath: "apps/local-server/src/layout/elk.ts", sourceStartLine: 9, sourceEndLine: 45, language: "typescript", position: { x: 1560, y: 820 } },
+        { id: "function-seed-cli", projectId: project.id, kind: "function", name: "seed CLI", summary: "Resolves the repo root, opens .graphcode/graphcode.sqlite, seeds the self graph, and writes workspace.json.", parentId: "module-cli-seed", sourcePath: "apps/local-server/src/cli/seed.ts", sourceStartLine: 1, sourceEndLine: 31, language: "typescript", position: { x: 1860, y: 820 } },
+        { id: "object-graph-node", projectId: project.id, kind: "object", name: "GraphNode", summary: "Shared node object with stable identity, kind, hierarchy, attachment, source range, and canvas metadata.", parentId: "module-graph-contract", sourcePath: "packages/graph-model/src/index.ts", sourceStartLine: 120, sourceEndLine: 137, language: "typescript", position: { x: 760, y: 820 } },
+        { id: "object-canvas-graph", projectId: project.id, kind: "object", name: "CanvasGraph", summary: "Canvas payload containing the active project, scoped nodes, edges, detail rows, and custom types.", parentId: "module-graph-contract", sourcePath: "packages/graph-model/src/index.ts", sourceStartLine: 270, sourceEndLine: 283, language: "typescript", position: { x: 1000, y: 820 } },
+        { id: "object-node-detail", projectId: project.id, kind: "object", name: "NodeDetail", summary: "Inspector payload that groups one selected node with attachments, relationships, and related nodes.", parentId: "module-graph-contract", sourcePath: "packages/graph-model/src/index.ts", sourceStartLine: 285, sourceEndLine: 298, language: "typescript", position: { x: 1240, y: 820 } },
+        { id: "object-node-mutation", projectId: project.id, kind: "object", name: "NodeMutation", summary: "Mutation schema accepted by the create and update node routes and the block editor dialog.", parentId: "module-graph-contract", sourcePath: "packages/graph-model/src/index.ts", sourceStartLine: 214, sourceEndLine: 232, language: "typescript", position: { x: 1480, y: 820 } },
+        { id: "object-graph-tag", projectId: project.id, kind: "object", name: "GraphTag", summary: "Reusable label metadata shared by blocks, edges, and boundaries.", parentId: "module-graph-contract", sourcePath: "packages/graph-model/src/index.ts", sourceStartLine: 102, language: "typescript", position: { x: 1720, y: 820 } },
+        { id: "object-node-reuse", projectId: project.id, kind: "object", name: "GraphNodeReuse", summary: "Canonical node placement reused inside multiple canvas scopes.", parentId: "module-graph-contract", sourcePath: "packages/graph-model/src/index.ts", sourceStartLine: 122, language: "typescript", position: { x: 1960, y: 820 } },
+        { id: "function-normalize-tag-name", projectId: project.id, kind: "function", name: "normalizeTagName", summary: "Normalizes user tags for stable lookup and dedupe.", parentId: "module-db-repository", sourcePath: "apps/local-server/src/db/repository.ts", sourceStartLine: 3110, language: "typescript", position: { x: 1660, y: 820 } },
+        { id: "function-measure-node-layout", projectId: project.id, kind: "function", name: "measureNodeForLayout", summary: "Estimates card dimensions from block name and description.", parentId: "module-layout", sourcePath: "apps/local-server/src/layout/elk.ts", sourceStartLine: 119, language: "typescript", position: { x: 1800, y: 820 } },
+        { id: "object-research-assessment", projectId: project.id, kind: "object", name: "GraphCode Assessment", summary: "Research note describing the product thesis, prior art, novelty limits, and prototype plan.", parentId: "module-research-notes", sourcePath: "docs/research/graphcode-assessment.md", language: "markdown", position: { x: 1930, y: 820 } },
+        { id: "object-route-tests", projectId: project.id, kind: "object", name: "Route Tests", summary: "Fastify injection tests for project listing, hierarchy, canvas scopes, workspace opening, and self seed reset.", parentId: "module-test-suite", sourcePath: "apps/local-server/src/routes.test.ts", language: "typescript", position: { x: 2240, y: 820 } },
+        { id: "object-web-tests", projectId: project.id, kind: "object", name: "Web Shell Tests", summary: "Mocked UI tests for loading, inspecting, opening subgraphs, layout edits, reset, and block creation.", parentId: "module-test-suite", sourcePath: "apps/web/src/App.test.tsx", language: "typescript", position: { x: 2480, y: 820 } },
+        { id: "object-package-scripts", projectId: project.id, kind: "object", name: "package scripts", summary: "Root pnpm scripts for dev, build, typecheck, test, and deterministic self workspace seeding.", parentId: "module-workspace-config", sourcePath: "package.json", language: "json", position: { x: 2600, y: 820 } },
+        {
+          id: "process-web-render",
+          projectId: project.id,
+          kind: "process",
+          name: "Render Workspace Scope",
+          summary: "Turns selected graph scope data into hierarchy, canvas blocks, and inspector state.",
+          attachedToId: "module-web",
+          position: { x: 320, y: 400 },
+          size: { width: 218, height: 104 }
+        },
+        {
+          id: "process-canvas-flow",
+          projectId: project.id,
+          kind: "process",
+          name: "Compose React Flow View",
+          summary: "Maps canvas DTOs into draggable, resizable React Flow nodes and routed edges.",
+          attachedToId: "module-workspace-canvas",
+          position: { x: 920, y: 700 },
+          size: { width: 218, height: 104 }
+        },
+        {
+          id: "process-server-api",
+          projectId: project.id,
+          kind: "process",
+          name: "Serve Graph Scope",
+          summary: "Builds next-layer canvas payloads, applies saved layouts, and returns node details.",
+          attachedToId: "module-local-server",
+          position: { x: 620, y: 400 },
+          size: { width: 218, height: 104 }
+        },
+        { id: "process-persist-graph", projectId: project.id, kind: "process", name: "Persist Graph State", summary: "Writes node edits, layout overrides, revisions, and self-seed rows into SQLite.", attachedToId: "module-db-repository", position: { x: 980, y: 700 }, size: { width: 218, height: 104 } },
+        {
+          id: "process-model-validate",
+          projectId: project.id,
+          kind: "process",
+          name: "Validate Graph DTOs",
+          summary: "Keeps frontend and backend contracts aligned around node kinds, sizes, and layout payloads.",
+          attachedToId: "module-model",
+          position: { x: 980, y: 400 },
+          size: { width: 218, height: 104 }
+        },
+        { id: "process-test-runner", projectId: project.id, kind: "process", name: "Run Verification", summary: "Runs typecheck, repository tests, route tests, and web shell tests against the self graph.", attachedToId: "module-test-suite", position: { x: 2300, y: 700 }, size: { width: 218, height: 104 } },
+        {
+          id: "dep-web-heroui",
+          projectId: project.id,
+          kind: "dependency",
+          name: "HeroUI",
+          summary: "Primary visual component library for fresh, accessible app chrome.",
+          attachedToId: "process-web-render",
+          position: { x: 330, y: 290 }
+        },
+        {
+          id: "dep-web-reactflow",
+          projectId: project.id,
+          kind: "dependency",
+          name: "React Flow",
+          summary: "Infinite canvas library for node, edge, drag, and resize interaction.",
+          attachedToId: "process-canvas-flow",
+          position: { x: 250, y: 560 }
+        },
+        {
+          id: "dep-server-sqlite",
+          projectId: project.id,
+          kind: "dependency",
+          name: "SQLite",
+          summary: "Local-first graph storage with simple reset and inspection behavior.",
+          attachedToId: "process-server-api",
+          position: { x: 920, y: 470 }
+        },
+        {
+          id: "dep-server-fastify",
+          projectId: project.id,
+          kind: "dependency",
+          name: "Fastify",
+          summary: "HTTP API runtime for projects, hierarchy, canvas, node detail, and self seed routes.",
+          attachedToId: "process-server-api",
+          position: { x: 920, y: 610 }
+        },
+        {
+          id: "dep-server-elk",
+          projectId: project.id,
+          kind: "dependency",
+          name: "ELK Layout",
+          summary: "Layered dataflow placement engine for automatic graph layout.",
+          attachedToId: "process-server-api",
+          position: { x: 920, y: 750 }
+        },
+        { id: "dep-model-zod", projectId: project.id, kind: "dependency", name: "Zod", summary: "Runtime schema validation for DTOs and request payloads.", attachedToId: "process-model-validate", position: { x: 1110, y: 540 } },
+        { id: "dep-tooling-vitest", projectId: project.id, kind: "dependency", name: "Vitest", summary: "Unit and integration test runner across workspace packages.", attachedToId: "process-test-runner", position: { x: 2310, y: 560 } },
+        {
+          id: "input-repo-root",
+          projectId: project.id,
+          kind: "input",
+          name: "Repository Root",
+          summary: "Local repository path represented by this self workspace graph.",
+          attachedToId: "framework-graphcode-self",
+          position: { x: -170, y: 110 }
+        },
+        {
+          id: "input-user-select",
+          projectId: project.id,
+          kind: "input",
+          name: "Hierarchy Selection",
+          summary: "User selection from the left tree chooses the active graph scope.",
+          attachedToId: "module-web",
+          position: { x: -180, y: 410 }
+        },
+        {
+          id: "input-canvas-api",
+          projectId: project.id,
+          kind: "input",
+          name: "Canvas API Payload",
+          summary: "Nodes, edges, details, and saved layout values returned by the local server.",
+          attachedToId: "module-workspace-canvas",
+          position: { x: -170, y: 700 }
+        },
+        {
+          id: "input-http-request",
+          projectId: project.id,
+          kind: "input",
+          name: "Browser API Request",
+          summary: "Local browser request for hierarchy, canvas scope, node details, or layout updates.",
+          attachedToId: "module-local-server",
+          position: { x: 300, y: 560 }
+        },
+        { id: "input-workspace-root", projectId: project.id, kind: "input", name: "Workspace Root Path", summary: "Absolute repository path posted to the workspace-open endpoint.", attachedToId: "object-workspace-runtime", position: { x: 500, y: 700 } },
+        {
+          id: "input-schema-change",
+          projectId: project.id,
+          kind: "input",
+          name: "Schema Intent",
+          summary: "Shared graph-model edits that define the frontend and backend contract.",
+          attachedToId: "module-model",
+          position: { x: 760, y: 520 }
+        },
+        {
+          id: "output-workspace-view",
+          projectId: project.id,
+          kind: "output",
+          name: "Workspace State",
+          summary: "Selected node details and active scope state used by the app shell.",
+          attachedToId: "module-web",
+          position: { x: 640, y: 430 }
+        },
+        {
+          id: "output-canvas-view",
+          projectId: project.id,
+          kind: "output",
+          name: "Canvas View",
+          summary: "Visible graph scope rendered as React Flow nodes and edges.",
+          attachedToId: "module-workspace-canvas",
+          position: { x: 560, y: 700 }
+        },
+        {
+          id: "output-sqlite-file",
+          projectId: project.id,
+          kind: "output",
+          name: "graphcode.sqlite",
+          summary: "Local SQLite database file containing graph state, revisions, and per-scope layouts.",
+          attachedToId: "module-local-server",
+          position: { x: 1080, y: 560 }
+        },
+        { id: "output-workspace-json", projectId: project.id, kind: "output", name: "workspace.json", summary: "Local workspace metadata written next to graphcode.sqlite.", attachedToId: "object-workspace-runtime", position: { x: 760, y: 700 } },
+        {
+          id: "output-typescript-types",
+          projectId: project.id,
+          kind: "output",
+          name: "Shared Types",
+          summary: "Zod schemas and TypeScript DTOs consumed by the local server and web app.",
+          attachedToId: "module-model",
+          position: { x: 1390, y: 520 }
+        },
+        {
+          id: "format-selection-node-id",
+          projectId: project.id,
+          kind: "format",
+          name: "node id",
+          summary: "Selection payload format.",
+          attachedToId: "input-user-select",
+          position: { x: -150, y: 540 },
+          size: { width: 132, height: 68 }
+        },
+        {
+          id: "format-canvas-json",
+          projectId: project.id,
+          kind: "format",
+          name: "CanvasGraph JSON",
+          summary: "Canvas payload DTO shape.",
+          attachedToId: "output-canvas-view",
+          position: { x: 570, y: 830 },
+          size: { width: 150, height: 68 }
+        },
+        {
+          id: "format-http-json",
+          projectId: project.id,
+          kind: "format",
+          name: "REST JSON",
+          summary: "Local API request/response format.",
+          attachedToId: "input-http-request",
+          position: { x: 310, y: 690 },
+          size: { width: 132, height: 68 }
+        },
+        {
+          id: "format-sqlite-schema",
+          projectId: project.id,
+          kind: "format",
+          name: "SQLite rows",
+          summary: "Persisted table row format.",
+          attachedToId: "output-sqlite-file",
+          position: { x: 1100, y: 690 },
+          size: { width: 132, height: 68 }
+        },
+        {
+          id: "format-zod-types",
+          projectId: project.id,
+          kind: "format",
+          name: "Zod DTOs",
+          summary: "Validated shared schema format.",
+          attachedToId: "output-typescript-types",
+          position: { x: 1400, y: 650 },
+          size: { width: 132, height: 68 }
+        },
+        { id: "format-open-workspace-result", projectId: project.id, kind: "format", name: "OpenWorkspaceResult", summary: "Workspace open/create/missing response union.", attachedToId: "output-workspace-json", position: { x: 780, y: 830 }, size: { width: 180, height: 76 } },
+        { id: "database-graphcode-sqlite", projectId: project.id, kind: "database", name: ".graphcode SQLite", summary: "Generated local database that stores the self-repo graph.", attachedToId: "module-local-server", sourcePath: ".graphcode/graphcode.sqlite", position: { x: 1220, y: 420 } },
+        { id: "api-local-http", projectId: project.id, kind: "api", name: "Local REST API", summary: "HTTP API consumed by the Vite web app.", attachedToId: "module-routes", sourcePath: "apps/local-server/src/routes.ts", position: { x: 710, y: 700 } },
+        { id: "config-db-path", projectId: project.id, kind: "config", name: "GRAPHCODE_DB_PATH", summary: "Optional override for the SQLite database path.", attachedToId: "module-local-server", sourcePath: "apps/local-server/src/config.ts", position: { x: 1240, y: 560 } },
+        { id: "environment-node", projectId: project.id, kind: "environment", name: "Node.js runtime", summary: "Local Node and pnpm workspace runtime used by all packages.", attachedToId: "module-dev-tooling", sourcePath: "package.json", position: { x: 2240, y: 420 } },
+        { id: "command-seed-self", projectId: project.id, kind: "command", name: "pnpm seed", summary: "Rebuilds .graphcode/graphcode.sqlite from the curated self-repo seed.", attachedToId: "module-cli-seed", sourcePath: "package.json", position: { x: 1880, y: 700 } },
+        { id: "command-test", projectId: project.id, kind: "command", name: "pnpm test", summary: "Runs all workspace Vitest suites.", attachedToId: "module-test-suite", sourcePath: "package.json", position: { x: 2240, y: 980 } },
+        { id: "command-typecheck", projectId: project.id, kind: "command", name: "pnpm typecheck", summary: "Runs TypeScript no-emit checks across workspace packages.", attachedToId: "module-test-suite", sourcePath: "package.json", position: { x: 2500, y: 980 } },
+        { id: "file-pnpm-workspace", projectId: project.id, kind: "file", name: "pnpm-workspace.yaml", summary: "Workspace package discovery file used to resolve the repo root.", attachedToId: "module-workspace-config", sourcePath: "pnpm-workspace.yaml", position: { x: 2620, y: 700 } },
+        { id: "artifact-web-dist", projectId: project.id, kind: "artifact", name: "apps/web/dist", summary: "Generated Vite output kept out of source control.", attachedToId: "module-workspace-config", sourcePath: "apps/web/dist", position: { x: 2820, y: 700 } },
+        { id: "event-seed-rebuild", projectId: project.id, kind: "event", name: "Self Seed Rebuild", summary: "Explicit developer action that refreshes the local self workspace graph.", attachedToId: "function-seed-cli", position: { x: 2040, y: 700 } },
+        { id: "secret-placeholder", projectId: project.id, kind: "secret", name: "No Secrets Stored", summary: "Synthetic safety block proving secret styling without storing credentials.", attachedToId: "module-local-server", position: { x: 1250, y: 700 } },
+        { id: "custom-self-fixture", projectId: project.id, kind: "custom", name: "Self Workspace Fixture", summary: "Custom test scenario block proving custom type support in the seeded database.", attachedToId: "module-dev-tooling", customTypeId: "custom-type-test-scenario", position: { x: 2440, y: 420 } }
+      ];
+
+      for (const node of nodes) {
+        this.createNode(enrichSelfSeedNode(node));
+      }
+
+      const reuses: NodeReuseMutation[] = [
+        {
+          scopeNodeId: "module-web",
+          nodeId: "object-graph-tag",
+          label: "Reused tag DTO",
+          context: "The frontend inspector consumes GraphTag payloads without owning the canonical schema node."
+        },
+        {
+          scopeNodeId: "module-local-server",
+          nodeId: "object-graph-tag",
+          label: "Reused tag DTO",
+          context: "The repository and routes persist GraphTag rows while sharing the canonical graph-model contract."
+        },
+        {
+          scopeNodeId: "module-local-server",
+          nodeId: "object-node-reuse",
+          label: "Reuse placement DTO",
+          context: "The backend stores reusable placements while the canonical schema remains in graph-model."
+        },
+        {
+          scopeNodeId: "module-web",
+          nodeId: "object-node-reuse",
+          label: "Reuse placement DTO",
+          context: "The web canvas can display reused canonical blocks in additional module scopes."
+        },
+        {
+          scopeNodeId: "module-web",
+          nodeId: "function-normalize-tag-name",
+          label: "Shared tag utility",
+          context: "The inspector uses the same normalized tag semantics as the repository even though the source implementation is backend-local for now."
+        },
+        {
+          scopeNodeId: "module-workspace-canvas",
+          nodeId: "function-measure-node-layout",
+          label: "Layout sizing utility",
+          context: "The canvas behavior depends on server-side measured sizes when auto-layout recomputes the scope."
+        }
+      ];
+      for (const reuse of reuses) {
+        this.createNodeReuse(project.id, reuse);
+      }
+
+      const dependencies: NewDependencyDetails[] = [
+        {
+          nodeId: "dep-web-heroui",
+          dependencyKind: "package",
+          spec: "@heroui/react",
+          version: "^3",
+          notes: "Used for top bar, controls, buttons, and app chrome."
+        },
+        {
+          nodeId: "dep-web-reactflow",
+          dependencyKind: "package",
+          spec: "@xyflow/react",
+          version: "^12",
+          notes: "Owns the whiteboard interaction model."
+        },
+        {
+          nodeId: "dep-server-sqlite",
+          dependencyKind: "database",
+          spec: "better-sqlite3",
+          version: "^11",
+          notes: "Local embedded database for the v1 backend."
+        },
+        {
+          nodeId: "dep-server-fastify",
+          dependencyKind: "runtime",
+          spec: "fastify",
+          version: "^5",
+          notes: "HTTP API for the local browser frontend."
+        },
+        {
+          nodeId: "dep-server-elk",
+          dependencyKind: "package",
+          spec: "elkjs",
+          version: "0.11.1",
+          notes: "Layered auto-layout engine for dataflow scopes."
+        },
+        {
+          nodeId: "dep-model-zod",
+          dependencyKind: "package",
+          spec: "zod",
+          version: "^3.25.67",
+          notes: "Runtime validation for graph DTOs and route payloads."
+        },
+        {
+          nodeId: "dep-tooling-vitest",
+          dependencyKind: "tool",
+          spec: "vitest",
+          version: "^3.2.4",
+          notes: "Workspace test runner used by package scripts."
+        }
+      ];
+      for (const dependency of dependencies) {
+        this.createDependencyDetails(dependency);
+      }
+
+      const io: NewIoDetails[] = [
+        {
+          nodeId: "input-repo-root",
+          ioKind: "file",
+          channel: rootPath,
+          schemaHint: "absolute path",
+          notes: "Concrete repository root for this self workspace."
+        },
+        {
+          nodeId: "input-user-select",
+          ioKind: "user",
+          channel: "left hierarchy tree",
+          schemaHint: "node id",
+          notes: "Changes active canvas root."
+        },
+        {
+          nodeId: "input-canvas-api",
+          ioKind: "api",
+          channel: "GET /api/projects/:projectId/canvas",
+          schemaHint: "CanvasGraph",
+          notes: "Backend canvas scope response."
+        },
+        {
+          nodeId: "input-http-request",
+          ioKind: "api",
+          channel: "local HTTP",
+          schemaHint: "REST JSON",
+          notes: "Browser-to-server API boundary."
+        },
+        {
+          nodeId: "input-schema-change",
+          ioKind: "artifact",
+          channel: "packages/graph-model",
+          schemaHint: "Zod schema",
+          notes: "Shared graph contract input."
+        },
+        {
+          nodeId: "output-workspace-view",
+          ioKind: "artifact",
+          channel: "React state",
+          schemaHint: "selected detail + scope id",
+          notes: "Primary app shell state output."
+        },
+        {
+          nodeId: "output-canvas-view",
+          ioKind: "artifact",
+          channel: "React Flow viewport",
+          schemaHint: "nodes[] + edges[]",
+          notes: "Primary visual output of the web app."
+        },
+        {
+          nodeId: "output-sqlite-file",
+          ioKind: "database",
+          channel: ".graphcode/graphcode.sqlite",
+          schemaHint: "SQLite",
+          notes: "Local persistence boundary."
+        },
+        {
+          nodeId: "input-workspace-root",
+          ioKind: "file",
+          channel: "POST /api/workspaces/open",
+          schemaHint: "absolute path",
+          notes: "Path supplied by the workspace dialog."
+        },
+        {
+          nodeId: "output-workspace-json",
+          ioKind: "artifact",
+          channel: ".graphcode/workspace.json",
+          schemaHint: "workspace metadata",
+          notes: "Companion metadata for opened workspaces."
+        },
+        {
+          nodeId: "output-typescript-types",
+          ioKind: "artifact",
+          channel: "TypeScript compiler",
+          schemaHint: "types + DTOs",
+          notes: "Validated shared output."
+        }
+      ];
+      for (const ioDetail of io) {
+        this.createIoDetails(ioDetail);
+      }
+
+      const processDetails: NewProcessDetails[] = [
+        {
+          nodeId: "process-web-render",
+          processKind: "render",
+          trigger: "selected scope changes",
+          notes: "Coordinates the left tree, canvas, and inspector."
+        },
+        {
+          nodeId: "process-canvas-flow",
+          processKind: "render",
+          trigger: "CanvasGraph response",
+          notes: "Builds React Flow nodes, edges, resize handles, and drag handlers."
+        },
+        {
+          nodeId: "process-server-api",
+          processKind: "orchestrate",
+          trigger: "HTTP request",
+          notes: "Builds next-layer graph payloads and persists layout edits."
+        },
+        {
+          nodeId: "process-persist-graph",
+          processKind: "persist",
+          trigger: "node, layout, or seed write",
+          notes: "Uses better-sqlite3 statements under repository validation."
+        },
+        {
+          nodeId: "process-model-validate",
+          processKind: "validate",
+          trigger: "schema change",
+          notes: "Validates graph DTOs and enum changes across packages."
+        },
+        {
+          nodeId: "process-test-runner",
+          processKind: "validate",
+          trigger: "developer command",
+          notes: "Runs repository, route, graph-model, and web shell checks."
+        }
+      ];
+      for (const process of processDetails) {
+        this.createProcessDetails(process);
+      }
+
+      const formatDetails: NewFormatDetails[] = [
+        {
+          nodeId: "format-selection-node-id",
+          formatKind: "type",
+          spec: "string node id",
+          example: "module-web",
+          notes: "Identifier used for selection and scope changes."
+        },
+        {
+          nodeId: "format-canvas-json",
+          formatKind: "schema",
+          spec: "CanvasGraph JSON",
+          example: "{ nodes, edges, dependencies, io, processes, formats }",
+          notes: "Frontend canvas DTO."
+        },
+        {
+          nodeId: "format-http-json",
+          formatKind: "protocol",
+          spec: "REST JSON",
+          example: "PATCH /api/nodes/:nodeId/layout",
+          notes: "Browser/server transport format."
+        },
+        {
+          nodeId: "format-sqlite-schema",
+          formatKind: "schema",
+          spec: "SQLite rows",
+          example: "graph_node_layouts",
+          notes: "Persisted storage format."
+        },
+        {
+          nodeId: "format-zod-types",
+          formatKind: "schema",
+          spec: "Zod object schemas",
+          example: "graphNodeSchema",
+          notes: "Shared validation format."
+        },
+        {
+          nodeId: "format-open-workspace-result",
+          formatKind: "type",
+          spec: "OpenWorkspaceResult union",
+          example: "{ status: 'opened', project, graphcodePath }",
+          notes: "Route response shape for workspace open/create/missing states."
+        }
+      ];
+      for (const format of formatDetails) {
+        this.createFormatDetails(format);
+      }
+
+      const basicDetails: NewBasicBlockDetails[] = [
+        { nodeId: "database-graphcode-sqlite", basicKind: "database", key: ".graphcode/graphcode.sqlite", valueHint: "SQLite", required: true, notes: "Generated local database, ignored by git." },
+        { nodeId: "api-local-http", basicKind: "api", key: "http://127.0.0.1:3010", valueHint: "Fastify", required: true, notes: "Local-only API for the browser workspace." },
+        { nodeId: "config-db-path", basicKind: "config", key: "GRAPHCODE_DB_PATH", valueHint: ".graphcode/graphcode.sqlite", required: false, notes: "Optional override; default resolves from the repo root." },
+        { nodeId: "environment-node", basicKind: "environment", key: "Node.js + pnpm", valueHint: "pnpm@10.33.0", required: true, notes: "Runtime declared in packageManager." },
+        { nodeId: "command-seed-self", basicKind: "command", key: "pnpm seed", valueHint: "tsx src/cli/seed.ts", required: true, notes: "Rebuilds the self workspace graph." },
+        { nodeId: "command-test", basicKind: "command", key: "pnpm test", valueHint: "vitest run", required: true, notes: "Runs workspace tests." },
+        { nodeId: "command-typecheck", basicKind: "command", key: "pnpm typecheck", valueHint: "tsc --noEmit", required: true, notes: "Runs workspace type checks." },
+        { nodeId: "file-pnpm-workspace", basicKind: "file", key: "pnpm-workspace.yaml", valueHint: "workspace root marker", required: true, notes: "Used by resolveRepoRoot." },
+        { nodeId: "artifact-web-dist", basicKind: "artifact", key: "apps/web/dist", valueHint: "generated Vite output", required: false, notes: "Ignored generated artifact." },
+        { nodeId: "event-seed-rebuild", basicKind: "event", key: "Self seed rebuild", valueHint: "manual dev action", required: false, notes: "Captures the reset behavior as a graph event." },
+        { nodeId: "secret-placeholder", basicKind: "secret", key: "NO_SECRET_VALUE", valueHint: "synthetic placeholder", required: false, notes: "No credentials are stored in this seed." },
+        { nodeId: "custom-self-fixture", basicKind: "custom", key: "self-workspace-fixture", valueHint: "curated graph", required: false, notes: "Exercises custom block types." }
+      ];
+      for (const basicDetail of basicDetails) {
+        this.createBasicBlockDetails(basicDetail);
+      }
+
+      const edges: NewGraphEdge[] = [
+        { id: "edge-web-imports-model", projectId: project.id, kind: "imports", sourceNodeId: "module-web", targetNodeId: "module-model", label: "shared DTOs" },
+        { id: "edge-server-imports-model", projectId: project.id, kind: "imports", sourceNodeId: "module-local-server", targetNodeId: "module-model", label: "schemas and types" },
+        { id: "edge-web-uses-server", projectId: project.id, kind: "uses", sourceNodeId: "module-web", targetNodeId: "module-local-server", label: "local REST API" },
+        { id: "edge-server-uses-sqlite", projectId: project.id, kind: "uses", sourceNodeId: "module-local-server", targetNodeId: "database-graphcode-sqlite", label: "persistence" },
+        { id: "edge-routes-call-repository", projectId: project.id, kind: "calls", sourceNodeId: "function-register-routes", targetNodeId: "object-graph-repository", label: "API handlers" },
+        { id: "edge-app-calls-api", projectId: project.id, kind: "calls", sourceNodeId: "function-app", targetNodeId: "function-get-canvas-client", label: "load scope" },
+        { id: "edge-seed-cli-calls-seed", projectId: project.id, kind: "calls", sourceNodeId: "function-seed-cli", targetNodeId: "function-seed-self-graph", label: "rebuild workspace" },
+        { id: "edge-graph-node-impacts-detail", projectId: project.id, kind: "impacts", sourceNodeId: "object-graph-node", targetNodeId: "object-node-detail", label: "inspector contract" },
+        { id: "edge-canvas-owns-flow", projectId: project.id, kind: "owns", sourceNodeId: "module-workspace-canvas", targetNodeId: "function-to-flow-edges", label: "edge rendering" },
+        { id: "edge-repository-owns-seed", projectId: project.id, kind: "owns", sourceNodeId: "object-graph-repository", targetNodeId: "function-seed-self-graph", label: "seed method" },
+        { id: "flow-web-input-process", projectId: project.id, kind: "flows", sourceNodeId: "input-user-select", targetNodeId: "process-web-render", label: "selection" },
+        { id: "flow-web-process-child", projectId: project.id, kind: "flows", sourceNodeId: "process-web-render", targetNodeId: "module-workspace-canvas", label: "active scope" },
+        { id: "flow-web-child-output", projectId: project.id, kind: "flows", sourceNodeId: "module-workspace-canvas", targetNodeId: "output-workspace-view", label: "view state" },
+        { id: "flow-canvas-input-process", projectId: project.id, kind: "flows", sourceNodeId: "input-canvas-api", targetNodeId: "process-canvas-flow", label: "canvas DTO" },
+        { id: "flow-canvas-process-function", projectId: project.id, kind: "flows", sourceNodeId: "process-canvas-flow", targetNodeId: "function-to-flow-edges", label: "render edges" },
+        { id: "flow-canvas-function-output", projectId: project.id, kind: "flows", sourceNodeId: "function-to-flow-edges", targetNodeId: "output-canvas-view", label: "React Flow" },
+        { id: "flow-server-input-process", projectId: project.id, kind: "flows", sourceNodeId: "input-http-request", targetNodeId: "process-server-api", label: "request" },
+        { id: "flow-server-process-function", projectId: project.id, kind: "flows", sourceNodeId: "process-server-api", targetNodeId: "function-get-canvas-graph", label: "canvas response" },
+        { id: "flow-server-process-output", projectId: project.id, kind: "flows", sourceNodeId: "process-server-api", targetNodeId: "output-sqlite-file", label: "layout rows" },
+        { id: "flow-workspace-open-input", projectId: project.id, kind: "flows", sourceNodeId: "input-workspace-root", targetNodeId: "function-open-workspace", label: "open path" },
+        { id: "flow-workspace-open-output", projectId: project.id, kind: "flows", sourceNodeId: "function-open-workspace", targetNodeId: "output-workspace-json", label: "metadata" },
+        { id: "flow-seed-command-function", projectId: project.id, kind: "flows", sourceNodeId: "command-seed-self", targetNodeId: "function-seed-cli", label: "executes" },
+        { id: "flow-seed-function-db", projectId: project.id, kind: "flows", sourceNodeId: "function-seed-self-graph", targetNodeId: "database-graphcode-sqlite", label: "writes rows" },
+        { id: "flow-model-input-process", projectId: project.id, kind: "flows", sourceNodeId: "input-schema-change", targetNodeId: "process-model-validate", label: "schema" },
+        { id: "flow-model-process-node", projectId: project.id, kind: "flows", sourceNodeId: "process-model-validate", targetNodeId: "object-graph-node", label: "node DTO" },
+        { id: "flow-model-process-detail", projectId: project.id, kind: "flows", sourceNodeId: "process-model-validate", targetNodeId: "object-node-detail", label: "detail DTO" },
+        { id: "flow-model-detail-output", projectId: project.id, kind: "flows", sourceNodeId: "object-node-detail", targetNodeId: "output-typescript-types", label: "types" },
+        { id: "flow-test-command-process", projectId: project.id, kind: "flows", sourceNodeId: "command-test", targetNodeId: "process-test-runner", label: "tests" },
+        { id: "format-selection-edge", projectId: project.id, kind: "describes_format", sourceNodeId: "input-user-select", targetNodeId: "format-selection-node-id", label: "format" },
+        { id: "format-canvas-edge", projectId: project.id, kind: "describes_format", sourceNodeId: "output-canvas-view", targetNodeId: "format-canvas-json", label: "format" },
+        { id: "format-http-edge", projectId: project.id, kind: "describes_format", sourceNodeId: "input-http-request", targetNodeId: "format-http-json", label: "format" },
+        { id: "format-sqlite-edge", projectId: project.id, kind: "describes_format", sourceNodeId: "output-sqlite-file", targetNodeId: "format-sqlite-schema", label: "format" },
+        { id: "format-zod-edge", projectId: project.id, kind: "describes_format", sourceNodeId: "output-typescript-types", targetNodeId: "format-zod-types", label: "format" },
+        { id: "format-workspace-edge", projectId: project.id, kind: "describes_format", sourceNodeId: "output-workspace-json", targetNodeId: "format-open-workspace-result", label: "format" }
+      ];
+      for (const edge of edges) {
+        this.createEdge(enrichSelfSeedEdge(edge));
+      }
+
+      const layouts: LayoutPatch[] = [
+        { scopeNodeId: "framework-graphcode-self", position: { x: 40, y: 60 }, size: { width: 260, height: 136 } },
+        { scopeNodeId: "framework-graphcode-self", position: { x: 360, y: 60 }, size: { width: 260, height: 136 } },
+        { scopeNodeId: "framework-graphcode-self", position: { x: 680, y: 60 }, size: { width: 260, height: 136 } }
+      ];
+      const frameworkLayoutNodeIds = ["module-web", "module-local-server", "module-model"];
+      for (const [index, nodeId] of frameworkLayoutNodeIds.entries()) {
+        this.upsertNodeLayout(nodeId, {
+          scopeNodeId: layouts[index].scopeNodeId,
+          position: layouts[index].position,
+          size: layouts[index].size
+        });
+      }
+
+      for (const [index, nodeId] of ["module-runtime", "module-routes", "module-db-repository", "module-db-schema", "module-layout", "module-cli-seed"].entries()) {
+        this.upsertNodeLayout(nodeId, {
+          scopeNodeId: "module-local-server",
+          position: { x: 80 + index * 260, y: 90 },
+          size: { width: 250, height: 128 }
+        });
+      }
+
+      for (const [index, nodeId] of ["process-server-api", "input-http-request", "output-sqlite-file", "database-graphcode-sqlite", "config-db-path", "command-seed-self"].entries()) {
+        this.upsertNodeLayout(nodeId, {
+          scopeNodeId: "module-local-server",
+          position: { x: 80 + index * 240, y: 300 },
+          size: { width: 224, height: 112 }
+        });
+      }
+
+      for (const [index, nodeId] of ["ui-app-shell", "ui-workspace-canvas", "ui-hierarchy-tree", "ui-inspector", "ui-block-editor", "ui-edge-editor", "ui-boundary-editor"].entries()) {
+        this.upsertNodeLayout(nodeId, {
+          scopeNodeId: "website-web-workspace",
+          position: { x: 70 + (index % 4) * 280, y: 100 + Math.floor(index / 4) * 190 },
+          size: { width: 244, height: 124 }
+        });
+      }
+
+      const boundaries: NewGraphBoundary[] = [
+        {
+          id: "boundary-frontend",
+          projectId: project.id,
+          scopeNodeId: "framework-graphcode-self",
+          name: "Frontend",
+          summary: "React workspace modules",
+          color: "#2563eb",
+          codeContext:
+            "Boundary grouping for the user-facing web workspace. It should contain the React application surface that loads projects, renders hierarchy and canvas state, and sends edit requests to the local API.",
+          position: { x: 20, y: 20 },
+          size: { width: 300, height: 210 }
+        },
+        {
+          id: "boundary-backend",
+          projectId: project.id,
+          scopeNodeId: "framework-graphcode-self",
+          name: "Backend",
+          summary: "Local API and persistence",
+          color: "#059669",
+          codeContext:
+            "Boundary grouping for the local Fastify and SQLite backend. It marks the server-side modules that own workspace opening, route handling, graph persistence, layout, and deterministic self seeding.",
+          position: { x: 330, y: 20 },
+          size: { width: 330, height: 210 }
+        },
+        {
+          id: "boundary-shared-model",
+          projectId: project.id,
+          scopeNodeId: "framework-graphcode-self",
+          name: "Shared Model",
+          summary: "Typed graph contract",
+          color: "#7c3aed",
+          codeContext:
+            "Boundary grouping for the shared DTO and schema package. Edits here define the contract that both the local server and React client must agree on, so tests should cover parsing and serialized payload shape.",
+          position: { x: 650, y: 20 },
+          size: { width: 330, height: 210 }
+        },
+        {
+          id: "boundary-tooling",
+          projectId: project.id,
+          scopeNodeId: "framework-graphcode-self",
+          name: "Tooling",
+          summary: "Scripts, tests, and outputs",
+          color: "#ca8a04",
+          codeContext:
+            "Boundary grouping for scripts, tests, generated outputs, package configuration, and developer commands. It is intentionally separate from product runtime modules so repo hygiene and verification behavior can be tested.",
+          position: { x: 2240, y: 260 },
+          size: { width: 720, height: 260 }
+        },
+        {
+          id: "boundary-backend-internals",
+          projectId: project.id,
+          scopeNodeId: "module-local-server",
+          name: "Backend Internals",
+          summary: "Server implementation layers",
+          color: "#dc2626",
+          codeContext:
+            "Module-local boundary covering runtime, routes, repository, schema, layout, seed, and selected server attachments. Use it to test nested boundary persistence, membership after layout moves, and inspector context for backend work.",
+          position: { x: 40, y: 40 },
+          size: { width: 1540, height: 420 }
+        },
+        {
+          id: "boundary-web-ui-components",
+          projectId: project.id,
+          scopeNodeId: "website-web-workspace",
+          name: "Frontend UI Components",
+          summary: "React component workbench",
+          color: "#db2777",
+          codeContext:
+            "Website-scope boundary covering AppShell, WorkspaceCanvas, HierarchyTree, Inspector, and editor dialogs. Use it to test boundary groups in the left hierarchy and style controls for frontend UI modules.",
+          position: { x: 35, y: 55 },
+          size: { width: 1160, height: 410 }
+        }
+      ];
+      for (const boundary of boundaries) {
+        this.createBoundaryRow(boundary);
+      }
+
+      const nodeTags: Array<{ nodeId: string; tags: TagMutation[] }> = [
+        { nodeId: "module-web", tags: [{ name: "frontend", color: "#2563eb" }, { name: "workspace" }] },
+        { nodeId: "module-local-server", tags: [{ name: "backend", color: "#059669" }, { name: "persistence" }] },
+        { nodeId: "module-model", tags: [{ name: "shared", color: "#7c3aed" }, { name: "contract" }] },
+        { nodeId: "object-graph-tag", tags: [{ name: "taggable", color: "#be185d" }, { name: "shared" }] },
+        { nodeId: "object-node-reuse", tags: [{ name: "reusable", color: "#0f766e" }, { name: "canvas" }] },
+        { nodeId: "function-measure-node-layout", tags: [{ name: "layout", color: "#ca8a04" }, { name: "sizing" }] }
+      ];
+      for (const item of nodeTags) {
+        this.setNodeTags(item.nodeId, { tags: item.tags });
+      }
+
+      const edgeTags: Array<{ edgeId: string; tags: TagMutation[] }> = [
+        { edgeId: "edge-web-uses-server", tags: [{ name: "api", color: "#0891b2" }, { name: "critical" }] },
+        { edgeId: "edge-server-imports-model", tags: [{ name: "shared" }, { name: "contract" }] },
+        { edgeId: "flow-server-process-output", tags: [{ name: "persistence" }, { name: "layout" }] }
+      ];
+      for (const item of edgeTags) {
+        this.setEdgeTags(item.edgeId, { tags: item.tags });
+      }
+
+      const boundaryTags: Array<{ boundaryId: string; tags: TagMutation[] }> = [
+        { boundaryId: "boundary-frontend", tags: [{ name: "frontend", color: "#2563eb" }] },
+        { boundaryId: "boundary-backend", tags: [{ name: "backend", color: "#059669" }] },
+        { boundaryId: "boundary-shared-model", tags: [{ name: "shared", color: "#7c3aed" }] },
+        { boundaryId: "boundary-web-ui-components", tags: [{ name: "ui", color: "#db2777" }, { name: "frontend" }] }
+      ];
+      for (const item of boundaryTags) {
+        this.setBoundaryTags(item.boundaryId, { tags: item.tags });
+      }
+
+      this.db
+        .prepare(
+          `
+          INSERT INTO graph_revisions (id, project_id, revision, note)
+          VALUES
+            ('self-revision-1', @projectId, 1, 'Created deterministic self-repo GraphCode workspace seed'),
+            ('self-revision-2', @projectId, 2, 'Added full node/detail/edge coverage for local testing'),
+            ('self-revision-3', @projectId, 3, 'Added edge context, boundary coverage, tags, reuse placements, and layout sizing examples')
+        `
+        )
+        .run({ projectId: project.id });
+
+      return project;
+    });
+
+    return seed();
+  }
+
+  private buildCanvasGraph(project: Project, allNodes: GraphNode[], scopeNodeId: string | null, includeAttachments: boolean, applySavedLayout: boolean): CanvasGraph {
+    const scopeNode = scopeNodeId ? allNodes.find((node) => node.id === scopeNodeId) ?? null : null;
+    const allEdges = this.listEdges(project.id);
+    const includedIds = this.collectCanvasNodeIds(project.id, allNodes, scopeNode, includeAttachments);
+    const scopeLabel = scopeNode?.name ?? project.name;
+    const scopedNodes = allNodes.filter((node) => includedIds.has(node.id));
+    const nodes = applySavedLayout && scopeNode ? this.applyScopeLayouts(project.id, scopeNode.id, scopedNodes) : scopedNodes;
+    const edges = allEdges.filter((edge) => includedIds.has(edge.sourceNodeId) && includedIds.has(edge.targetNodeId));
+    const nodeIds = nodes.map((node) => node.id);
+    const reuses = scopeNode ? this.listReusesForScope(project.id, scopeNode.id).filter((reuse) => includedIds.has(reuse.nodeId)) : [];
+
+    return {
+      project,
+      rootNodeId: scopeNode?.id ?? null,
+      scopeNodeId: scopeNode?.id ?? null,
+      scopeLabel,
+      nodes,
+      edges,
+      boundaries: scopeNode ? this.listBoundariesForScope(project.id, scopeNode.id) : [],
+      dependencies: this.getDependencyDetailsForNodes(nodeIds),
+      io: this.getIoDetailsForNodes(nodeIds),
+      processes: this.getProcessDetailsForNodes(nodeIds),
+      formats: this.getFormatDetailsForNodes(nodeIds),
+      basicDetails: this.getBasicBlockDetailsForNodes(nodeIds),
+      customTypes: this.listCustomBlockTypes(project.id),
+      nodeTypeStyles: this.listNodeTypeStyles(project.id),
+      reuses
+    };
+  }
+
+  private collectCanvasNodeIds(projectId: string, allNodes: GraphNode[], scopeNode: GraphNode | null, includeAttachments: boolean): Set<string> {
+    if (!scopeNode) {
+      return new Set(allNodes.filter((node) => isDomainNodeKind(node.kind) && !node.parentId).map((node) => node.id));
+    }
+
+    const included = new Set<string>();
+    const directChildren = allNodes.filter((node) => isDomainNodeKind(node.kind) && node.parentId === scopeNode.id);
+    const primaryNodes = directChildren.length > 0 ? directChildren : scopeNode.kind === "function" || scopeNode.kind === "object" ? [scopeNode] : [];
+
+    for (const node of primaryNodes) {
+      included.add(node.id);
+    }
+
+    for (const reuse of this.listReusesForScope(projectId, scopeNode.id)) {
+      included.add(reuse.nodeId);
+    }
+
+    if (!includeAttachments || scopeNode.kind === "framework") {
+      return included;
+    }
+
+    for (const node of allNodes) {
+      if (node.attachedToId === scopeNode.id && isAttachmentNodeKind(node.kind)) {
+        included.add(node.id);
+      }
+    }
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+      for (const node of allNodes) {
+        if (!node.attachedToId || included.has(node.id)) {
+          continue;
+        }
+        if (isAttachmentNodeKind(node.kind) && included.has(node.attachedToId)) {
+          included.add(node.id);
+          changed = true;
+        }
+      }
+    }
+
+    return included;
+  }
+
+  private resolveScopeNode(project: Project, allNodes: GraphNode[], rootNodeId: string | null): GraphNode | null {
+    if (rootNodeId) {
+      const node = allNodes.find((candidate) => candidate.id === rootNodeId);
+      if (!node) {
+        throw notFound(`Root node not found: ${rootNodeId}`);
+      }
+      if (!isDomainNodeKind(node.kind)) {
+        throw validationError("Canvas root must be a domain node.");
+      }
+      return node;
+    }
+
+    return (
+      allNodes.find((node) => node.kind === "framework" && node.projectId === project.id) ??
+      allNodes.find((node) => isDomainNodeKind(node.kind) && !node.parentId) ??
+      null
+    );
+  }
+
+  private listNodes(projectId: string): GraphNode[] {
+    const rows = this.db.prepare("SELECT * FROM graph_nodes WHERE project_id = ? ORDER BY kind ASC, name ASC").all(projectId) as NodeRow[];
+    const childCounts = buildChildCountMap(rows);
+    const tagsByNodeId = this.getTagsForEntityIds("node", rows.map((row) => row.id));
+    return rows.map((row) => mapNode(row, childCounts.get(row.id) ?? 0, tagsByNodeId.get(row.id) ?? []));
+  }
+
+  private listEdges(projectId: string): GraphEdge[] {
+    const rows = this.db.prepare("SELECT * FROM graph_edges WHERE project_id = ? ORDER BY kind ASC, id ASC").all(projectId) as EdgeRow[];
+    const tagsByEdgeId = this.getTagsForEntityIds("edge", rows.map((row) => row.id));
+    return rows.map((row) => mapEdge(row, tagsByEdgeId.get(row.id) ?? []));
+  }
+
+  private listBoundariesForScope(projectId: string, scopeNodeId: string): GraphBoundary[] {
+    const rows = this.db
+      .prepare("SELECT * FROM graph_boundaries WHERE project_id = ? AND scope_node_id = ? ORDER BY name ASC")
+      .all(projectId, scopeNodeId) as BoundaryRow[];
+    return rows.map((row) => this.mapBoundary(row));
+  }
+
+  private listReusesForScope(projectId: string, scopeNodeId: string): GraphNodeReuse[] {
+    const rows = this.db
+      .prepare("SELECT * FROM graph_node_reuses WHERE project_id = ? AND scope_node_id = ? ORDER BY label ASC, node_id ASC")
+      .all(projectId, scopeNodeId) as NodeReuseRow[];
+    return rows.map(mapNodeReuse);
+  }
+
+  private listReusesForNode(projectId: string, nodeId: string): GraphNodeReuse[] {
+    const rows = this.db
+      .prepare("SELECT * FROM graph_node_reuses WHERE project_id = ? AND node_id = ? ORDER BY scope_node_id ASC")
+      .all(projectId, nodeId) as NodeReuseRow[];
+    return rows.map(mapNodeReuse);
+  }
+
+  private upsertTags(projectId: string, inputTags: TagMutation[]): GraphTag[] {
+    this.getProject(projectId);
+    const normalizedInputs = new Map<string, TagMutation>();
+    for (const input of inputTags) {
+      const name = input.name.trim();
+      if (!name) {
+        continue;
+      }
+      normalizedInputs.set(normalizeTagName(name), { name, color: input.color });
+    }
+
+    const tags: GraphTag[] = [];
+    for (const [normalizedName, input] of normalizedInputs) {
+      const id = `tag-${hashId(`${projectId}:${normalizedName}`)}`;
+      this.db
+        .prepare(
+          `
+          INSERT INTO graph_tags (id, project_id, name, normalized_name, color, created_at, updated_at)
+          VALUES (@id, @projectId, @name, @normalizedName, @color, datetime('now'), datetime('now'))
+          ON CONFLICT(project_id, normalized_name)
+          DO UPDATE SET
+            name = excluded.name,
+            color = CASE WHEN @inputColor IS NULL THEN graph_tags.color ELSE excluded.color END,
+            updated_at = datetime('now')
+        `
+        )
+        .run({
+          id,
+          projectId,
+          name: input.name,
+          normalizedName,
+          color: input.color ?? defaultTagColor(normalizedName),
+          inputColor: input.color ?? null
+        });
+      const row = this.db
+        .prepare("SELECT * FROM graph_tags WHERE project_id = ? AND normalized_name = ?")
+        .get(projectId, normalizedName) as TagRow;
+      tags.push(mapTag(row));
+    }
+    return tags;
+  }
+
+  private replaceTagLinks(kind: TagLinkKind, entityId: string, tagIds: string[]): void {
+    const metadata = TAG_LINK_METADATA[kind];
+    const save = this.db.transaction(() => {
+      this.db.prepare(`DELETE FROM ${metadata.tableName} WHERE ${metadata.entityColumn} = ?`).run(entityId);
+      const insert = this.db.prepare(`INSERT INTO ${metadata.tableName} (${metadata.entityColumn}, tag_id) VALUES (?, ?)`);
+      for (const tagId of tagIds) {
+        insert.run(entityId, tagId);
+      }
+    });
+    save();
+  }
+
+  private getTagsForEntity(kind: TagLinkKind, entityId: string): GraphTag[] {
+    return this.getTagsForEntityIds(kind, [entityId]).get(entityId) ?? [];
+  }
+
+  private getTagsForEntityIds(kind: TagLinkKind, entityIds: string[]): Map<string, GraphTag[]> {
+    const uniqueEntityIds = [...new Set(entityIds)].filter(Boolean);
+    if (uniqueEntityIds.length === 0) {
+      return new Map();
+    }
+
+    const metadata = TAG_LINK_METADATA[kind];
+    const placeholders = uniqueEntityIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `
+        SELECT
+          link.${metadata.entityColumn} AS entity_id,
+          tag.id,
+          tag.project_id,
+          tag.name,
+          tag.normalized_name,
+          tag.color,
+          tag.created_at,
+          tag.updated_at
+        FROM ${metadata.tableName} AS link
+        JOIN graph_tags AS tag ON tag.id = link.tag_id
+        WHERE link.${metadata.entityColumn} IN (${placeholders})
+        ORDER BY tag.name COLLATE NOCASE ASC
+      `
+      )
+      .all(...uniqueEntityIds) as Array<TagRow & { entity_id: string }>;
+
+    const tagsByEntityId = new Map<string, GraphTag[]>();
+    for (const row of rows) {
+      const tags = tagsByEntityId.get(row.entity_id) ?? [];
+      tags.push(mapTag(row));
+      tagsByEntityId.set(row.entity_id, tags);
+    }
+    return tagsByEntityId;
+  }
+
+  private mapBoundary(row: BoundaryRow): GraphBoundary {
+    const memberNodeIds = this.db
+      .prepare("SELECT node_id FROM graph_boundary_nodes WHERE boundary_id = ? ORDER BY node_id ASC")
+      .all(row.id)
+      .map((member) => (member as { node_id: string }).node_id);
+    return {
+      id: row.id,
+      projectId: row.project_id,
+      scopeNodeId: row.scope_node_id,
+      name: row.name,
+      summary: row.summary,
+      codeContext: row.code_context,
+      color: row.color ?? defaultBoundaryColor(row.id),
+      position: { x: row.ui_x, y: row.ui_y },
+      size: { width: row.ui_width, height: row.ui_height },
+      memberNodeIds,
+      memberCount: memberNodeIds.length,
+      tags: this.getTagsForEntity("boundary", row.id),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  private recomputeBoundaryMembershipsForScope(projectId: string, scopeNodeId: string): void {
+    const rows = this.db
+      .prepare("SELECT id FROM graph_boundaries WHERE project_id = ? AND scope_node_id = ?")
+      .all(projectId, scopeNodeId) as Array<{ id: string }>;
+    for (const row of rows) {
+      this.recomputeBoundaryMembership(row.id);
+    }
+  }
+
+  private recomputeBoundaryMembership(boundaryId: string): void {
+    const row = this.db.prepare("SELECT * FROM graph_boundaries WHERE id = ?").get(boundaryId) as BoundaryRow | undefined;
+    if (!row) {
+      throw notFound(`Boundary not found: ${boundaryId}`);
+    }
+
+    const project = this.getProject(row.project_id);
+    const allNodes = this.listNodes(project.id);
+    const scopeNode = this.resolveScopeNode(project, allNodes, row.scope_node_id);
+    if (!scopeNode) {
+      return;
+    }
+
+    const canvas = this.buildCanvasGraph(project, allNodes, scopeNode.id, true, true);
+    const memberNodeIds = canvas.nodes.filter((node) => nodeCenterInsideBoundary(node, row)).map((node) => node.id);
+    const saveMembership = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM graph_boundary_nodes WHERE boundary_id = ?").run(boundaryId);
+      const insert = this.db.prepare("INSERT INTO graph_boundary_nodes (boundary_id, node_id) VALUES (?, ?)");
+      for (const nodeId of memberNodeIds) {
+        insert.run(boundaryId, nodeId);
+      }
+    });
+    saveMembership();
+  }
+
+  private applyScopeLayouts(projectId: string, scopeNodeId: string, nodes: GraphNode[]): GraphNode[] {
+    if (nodes.length === 0) {
+      return nodes;
+    }
+
+    const layouts = this.getSavedLayouts(projectId, scopeNodeId, nodes.map((node) => node.id));
+    return nodes.map((node) => {
+      const layout = layouts.get(node.id);
+      if (!layout) {
+        return node;
+      }
+
+      return {
+        ...node,
+        position: { x: layout.ui_x, y: layout.ui_y },
+        size: { width: layout.ui_width, height: layout.ui_height }
+      };
+    });
+  }
+
+  private getSavedLayouts(projectId: string, scopeNodeId: string, nodeIds: string[]): Map<string, LayoutRow> {
+    if (nodeIds.length === 0) {
+      return new Map();
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `
+        SELECT node_id, ui_x, ui_y, ui_width, ui_height
+        FROM graph_node_layouts
+        WHERE project_id = ?
+          AND scope_node_id = ?
+          AND node_id IN (${placeholders})
+      `
+      )
+      .all(projectId, scopeNodeId, ...nodeIds) as LayoutRow[];
+    return new Map(rows.map((row) => [row.node_id, row]));
+  }
+
+  private countSavedLayouts(projectId: string, scopeNodeId: string, nodeIds: string[]): number {
+    if (nodeIds.length === 0) {
+      return 0;
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const row = this.db
+      .prepare(
+        `
+        SELECT COUNT(*) AS count
+        FROM graph_node_layouts
+        WHERE project_id = ?
+          AND scope_node_id = ?
+          AND node_id IN (${placeholders})
+      `
+      )
+      .get(projectId, scopeNodeId, ...nodeIds) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  private upsertNodeLayout(nodeId: string, patch: LayoutPatch): void {
+    const node = this.getNode(nodeId);
+    const scopeNode = this.getNode(patch.scopeNodeId);
+    if (node.projectId !== scopeNode.projectId) {
+      throw validationError("Layout scope and node must belong to the same project.");
+    }
+
+    this.db
+      .prepare(
+        `
+        INSERT INTO graph_node_layouts (project_id, scope_node_id, node_id, ui_x, ui_y, ui_width, ui_height, updated_at)
+        VALUES (@projectId, @scopeNodeId, @nodeId, @uiX, @uiY, @uiWidth, @uiHeight, datetime('now'))
+        ON CONFLICT(project_id, scope_node_id, node_id)
+        DO UPDATE SET
+          ui_x = excluded.ui_x,
+          ui_y = excluded.ui_y,
+          ui_width = excluded.ui_width,
+          ui_height = excluded.ui_height,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        projectId: node.projectId,
+        scopeNodeId: patch.scopeNodeId,
+        nodeId,
+        uiX: patch.position.x,
+        uiY: patch.position.y,
+        uiWidth: patch.size.width,
+        uiHeight: patch.size.height
+      });
+  }
+
+  private updateBoundaryLayoutOnly(boundaryId: string, layout: { position: { x: number; y: number }; size: { width: number; height: number } }): void {
+    this.db
+      .prepare(
+        `
+        UPDATE graph_boundaries
+        SET
+          ui_x = @uiX,
+          ui_y = @uiY,
+          ui_width = @uiWidth,
+          ui_height = @uiHeight,
+          updated_at = datetime('now')
+        WHERE id = @boundaryId
+      `
+      )
+      .run({
+        boundaryId,
+        uiX: layout.position.x,
+        uiY: layout.position.y,
+        uiWidth: layout.size.width,
+        uiHeight: layout.size.height
+      });
+  }
+
+  private getDependencyDetail(nodeId: string): DependencyDetails {
+    const row = this.db.prepare("SELECT * FROM dependency_details WHERE node_id = ?").get(nodeId) as DependencyRow | undefined;
+    if (!row) {
+      throw notFound(`Dependency details not found: ${nodeId}`);
+    }
+    return mapDependencyDetails(row);
+  }
+
+  private getIoDetail(nodeId: string): IoDetails {
+    const row = this.db.prepare("SELECT * FROM io_details WHERE node_id = ?").get(nodeId) as IoRow | undefined;
+    if (!row) {
+      throw notFound(`I/O details not found: ${nodeId}`);
+    }
+    return mapIoDetails(row);
+  }
+
+  private getProcessDetail(nodeId: string): ProcessDetails {
+    const row = this.db.prepare("SELECT * FROM process_details WHERE node_id = ?").get(nodeId) as ProcessRow | undefined;
+    if (!row) {
+      throw notFound(`Process details not found: ${nodeId}`);
+    }
+    return mapProcessDetails(row);
+  }
+
+  private getFormatDetail(nodeId: string): FormatDetails {
+    const row = this.db.prepare("SELECT * FROM format_details WHERE node_id = ?").get(nodeId) as FormatRow | undefined;
+    if (!row) {
+      throw notFound(`Format details not found: ${nodeId}`);
+    }
+    return mapFormatDetails(row);
+  }
+
+  private getBasicBlockDetail(nodeId: string): BasicBlockDetails {
+    const row = this.db.prepare("SELECT * FROM basic_block_details WHERE node_id = ?").get(nodeId) as BasicBlockRow | undefined;
+    if (!row) {
+      throw notFound(`Basic block details not found: ${nodeId}`);
+    }
+    return mapBasicBlockDetails(row);
+  }
+
+  private getDependencyDetailsForNodes(nodeIds: string[]): DependencyDetails[] {
+    if (nodeIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(`SELECT * FROM dependency_details WHERE node_id IN (${placeholders}) ORDER BY dependency_kind ASC, spec ASC`).all(...nodeIds) as DependencyRow[];
+    return rows.map(mapDependencyDetails);
+  }
+
+  private getIoDetailsForNodes(nodeIds: string[]): IoDetails[] {
+    if (nodeIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(`SELECT * FROM io_details WHERE node_id IN (${placeholders}) ORDER BY io_kind ASC, channel ASC`).all(...nodeIds) as IoRow[];
+    return rows.map(mapIoDetails);
+  }
+
+  private getProcessDetailsForNodes(nodeIds: string[]): ProcessDetails[] {
+    if (nodeIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(`SELECT * FROM process_details WHERE node_id IN (${placeholders}) ORDER BY process_kind ASC, node_id ASC`).all(...nodeIds) as ProcessRow[];
+    return rows.map(mapProcessDetails);
+  }
+
+  private getFormatDetailsForNodes(nodeIds: string[]): FormatDetails[] {
+    if (nodeIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db.prepare(`SELECT * FROM format_details WHERE node_id IN (${placeholders}) ORDER BY format_kind ASC, spec ASC`).all(...nodeIds) as FormatRow[];
+    return rows.map(mapFormatDetails);
+  }
+
+  private getBasicBlockDetailsForNodes(nodeIds: string[]): BasicBlockDetails[] {
+    if (nodeIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT * FROM basic_block_details WHERE node_id IN (${placeholders}) ORDER BY basic_kind ASC, key ASC`)
+      .all(...nodeIds) as BasicBlockRow[];
+    return rows.map(mapBasicBlockDetails);
+  }
+
+  private getChildCount(nodeId: string): number {
+    const row = this.db.prepare("SELECT COUNT(*) AS count FROM graph_nodes WHERE parent_id = ?").get(nodeId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  private assertValidNode(input: NewGraphNode, updatingNodeId?: string): void {
+    if (!DOMAIN_NODE_KINDS.includes(input.kind as never) && !isAttachmentNodeKind(input.kind)) {
+      throw validationError(`Unsupported node kind: ${input.kind}`);
+    }
+
+    if (input.language && !LANGUAGE_TYPES.includes(input.language)) {
+      throw validationError(`Unsupported language type: ${input.language}`);
+    }
+
+    this.getProject(input.projectId);
+
+    const parentId = input.parentId ?? null;
+    const attachedToId = input.attachedToId ?? null;
+
+    if ((parentId && parentId === updatingNodeId) || (attachedToId && attachedToId === updatingNodeId)) {
+      throw validationError("A node cannot contain or attach to itself.");
+    }
+
+    if (input.kind === "custom" && input.customTypeId) {
+      const customType = this.db.prepare("SELECT * FROM custom_block_types WHERE id = ?").get(input.customTypeId) as CustomBlockTypeRow | undefined;
+      if (!customType || customType.project_id !== input.projectId) {
+        throw validationError("Custom node type must belong to the same project.");
+      }
+    }
+
+    if (input.kind === "framework") {
+      if (parentId || attachedToId) {
+        throw validationError("Framework nodes cannot have parent_id or attached_to_id.");
+      }
+      return;
+    }
+
+    if (input.kind === "module") {
+      if (!parentId || attachedToId) {
+        throw validationError("Module nodes must have a framework/module parent and no attached_to_id.");
+      }
+      const parent = this.getNode(parentId);
+      if (parent.projectId !== input.projectId || (parent.kind !== "framework" && parent.kind !== "module")) {
+        throw validationError("Module parent must be a framework or module in the same project.");
+      }
+      return;
+    }
+
+    if (input.kind === "website") {
+      if (!parentId || attachedToId) {
+        throw validationError("Website nodes must have a framework/module parent and no attached_to_id.");
+      }
+      const parent = this.getNode(parentId);
+      if (parent.projectId !== input.projectId || (parent.kind !== "framework" && parent.kind !== "module")) {
+        throw validationError("Website parent must be a framework or module in the same project.");
+      }
+      return;
+    }
+
+    if (input.kind === "ui_component") {
+      if (!parentId || attachedToId) {
+        throw validationError("UI component nodes must have a website/module/component parent and no attached_to_id.");
+      }
+      const parent = this.getNode(parentId);
+      if (parent.projectId !== input.projectId || (parent.kind !== "website" && parent.kind !== "module" && parent.kind !== "ui_component")) {
+        throw validationError("UI component parent must be a website, module, or UI component in the same project.");
+      }
+      return;
+    }
+
+    if (input.kind === "function" || input.kind === "object") {
+      if (!parentId || attachedToId) {
+        throw validationError("Function and object nodes must have a module parent and no attached_to_id.");
+      }
+      const parent = this.getNode(parentId);
+      if (parent.projectId !== input.projectId || parent.kind !== "module") {
+        throw validationError("Function and object nodes must be contained by a module.");
+      }
+      return;
+    }
+
+    if (!attachedToId || parentId) {
+      throw validationError("Basic canvas nodes must use attached_to_id and no parent_id.");
+    }
+
+    const owner = this.getNode(attachedToId);
+    if (owner.projectId !== input.projectId) {
+      throw validationError("Attachment nodes must attach to a node in the same project.");
+    }
+
+    if (input.kind === "input" || input.kind === "output" || input.kind === "process") {
+      if (!isDomainNodeKind(owner.kind)) {
+        throw validationError("Input, output, and process nodes must attach to a domain node.");
+      }
+      return;
+    }
+
+    if (input.kind === "dependency") {
+      if (!isDomainNodeKind(owner.kind) && owner.kind !== "process") {
+        throw validationError("Dependency nodes must attach to a domain or process node.");
+      }
+      return;
+    }
+
+    if (owner.kind === "format") {
+      throw validationError("Format nodes cannot attach to another format node.");
+    }
+  }
+
+  private assertValidBoundary(input: NewGraphBoundary): void {
+    this.getProject(input.projectId);
+    const scopeNode = this.getNode(input.scopeNodeId);
+    if (scopeNode.projectId !== input.projectId) {
+      throw validationError("Boundary scope must belong to the same project.");
+    }
+    if (!isDomainNodeKind(scopeNode.kind)) {
+      throw validationError("Boundary scope must be a domain node.");
+    }
+    if (!input.name.trim()) {
+      throw validationError("Boundary name is required.");
+    }
+    if (input.size.width <= 0 || input.size.height <= 0) {
+      throw validationError("Boundary size must be positive.");
+    }
+  }
+}
+
+function mapProject(row: ProjectRow): Project {
+  return {
+    id: row.id,
+    name: row.name,
+    rootPath: row.root_path,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapCustomBlockType(row: CustomBlockTypeRow): CustomBlockType {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    name: row.name,
+    description: row.description,
+    color: row.color,
+    icon: row.icon,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapNodeTypeStyle(row: NodeTypeStyleRow): NodeTypeStyle {
+  return {
+    projectId: row.project_id,
+    nodeKind: row.node_kind,
+    color: row.color,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapTag(row: TagRow): GraphTag {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    name: row.name,
+    color: row.color,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapNodeReuse(row: NodeReuseRow): GraphNodeReuse {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    scopeNodeId: row.scope_node_id,
+    nodeId: row.node_id,
+    label: row.label,
+    context: row.context,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapNode(row: NodeRow, childCount: number, tags: GraphTag[] = []): GraphNode {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    kind: row.kind,
+    name: row.name,
+    summary: row.summary,
+    code: {
+      context: row.code_context,
+      directory: row.code_directory ?? row.source_path,
+      startLine: row.code_start_line ?? row.source_start_line,
+      endLine: row.code_end_line ?? row.source_end_line,
+      language: row.language ?? "unknown"
+    },
+    parentId: row.parent_id,
+    attachedToId: row.attached_to_id,
+    customTypeId: row.custom_type_id,
+    source: {
+      path: row.source_path ?? row.code_directory,
+      startLine: row.source_start_line ?? row.code_start_line,
+      endLine: row.source_end_line ?? row.code_end_line
+    },
+    position: {
+      x: row.ui_x,
+      y: row.ui_y
+    },
+    size: {
+      width: row.ui_width,
+      height: row.ui_height
+    },
+    childCount,
+    hasChildren: childCount > 0,
+    tags,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapEdge(row: EdgeRow, tags: GraphTag[] = []): GraphEdge {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    kind: row.kind,
+    sourceNodeId: row.source_node_id,
+    targetNodeId: row.target_node_id,
+    label: row.label,
+    codeContext: row.code_context ?? "",
+    color: row.color ?? defaultEdgeColor(row.kind),
+    animated: row.animated === 1,
+    tags,
+    createdAt: row.created_at
+  };
+}
+
+function mapDependencyDetails(row: DependencyRow): DependencyDetails {
+  return {
+    nodeId: row.node_id,
+    dependencyKind: row.dependency_kind,
+    spec: row.spec,
+    version: row.version,
+    required: row.required === 1,
+    notes: row.notes
+  };
+}
+
+function mapIoDetails(row: IoRow): IoDetails {
+  return {
+    nodeId: row.node_id,
+    ioKind: row.io_kind,
+    channel: row.channel,
+    schemaHint: row.schema_hint,
+    notes: row.notes
+  };
+}
+
+function mapProcessDetails(row: ProcessRow): ProcessDetails {
+  return {
+    nodeId: row.node_id,
+    processKind: row.process_kind,
+    trigger: row.trigger,
+    notes: row.notes
+  };
+}
+
+function mapFormatDetails(row: FormatRow): FormatDetails {
+  return {
+    nodeId: row.node_id,
+    formatKind: row.format_kind,
+    spec: row.spec,
+    example: row.example,
+    notes: row.notes
+  };
+}
+
+function mapBasicBlockDetails(row: BasicBlockRow): BasicBlockDetails {
+  return {
+    nodeId: row.node_id,
+    basicKind: row.basic_kind,
+    key: row.key,
+    valueHint: row.value_hint,
+    required: row.required === 1,
+    notes: row.notes
+  };
+}
+
+function buildChildCountMap(rows: NodeRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    if (row.parent_id) {
+      counts.set(row.parent_id, (counts.get(row.parent_id) ?? 0) + 1);
+    }
+  }
+  return counts;
+}
+
+function sortHierarchyNodes(a: HierarchyNode, b: HierarchyNode): number {
+  const kindOrder = new Map<GraphNodeKind, number>([
+    ["framework", 0],
+    ["module", 1],
+    ["website", 2],
+    ["ui_component", 3],
+    ["object", 4],
+    ["function", 5],
+    ["process", 6],
+    ["dependency", 7],
+    ["input", 8],
+    ["output", 9],
+    ["format", 10],
+    ["environment", 11],
+    ["config", 12],
+    ["secret", 13],
+    ["command", 14],
+    ["file", 15],
+    ["database", 16],
+    ["api", 17],
+    ["event", 18],
+    ["artifact", 19],
+    ["custom", 20]
+  ]);
+  return (kindOrder.get(a.kind) ?? 10) - (kindOrder.get(b.kind) ?? 10) || a.name.localeCompare(b.name);
+}
+
+function defaultSizeForKind(kind: GraphNodeKind): { width: number; height: number } {
+  if (kind === "website") {
+    return { width: 280, height: 144 };
+  }
+  if (kind === "ui_component") {
+    return { width: 244, height: 124 };
+  }
+  if (kind === "format") {
+    return { width: 156, height: 82 };
+  }
+  if (isAttachmentNodeKind(kind)) {
+    return { width: 224, height: 112 };
+  }
+  return { width: 260, height: 136 };
+}
+
+const EDGE_COLORS: Record<GraphEdgeKind, string> = {
+  calls: "#2563eb",
+  imports: "#64748b",
+  uses: "#0891b2",
+  owns: "#7c3aed",
+  impacts: "#dc2626",
+  flows: "#059669",
+  describes_format: "#ca8a04"
+};
+
+const BOUNDARY_COLORS = ["#2563eb", "#059669", "#7c3aed", "#ca8a04", "#dc2626", "#0891b2", "#c026d3", "#475569"];
+const TAG_COLORS = ["#2563eb", "#059669", "#7c3aed", "#dc2626", "#0891b2", "#be185d", "#ca8a04", "#475569"];
+
+type TagLinkKind = "node" | "edge" | "boundary";
+
+const TAG_LINK_METADATA: Record<TagLinkKind, { tableName: string; entityColumn: string }> = {
+  node: { tableName: "graph_node_tags", entityColumn: "node_id" },
+  edge: { tableName: "graph_edge_tags", entityColumn: "edge_id" },
+  boundary: { tableName: "graph_boundary_tags", entityColumn: "boundary_id" }
+};
+
+function defaultEdgeColor(kind: GraphEdgeKind): string {
+  return EDGE_COLORS[kind] ?? "#727782";
+}
+
+function defaultBoundaryColor(seed: string): string {
+  let hash = 0;
+  for (const char of seed) {
+    hash = (hash * 31 + char.charCodeAt(0)) >>> 0;
+  }
+  return BOUNDARY_COLORS[hash % BOUNDARY_COLORS.length];
+}
+
+function defaultTagColor(seed: string): string {
+  let hash = 0;
+  for (const char of seed) {
+    hash = (hash * 33 + char.charCodeAt(0)) >>> 0;
+  }
+  return TAG_COLORS[hash % TAG_COLORS.length];
+}
+
+function normalizeTagName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, "-");
+}
+
+const SELF_SEED_SUMMARIES: Record<string, string> = {
+  "framework-graphcode-self": "Self-repo workspace map",
+  "module-web": "Frontend workspace UI",
+  "website-web-workspace": "Browser graph editing app",
+  "module-local-server": "Local API and SQLite backend",
+  "module-model": "Shared graph contract",
+  "module-parser-planned": "Future repository parser",
+  "module-agent-runtime-planned": "Future agent workflow runtime",
+  "module-docs-research": "Docs and product research",
+  "module-dev-tooling": "Scripts, tests, and outputs",
+  "module-workspace-canvas": "React Flow canvas layer",
+  "ui-app-shell": "Three-pane app shell",
+  "ui-workspace-canvas": "Interactive graph canvas",
+  "ui-hierarchy-tree": "Boundary-aware left tree",
+  "ui-inspector": "Details and style panel",
+  "ui-block-editor": "Block editing dialog",
+  "ui-edge-editor": "Edge editing dialog",
+  "ui-boundary-editor": "Boundary editing dialog",
+  "module-db-repository": "Graph persistence API",
+  "module-db-schema": "SQLite migrations",
+  "function-app": "Top-level app state",
+  "function-app-shell": "Three-pane UI shell",
+  "function-workspace-canvas": "Canvas provider wrapper",
+  "object-graph-repository": "SQLite graph repository",
+  "object-workspace-runtime": "Workspace DB runtime",
+  "function-register-routes": "Fastify route registration",
+  "function-migrate": "Database migration entrypoint",
+  "function-layout-elk": "ELK auto-layout adapter",
+  "object-graph-node": "Shared node DTO",
+  "object-canvas-graph": "Canvas payload DTO",
+  "object-node-detail": "Inspector detail DTO",
+  "object-node-mutation": "Node mutation schema",
+  "object-graph-tag": "Reusable label DTO",
+  "object-node-reuse": "Reusable placement DTO",
+  "function-normalize-tag-name": "Tag normalization helper",
+  "function-measure-node-layout": "Content-aware card sizing"
+};
+
+function enrichSelfSeedNode(node: NewGraphNode): NewGraphNode {
+  const originalSummary = node.summary ?? node.name;
+  const summary = SELF_SEED_SUMMARIES[node.id] ?? scanSummary(originalSummary, node.kind);
+  const location = node.sourcePath
+    ? `Source location: ${node.sourcePath}${node.sourceStartLine ? ` lines ${node.sourceStartLine}-${node.sourceEndLine ?? node.sourceStartLine}` : ""}.`
+    : "Source location: this block represents architecture or runtime behavior without a single concrete file.";
+  const relationship = node.parentId
+    ? `It is contained by ${node.parentId}.`
+    : node.attachedToId
+      ? `It is attached to ${node.attachedToId}.`
+      : "It is a top-level graph scope.";
+  const codeContext =
+    node.codeContext ??
+    [
+      `${node.name} is a ${node.kind} block in the deterministic self-repo GraphCode seed.`,
+      `Short canvas description: ${summary}.`,
+      `Architecture role: ${originalSummary}`,
+      relationship,
+      location,
+      "When editing this area, keep the card summary short for visual scanning and put implementation notes, API contracts, test expectations, and downstream impact here."
+    ].join(" ");
+
+  return {
+    ...node,
+    summary,
+    codeContext
+  };
+}
+
+function enrichSelfSeedEdge(edge: NewGraphEdge): NewGraphEdge {
+  return {
+    ...edge,
+    color: edge.color ?? defaultEdgeColor(edge.kind),
+    animated: edge.animated ?? edge.kind === "flows",
+    codeContext:
+      edge.codeContext ??
+      [
+        `This ${edge.kind} edge connects ${edge.sourceNodeId} to ${edge.targetNodeId}.`,
+        `Visible description: ${edge.label ?? edge.kind}.`,
+        "Use this context to understand why the relationship exists, what behavior or contract crosses the connection, and which tests should fail if the relationship is broken."
+      ].join(" ")
+  };
+}
+
+function scanSummary(value: string, kind: GraphNodeKind): string {
+  const cleaned = value.replace(/\s+/g, " ").trim();
+  const firstClause = cleaned.split(/[.;:]/)[0]?.trim();
+  if (!firstClause) {
+    return `${kind} block`;
+  }
+  if (firstClause.length <= 64) {
+    return firstClause;
+  }
+  const trimmed = firstClause.slice(0, 64).trimEnd();
+  const lastSpace = trimmed.lastIndexOf(" ");
+  return lastSpace > 28 ? trimmed.slice(0, lastSpace) : trimmed;
+}
+
+function nodeCenterInsideBoundary(node: GraphNode, boundary: BoundaryRow): boolean {
+  const centerX = node.position.x + node.size.width / 2;
+  const centerY = node.position.y + node.size.height / 2;
+  const minX = boundary.ui_x;
+  const minY = boundary.ui_y;
+  const maxX = boundary.ui_x + boundary.ui_width;
+  const maxY = boundary.ui_y + boundary.ui_height;
+  return centerX >= minX && centerX <= maxX && centerY >= minY && centerY <= maxY;
+}
+
+function hashId(value: string): string {
+  return crypto.createHash("sha1").update(value).digest("hex").slice(0, 10);
+}
+
+export function notFound(message: string): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = 404;
+  return error;
+}
+
+export function validationError(message: string): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = 400;
+  return error;
+}

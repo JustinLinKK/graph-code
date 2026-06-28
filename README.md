@@ -6,7 +6,21 @@ The launch name is still open. The research notes in [docs/research/graphcode-as
 
 ## Status
 
-This repository is currently a planning scaffold. It does not contain runtime code, package manager configuration, generated artifacts, or installed dependencies yet.
+This repository now contains a narrow local prototype: a Fastify local server, a React/React Flow web workspace, shared graph-model DTOs, and a deterministic self-repo seed. The generated workspace lives in `.graphcode/graphcode.sqlite` and is intentionally ignored by git.
+
+The current development fixture is this repository itself. Rebuild it with:
+
+```bash
+pnpm seed
+```
+
+Then run the local workspace with:
+
+```bash
+pnpm dev
+```
+
+Normal server startup preserves existing graph data. Use the toolbar reset action or `pnpm seed` when you want to rebuild the curated self-repo graph from source.
 
 The first development milestone is a narrow prototype that can:
 

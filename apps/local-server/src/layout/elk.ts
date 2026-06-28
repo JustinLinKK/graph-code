@@ -1,0 +1,240 @@
+import type { GraphBoundary, GraphEdge, GraphNode } from "@graphcode/graph-model";
+import ELK from "elkjs";
+import type { ElkExtendedEdge, ElkNode } from "elkjs/lib/elk-api";
+
+export type LayoutResult = Map<string, { position: { x: number; y: number }; size: { width: number; height: number } }>;
+export type CanvasLayoutResult = {
+  nodeLayouts: LayoutResult;
+  boundaryLayouts: LayoutResult;
+};
+
+const elk = new ELK();
+
+export async function layoutCanvasWithElk(nodes: GraphNode[], edges: GraphEdge[]): Promise<LayoutResult> {
+  const includedIds = new Set(nodes.map((node) => node.id));
+  const layoutSizes = new Map(nodes.map((node) => [node.id, measureNodeForLayout(node)]));
+  const elkGraph: ElkNode = {
+    id: "canvas",
+    layoutOptions: {
+      "elk.algorithm": "layered",
+      "elk.direction": "RIGHT",
+      "elk.spacing.nodeNode": "44",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "92",
+      "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
+      "elk.edgeRouting": "ORTHOGONAL"
+    },
+    children: nodes.map((node) => {
+      const size = layoutSizes.get(node.id) ?? node.size;
+      return {
+        id: node.id,
+        width: size.width,
+        height: size.height
+      };
+    }),
+    edges: buildElkEdges(nodes, edges, includedIds)
+  };
+
+  const laidOut = await elk.layout(elkGraph);
+  const result: LayoutResult = new Map();
+
+  for (const node of laidOut.children ?? []) {
+    result.set(node.id, {
+      position: {
+        x: Math.round(node.x ?? 0),
+        y: Math.round(node.y ?? 0)
+      },
+      size: {
+        width: Math.round(node.width ?? layoutSizes.get(node.id)?.width ?? 224),
+        height: Math.round(node.height ?? layoutSizes.get(node.id)?.height ?? 120)
+      }
+    });
+  }
+
+  return result;
+}
+
+export async function layoutCanvasWithBoundaryGroups(nodes: GraphNode[], edges: GraphEdge[], boundaries: GraphBoundary[]): Promise<CanvasLayoutResult> {
+  const visibleIds = new Set(nodes.map((node) => node.id));
+  const primaryBoundaryByNodeId = primaryBoundaryMembership(boundaries, visibleIds);
+  const groupedBoundaryIds = new Set(primaryBoundaryByNodeId.values());
+
+  if (groupedBoundaryIds.size === 0) {
+    return {
+      nodeLayouts: await layoutCanvasWithElk(nodes, edges),
+      boundaryLayouts: new Map()
+    };
+  }
+
+  const boundaryLayouts: LayoutResult = new Map();
+  const groupedNodeLayouts = new Map<string, LayoutResult>();
+  const groupedNodeByBoundaryId = new Map<string, GraphNode[]>();
+
+  for (const boundaryId of groupedBoundaryIds) {
+    const memberNodes = nodes.filter((node) => primaryBoundaryByNodeId.get(node.id) === boundaryId);
+    groupedNodeByBoundaryId.set(boundaryId, memberNodes);
+    groupedNodeLayouts.set(boundaryId, await layoutCanvasWithElk(memberNodes, edges.filter((edge) => memberNodes.some((node) => node.id === edge.sourceNodeId) && memberNodes.some((node) => node.id === edge.targetNodeId))));
+  }
+
+  const outerNodes = [
+    ...nodes.filter((node) => !primaryBoundaryByNodeId.has(node.id)),
+    ...boundaries.filter((boundary) => groupedBoundaryIds.has(boundary.id)).map((boundary) => boundaryAsLayoutNode(boundary, groupedNodeLayouts.get(boundary.id) ?? new Map()))
+  ];
+  const outerEdges = edges
+    .map((edge) => ({
+      ...edge,
+      sourceNodeId: primaryBoundaryByNodeId.get(edge.sourceNodeId) ?? edge.sourceNodeId,
+      targetNodeId: primaryBoundaryByNodeId.get(edge.targetNodeId) ?? edge.targetNodeId
+    }))
+    .filter((edge) => edge.sourceNodeId !== edge.targetNodeId);
+  const outerLayout = await layoutCanvasWithElk(outerNodes, outerEdges);
+  const nodeLayouts: LayoutResult = new Map();
+
+  for (const node of nodes) {
+    const boundaryId = primaryBoundaryByNodeId.get(node.id);
+    if (!boundaryId) {
+      const layout = outerLayout.get(node.id);
+      if (layout) {
+        nodeLayouts.set(node.id, layout);
+      }
+      continue;
+    }
+
+    const boundaryOuterLayout = outerLayout.get(boundaryId);
+    const internalLayout = groupedNodeLayouts.get(boundaryId)?.get(node.id);
+    const internalBounds = layoutBounds(groupedNodeLayouts.get(boundaryId) ?? new Map());
+    if (boundaryOuterLayout && internalLayout) {
+      nodeLayouts.set(node.id, {
+        position: {
+          x: boundaryOuterLayout.position.x + BOUNDARY_PADDING_X + internalLayout.position.x - internalBounds.minX,
+          y: boundaryOuterLayout.position.y + BOUNDARY_PADDING_Y + internalLayout.position.y - internalBounds.minY
+        },
+        size: internalLayout.size
+      });
+    }
+  }
+
+  for (const boundary of boundaries) {
+    if (!groupedBoundaryIds.has(boundary.id)) {
+      continue;
+    }
+    const outer = outerLayout.get(boundary.id);
+    if (outer) {
+      boundaryLayouts.set(boundary.id, outer);
+    }
+  }
+
+  return { nodeLayouts, boundaryLayouts };
+}
+
+function buildElkEdges(nodes: GraphNode[], edges: GraphEdge[], includedIds: Set<string>): ElkExtendedEdge[] {
+  const semanticEdges = edges
+    .filter((edge) => includedIds.has(edge.sourceNodeId) && includedIds.has(edge.targetNodeId))
+    .map((edge) => ({
+      id: edge.id,
+      sources: [edge.sourceNodeId],
+      targets: [edge.targetNodeId]
+    }));
+
+  const attachmentEdges = nodes
+    .filter((node) => node.attachedToId && includedIds.has(node.attachedToId))
+    .map((node) => ({
+      id: `layout-attachment-${node.attachedToId}-${node.id}`,
+      sources: [node.attachedToId!],
+      targets: [node.id]
+    }));
+
+  return [...semanticEdges, ...attachmentEdges];
+}
+
+function measureNodeForLayout(node: GraphNode): { width: number; height: number } {
+  const baseWidth = node.size.width;
+  const baseHeight = node.size.height;
+  const longestWord = Math.max(0, ...`${node.name} ${node.summary}`.split(/\s+/).map((part) => part.length));
+  const summaryLength = node.summary.trim().length;
+  const nameLength = node.name.trim().length;
+  const widthFromWord = Math.min(380, Math.max(baseWidth, 150 + longestWord * 7));
+  const widthFromSummary = summaryLength > 58 ? Math.max(widthFromWord, 292) : widthFromWord;
+  const maxMeasuredWidth = node.kind === "format" ? 260 : 380;
+  const width = Math.max(baseWidth, Math.min(maxMeasuredWidth, widthFromSummary));
+  const nameLines = Math.max(1, Math.ceil(nameLength / Math.max(14, Math.floor((width - 48) / 8.5))));
+  const summaryLines = summaryLength === 0 ? 1 : Math.ceil(summaryLength / Math.max(18, Math.floor((width - 34) / 6.8)));
+  const contentHeight = 66 + nameLines * 19 + summaryLines * 18;
+  const minHeight = node.kind === "format" ? 82 : node.kind === "ui_component" ? 124 : 116;
+  const height = Math.max(baseHeight, Math.min(260, Math.max(minHeight, contentHeight)));
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+const BOUNDARY_PADDING_X = 48;
+const BOUNDARY_PADDING_Y = 56;
+
+function primaryBoundaryMembership(boundaries: GraphBoundary[], visibleIds: Set<string>): Map<string, string> {
+  const result = new Map<string, string>();
+  const ordered = [...boundaries].sort((a, b) => a.size.width * a.size.height - b.size.width * b.size.height || a.name.localeCompare(b.name));
+  for (const boundary of ordered) {
+    for (const nodeId of boundary.memberNodeIds) {
+      if (visibleIds.has(nodeId) && !result.has(nodeId)) {
+        result.set(nodeId, boundary.id);
+      }
+    }
+  }
+  return result;
+}
+
+function boundaryAsLayoutNode(boundary: GraphBoundary, memberLayouts: LayoutResult): GraphNode {
+  const bounds = layoutBounds(memberLayouts);
+  return {
+    id: boundary.id,
+    projectId: boundary.projectId,
+    kind: "module",
+    name: boundary.name,
+    summary: boundary.summary,
+    code: {
+      context: boundary.codeContext,
+      directory: null,
+      startLine: null,
+      endLine: null,
+      language: "unknown"
+    },
+    parentId: boundary.scopeNodeId,
+    attachedToId: null,
+    customTypeId: null,
+    source: {
+      path: null,
+      startLine: null,
+      endLine: null
+    },
+    position: boundary.position,
+    size: {
+      width: Math.max(boundary.size.width, bounds.width + BOUNDARY_PADDING_X * 2),
+      height: Math.max(boundary.size.height, bounds.height + BOUNDARY_PADDING_Y * 2)
+    },
+    childCount: 0,
+    hasChildren: false,
+    tags: [],
+    createdAt: boundary.createdAt,
+    updatedAt: boundary.updatedAt
+  };
+}
+
+function layoutBounds(layouts: LayoutResult): { minX: number; minY: number; width: number; height: number } {
+  if (layouts.size === 0) {
+    return { minX: 0, minY: 0, width: 260, height: 160 };
+  }
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const layout of layouts.values()) {
+    minX = Math.min(minX, layout.position.x);
+    minY = Math.min(minY, layout.position.y);
+    maxX = Math.max(maxX, layout.position.x + layout.size.width);
+    maxY = Math.max(maxY, layout.position.y + layout.size.height);
+  }
+  return {
+    minX,
+    minY,
+    width: maxX - minX,
+    height: maxY - minY
+  };
+}
