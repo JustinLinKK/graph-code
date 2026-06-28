@@ -1,4 +1,4 @@
-import type { CanvasGraph, GraphBoundary, GraphNode, WorkspaceSettings } from "@graphcode/graph-model";
+import type { CanvasGraph, GraphBoundary, GraphNode, GraphNodeReuse, WorkspaceSettings } from "@graphcode/graph-model";
 import {
   applyNodeChanges,
   Background,
@@ -88,6 +88,7 @@ function WorkspaceCanvasInner({
         canvas,
         selectedNodeId,
         selectedBoundaryId,
+        null,
         (nodeId, size) => handleResizeEndRef.current(nodeId, size),
         (boundaryId, size) => handleBoundaryResizeEndRef.current(boundaryId, size)
       ),
@@ -95,6 +96,7 @@ function WorkspaceCanvasInner({
   );
   const [nodes, setNodes] = useState<Node[]>(initialNodes);
   const [draftRect, setDraftRect] = useState<BoundaryDraftRect | null>(null);
+  const [edgeDraftSourceId, setEdgeDraftSourceId] = useState<string | null>(null);
   const edges = useMemo(() => toFlowEdges(canvas, selectedEdgeId, resolvedTheme), [canvas, resolvedTheme, selectedEdgeId]);
   const flowNodes = useMemo(() => (draftRect ? [...nodes, toDraftBoundaryNode(draftRect)] : nodes), [draftRect, nodes]);
 
@@ -169,9 +171,21 @@ function WorkspaceCanvasInner({
   };
 
   useEffect(() => {
-    setNodes(initialNodes);
-    nodesRef.current = initialNodes;
-  }, [initialNodes]);
+    const nextNodes = toFlowNodes(
+      canvas,
+      selectedNodeId,
+      selectedBoundaryId,
+      edgeDraftSourceId,
+      (nodeId, size) => handleResizeEndRef.current(nodeId, size),
+      (boundaryId, size) => handleBoundaryResizeEndRef.current(boundaryId, size)
+    );
+    setNodes(nextNodes);
+    nodesRef.current = nextNodes;
+  }, [canvas, edgeDraftSourceId, selectedBoundaryId, selectedNodeId]);
+
+  useEffect(() => {
+    setEdgeDraftSourceId(null);
+  }, [drawEdgeMode, canvas?.scopeNodeId]);
 
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((currentNodes) => {
@@ -268,23 +282,42 @@ function WorkspaceCanvasInner({
 
   const handleNodeDoubleClick = useCallback(
     (_: ReactMouseEvent, node: Node) => {
+      if (drawEdgeMode) {
+        return;
+      }
       const graphNode = (node.data as { node?: GraphNode }).node;
-      if (graphNode?.hasChildren) {
+      if (graphNode && (graphNode.hasChildren || graphNode.kind === "function" || graphNode.kind === "object")) {
         onOpenNode(node.id);
       }
     },
-    [onOpenNode]
+    [drawEdgeMode, onOpenNode]
   );
 
   const handleNodeClick = useCallback(
     (_: ReactMouseEvent, node: Node) => {
+      const graphNode = (node.data as { node?: GraphNode }).node;
+      if (drawEdgeMode && graphNode) {
+        if (!edgeDraftSourceId || edgeDraftSourceId === graphNode.id) {
+          setEdgeDraftSourceId(graphNode.id);
+          return;
+        }
+        onEdgeDraft({
+          sourceNodeId: edgeDraftSourceId,
+          targetNodeId: graphNode.id
+        });
+        setEdgeDraftSourceId(null);
+        return;
+      }
+      if (drawEdgeMode) {
+        return;
+      }
       if ((node.data as { boundary?: GraphBoundary }).boundary) {
         onSelectBoundary(node.id);
         return;
       }
       onSelectNode(node.id);
     },
-    [onSelectBoundary, onSelectNode]
+    [drawEdgeMode, edgeDraftSourceId, onEdgeDraft, onSelectBoundary, onSelectNode]
   );
 
   const handleEdgeClick = useCallback(
@@ -311,10 +344,11 @@ function WorkspaceCanvasInner({
 
   const startBoundaryDraft = useCallback(
     (event: ReactMouseEvent) => {
-      if (!drawBoundaryMode || !canvas?.scopeNodeId) {
+      if (!drawBoundaryMode || !canvas?.scopeNodeId || event.button !== 0) {
         return;
       }
       event.preventDefault();
+      event.stopPropagation();
       const point = screenToFlowPosition({ x: event.clientX, y: event.clientY });
       const nextDraft = { start: point, current: point };
       draftRectRef.current = nextDraft;
@@ -329,6 +363,7 @@ function WorkspaceCanvasInner({
         return;
       }
       event.preventDefault();
+      event.stopPropagation();
       const nextDraft = { ...draftRectRef.current, current: screenToFlowPosition({ x: event.clientX, y: event.clientY }) };
       draftRectRef.current = nextDraft;
       setDraftRect(nextDraft);
@@ -342,6 +377,7 @@ function WorkspaceCanvasInner({
         return;
       }
       event.preventDefault();
+      event.stopPropagation();
       const rectangle = normalizeDraftRect({
         ...draftRectRef.current,
         current: screenToFlowPosition({ x: event.clientX, y: event.clientY })
@@ -375,16 +411,25 @@ function WorkspaceCanvasInner({
     return <div className="canvas-empty">Loading workspace...</div>;
   }
 
+  const drawMode = drawBoundaryMode || drawEdgeMode;
+
   return (
     <ReactFlow
-      className={`workspace-flow workspace-flow-${resolvedTheme}`}
+      className={`workspace-flow workspace-flow-${resolvedTheme} ${drawBoundaryMode ? "workspace-flow-draw-boundary" : ""} ${drawEdgeMode ? "workspace-flow-draw-edge" : ""}`}
       colorMode={resolvedTheme}
       nodes={flowNodes}
       edges={edges}
       nodeTypes={nodeTypes}
       fitView
-      nodesDraggable
-      nodesConnectable={drawEdgeMode}
+      nodesDraggable={!drawMode}
+      nodesConnectable={false}
+      elementsSelectable={!drawMode}
+      selectNodesOnDrag={false}
+      panOnDrag={!drawMode}
+      autoPanOnNodeDrag={!drawMode}
+      autoPanOnSelection={!drawMode}
+      connectOnClick={false}
+      connectionRadius={20}
       minZoom={0.25}
       maxZoom={1.8}
       onNodesChange={handleNodesChange}
@@ -430,7 +475,7 @@ function WorkspaceCanvasInner({
       ) : null}
       {drawEdgeMode ? (
         <Panel position="top-center">
-          <div className="canvas-draw-status">Draw edge</div>
+          <div className="canvas-draw-status">{edgeDraftSourceId ? "Select target block" : "Select source block"}</div>
         </Panel>
       ) : null}
     </ReactFlow>
@@ -458,6 +503,7 @@ function toFlowNodes(
   canvas: CanvasGraph | null,
   selectedNodeId: string | null,
   selectedBoundaryId: string | null,
+  edgeDraftSourceId: string | null,
   onResizeEnd: (nodeId: string, size: { width: number; height: number }) => void,
   onBoundaryResizeEnd: (boundaryId: string, size: { width: number; height: number }) => void
 ): Node[] {
@@ -465,7 +511,8 @@ function toFlowNodes(
     return [];
   }
 
-  const measuredNodeById = new Map(canvas.nodes.map((node) => [node.id, { ...node, size: measureNodeCardSize(node) }]));
+  const reuseByNodeId = new Map((canvas.reuses ?? []).map((reuse) => [reuse.nodeId, reuse]));
+  const measuredNodeById = new Map(canvas.nodes.map((node) => [node.id, { ...node, size: measureNodeCardSize(node, reuseByNodeId.get(node.id)) }]));
   const boundaryNodes: Node[] = canvas.boundaries.map((boundary) => {
     const displaySize = measureBoundaryBoxSize(boundary, measuredNodeById);
     return {
@@ -490,9 +537,8 @@ function toFlowNodes(
     };
   });
 
-  const reuseByNodeId = new Map((canvas.reuses ?? []).map((reuse) => [reuse.nodeId, reuse]));
   const graphNodes: Node[] = canvas.nodes.map((node) => ({
-    ...toFlowGraphNode(node, canvas, selectedNodeId, reuseByNodeId, onResizeEnd)
+    ...toFlowGraphNode(node, canvas, selectedNodeId, edgeDraftSourceId, reuseByNodeId, onResizeEnd)
   }));
 
   return [...boundaryNodes, ...graphNodes];
@@ -502,16 +548,18 @@ function toFlowGraphNode(
   node: GraphNode,
   canvas: CanvasGraph,
   selectedNodeId: string | null,
+  edgeDraftSourceId: string | null,
   reuseByNodeId: Map<string, CanvasGraph["reuses"][number]>,
   onResizeEnd: (nodeId: string, size: { width: number; height: number }) => void
 ): Node {
-  const displaySize = measureNodeCardSize(node);
+  const displaySize = measureNodeCardSize(node, reuseByNodeId.get(node.id));
+  const isSelected = node.id === selectedNodeId || node.id === edgeDraftSourceId;
   return {
     id: node.id,
     type: "graphNode",
     position: node.position,
-    selected: node.id === selectedNodeId,
-    zIndex: node.id === selectedNodeId ? 20 : 10,
+    selected: isSelected,
+    zIndex: isSelected ? 20 : 10,
     style: {
       width: displaySize.width,
       height: displaySize.height
@@ -523,7 +571,7 @@ function toFlowGraphNode(
       },
       accentColor: colorForNode(node, canvas),
       reuse: reuseByNodeId.get(node.id),
-      selected: node.id === selectedNodeId,
+      selected: isSelected,
       onResizeEnd
     }
   };
@@ -535,28 +583,28 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
   }
   const labelColor = theme === "dark" ? "#cbd5e1" : "#4b5563";
 
-  const semanticEdges: Edge[] = canvas.edges.map((edge) => ({
-    id: edge.id,
-    source: edge.sourceNodeId,
-    target: edge.targetNodeId,
-    label: formatEdgeLabel(edge),
-    type: "smoothstep",
-    selected: edge.id === selectedEdgeId,
-    animated: edge.animated,
-    markerEnd: {
-      type: MarkerType.ArrowClosed,
-      color: edge.id === selectedEdgeId ? "#2563eb" : edge.color
-    },
-    style: {
-      stroke: edge.id === selectedEdgeId ? "#2563eb" : edge.color,
-      strokeWidth: edge.id === selectedEdgeId ? 2.4 : 1.7
-    },
-    labelStyle: {
-      fill: labelColor,
-      fontSize: 11,
-      fontWeight: 600
-    }
-  }));
+  const semanticEdges: Edge[] = canvas.edges.map((edge) => {
+    const edgeColor = edge.id === selectedEdgeId ? "#2563eb" : edge.color;
+    return {
+      id: edge.id,
+      source: edge.sourceNodeId,
+      target: edge.targetNodeId,
+      label: formatEdgeLabel(edge),
+      type: "smoothstep",
+      selected: edge.id === selectedEdgeId,
+      animated: edge.animated,
+      ...edgeMarkerProps(edge, edgeColor),
+      style: {
+        stroke: edgeColor,
+        strokeWidth: edge.id === selectedEdgeId ? 2.4 : 1.7
+      },
+      labelStyle: {
+        fill: labelColor,
+        fontSize: 11,
+        fontWeight: 600
+      }
+    };
+  });
 
   const attachmentEdges: Edge[] = canvas.nodes
     .filter((node) => node.attachedToId)
@@ -589,23 +637,78 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
   return [...semanticEdges, ...attachmentEdges];
 }
 
-function measureNodeCardSize(node: GraphNode): { width: number; height: number } {
+function edgeMarkerProps(edge: CanvasGraph["edges"][number], color: string): Pick<Edge, "markerStart" | "markerEnd"> {
+  if (!edge.pointingEnabled) {
+    return {};
+  }
+  const marker = {
+    type: MarkerType.ArrowClosed,
+    color
+  };
+  if (edge.pointingDirection === "target_to_source") {
+    return { markerStart: marker };
+  }
+  if (edge.pointingDirection === "bidirectional") {
+    return { markerStart: marker, markerEnd: marker };
+  }
+  return { markerEnd: marker };
+}
+
+export function measureNodeCardSize(node: GraphNode, reuse?: GraphNodeReuse): { width: number; height: number } {
   const longestWord = Math.max(0, ...`${node.name} ${node.summary}`.split(/\s+/).map((part) => part.length));
   const summaryLength = node.summary.trim().length;
   const nameLength = node.name.trim().length;
   const baseWidth = node.size.width;
-  const widthFromWord = Math.min(420, Math.max(baseWidth, 150 + longestWord * 7));
+  const chipLabels = [
+    node.agentStatus !== "none" ? agentStatusLabel(node.agentStatus) : null,
+    node.gitStatus ? gitWorktreeLabel(node.gitStatus.worktree) : null,
+    node.gitStatus?.change ? gitChangeLabel(node.gitStatus.change) : null,
+    reuse ? reuse.label || "Reused" : null,
+    ...node.tags.slice(0, 2).map((tag) => tag.name)
+  ].filter(Boolean) as string[];
+  const longestChip = Math.max(0, ...chipLabels.map((label) => label.length));
+  const widthFromWord = Math.min(440, Math.max(baseWidth, 154 + Math.max(longestWord * 7.4, longestChip * 6.4)));
   const widthFromSummary = summaryLength > 58 ? Math.max(widthFromWord, 292) : widthFromWord;
-  const maxMeasuredWidth = node.kind === "format" ? 280 : 420;
+  const maxMeasuredWidth = node.kind === "format" ? 292 : 440;
   const width = Math.max(baseWidth, Math.min(maxMeasuredWidth, widthFromSummary));
-  const nameLines = Math.min(2, Math.max(1, Math.ceil(nameLength / Math.max(14, Math.floor((width - 48) / 8.5)))));
-  const summaryLines = summaryLength === 0 ? 1 : Math.min(3, Math.ceil(summaryLength / Math.max(18, Math.floor((width - 34) / 6.8))));
-  const statusRows = node.agentStatus !== "none" || node.gitStatus ? 1 : 0;
-  const tagRows = node.tags.length > 0 ? 1 : 0;
-  const contentHeight = 66 + nameLines * 19 + summaryLines * 18 + statusRows * 27 + tagRows * 24;
+  const contentWidth = Math.max(96, width - 26);
+  const nameLines = Math.min(2, Math.max(1, Math.ceil(nameLength / Math.max(10, Math.floor(contentWidth / 8.4)))));
+  const summaryLines = summaryLength === 0 ? 1 : Math.min(3, Math.ceil(summaryLength / Math.max(14, Math.floor(contentWidth / 6.5))));
+  const statusLabels = chipLabels.slice(0, (node.agentStatus !== "none" ? 1 : 0) + (node.gitStatus ? 1 : 0) + (node.gitStatus?.change ? 1 : 0));
+  const tagLabels = chipLabels.slice(statusLabels.length);
+  const statusRows = estimateChipRows(statusLabels, contentWidth);
+  const tagRows = estimateChipRows(tagLabels, contentWidth);
+  const contentHeight =
+    24 +
+    24 +
+    10 +
+    nameLines * 19 +
+    7 +
+    summaryLines * 18 +
+    (statusRows > 0 ? 8 + statusRows * 20 : 0) +
+    (tagRows > 0 ? 8 + tagRows * 21 : 0);
   const minHeight = node.kind === "format" ? 96 : node.kind === "ui_component" ? 136 : 128;
-  const height = Math.max(node.size.height, Math.min(260, Math.max(minHeight, contentHeight)));
+  const height = Math.max(node.size.height, minHeight, contentHeight);
   return { width: Math.round(width), height: Math.round(height) };
+}
+
+function estimateChipRows(labels: string[], contentWidth: number): number {
+  if (labels.length === 0) {
+    return 0;
+  }
+  let rows = 1;
+  let rowWidth = 0;
+  for (const label of labels) {
+    const chipWidth = Math.min(contentWidth, Math.max(44, 22 + label.length * 7));
+    const nextWidth = rowWidth === 0 ? chipWidth : rowWidth + 5 + chipWidth;
+    if (nextWidth > contentWidth && rowWidth > 0) {
+      rows += 1;
+      rowWidth = chipWidth;
+    } else {
+      rowWidth = nextWidth;
+    }
+  }
+  return rows;
 }
 
 function measureBoundaryBoxSize(boundary: GraphBoundary, nodeById: Map<string, GraphNode>): { width: number; height: number } {

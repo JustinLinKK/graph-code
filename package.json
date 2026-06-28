@@ -8,7 +8,7 @@
     "dev": "pnpm --parallel --filter @graphcode/local-server --filter @graphcode/web dev",
     "dev:server": "pnpm --filter @graphcode/local-server dev",
     "dev:web": "pnpm --filter @graphcode/web dev",
-    "build": "pnpm --filter @graphcode/graph-model build && pnpm --filter @graphcode/agent-runtime build && pnpm --filter @graphcode/local-server build && pnpm --filter @graphcode/web build",
+    "build": "pnpm --filter @graphcode/graph-model build && pnpm --filter @graphcode/parser build && pnpm --filter @graphcode/agent-runtime build && pnpm --filter @graphcode/local-server build && pnpm --filter @graphcode/web build",
     "typecheck": "pnpm -r --if-present typecheck",
     "test": "pnpm -r --if-present test",
     "seed": "pnpm --filter @graphcode/local-server seed"

@@ -31,8 +31,16 @@ export type GraphCodeToolbox = {
   readSourceFile: (relativePath: string) => Promise<string>;
   writeCodeProposal: (projectId: string, runId: string | null, targetNodeId: string | null, diff: string) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
-  listScannableFiles: (projectId: string) => Promise<string[]>;
-  upsertScannedFileNode: (projectId: string, filePath: string, summary: string, language: string) => Promise<GraphNode>;
+  refreshCodeGraph: (
+    projectId: string,
+    rootPath?: string
+  ) => Promise<{
+    nodeCount: number;
+    edgeCount: number;
+    fileCount: number;
+    symbolCount: number;
+    workflowNodeCount: number;
+  }>;
 };
 
 type PlanningGraph = Awaited<ReturnType<GraphCodeToolbox["readGraph"]>>;
@@ -217,32 +225,13 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
     kind: "scanning",
     prompt: input.rootPath ?? input.projectId,
     execute: async () => {
-      const files = await options.toolbox.listScannableFiles(input.projectId);
-      const limit = Math.max(1, Math.min(options.config.parallelLimit, 64));
-      const scanned: GraphNode[] = [];
-      let index = 0;
-      async function worker(): Promise<void> {
-        while (index < files.length) {
-          const filePath = files[index++];
-          const language = languageForPath(filePath);
-          const summary = summarizeFilePath(filePath, language);
-          scanned.push(await options.toolbox.upsertScannedFileNode(input.projectId, filePath, summary, language));
-        }
-      }
-      await Promise.all(Array.from({ length: Math.min(limit, files.length || 1) }, () => worker()));
-      const touched = scanned.map((node) => ({
-        entityType: "node" as const,
-        entityId: node.id,
-        status: "implemented" as const,
-        note: "Scanning agent refreshed this implemented repository block.",
-        agentRunId: options.runId ?? null
-      }));
-      if (touched.length > 0) {
-        await options.toolbox.setStatuses(input.projectId, touched);
-      }
+      const result = await options.toolbox.refreshCodeGraph(input.projectId, input.rootPath);
       return {
-        response: `Scanned ${scanned.length} files into GraphCode blocks.`,
-        touched
+        response: [
+          `Scanned ${result.fileCount} files into ${result.nodeCount} Code Graph nodes.`,
+          `Extracted ${result.symbolCount} symbols, ${result.workflowNodeCount} workflow blocks, and ${result.edgeCount} edges.`
+        ].join(" "),
+        touched: []
       };
     }
   });
@@ -398,32 +387,4 @@ async function boundedMap<T, R>(items: T[], parallelLimit: number, mapper: (item
   }
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return results;
-}
-
-function languageForPath(filePath: string): string {
-  if (/\.(ts|tsx)$/.test(filePath)) {
-    return "typescript";
-  }
-  if (/\.(js|jsx|mjs|cjs)$/.test(filePath)) {
-    return "javascript";
-  }
-  if (/\.py$/.test(filePath)) {
-    return "python";
-  }
-  if (/\.mdx?$/.test(filePath)) {
-    return "markdown";
-  }
-  if (/\.json$/.test(filePath)) {
-    return "json";
-  }
-  if (/\.ya?ml$/.test(filePath)) {
-    return "yaml";
-  }
-  return "other";
-}
-
-function summarizeFilePath(filePath: string, language: string): string {
-  const parts = filePath.split("/");
-  const name = parts.at(-1) ?? filePath;
-  return `${language} file ${name}`;
 }

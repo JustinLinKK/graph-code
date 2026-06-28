@@ -28,6 +28,12 @@ vi.mock("@xyflow/react", async () => ({
     onMouseUp,
     className,
     colorMode,
+    nodesDraggable,
+    nodesConnectable,
+    elementsSelectable,
+    panOnDrag,
+    connectOnClick,
+    connectionRadius,
     children
   }: {
     nodes: Array<{
@@ -57,14 +63,30 @@ vi.mock("@xyflow/react", async () => ({
     ) => void;
     onEdgeClick?: (event: unknown, edge: GraphEdge) => void;
     onConnect?: (connection: { source: string; target: string }) => void;
-    onMouseDown?: (event: { clientX: number; clientY: number; preventDefault: () => void }) => void;
-    onMouseMove?: (event: { clientX: number; clientY: number; preventDefault: () => void }) => void;
-    onMouseUp?: (event: { clientX: number; clientY: number; preventDefault: () => void }) => void;
+    onMouseDown?: (event: { button: number; clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
+    onMouseMove?: (event: { clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
+    onMouseUp?: (event: { clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
     className?: string;
     colorMode?: string;
+    nodesDraggable?: boolean;
+    nodesConnectable?: boolean;
+    elementsSelectable?: boolean;
+    panOnDrag?: boolean | number[];
+    connectOnClick?: boolean;
+    connectionRadius?: number;
     children: React.ReactNode;
   }) => (
-    <div data-testid="react-flow" className={className} data-color-mode={colorMode}>
+    <div
+      data-testid="react-flow"
+      className={className}
+      data-color-mode={colorMode}
+      data-nodes-draggable={String(nodesDraggable)}
+      data-nodes-connectable={String(nodesConnectable)}
+      data-elements-selectable={String(elementsSelectable)}
+      data-pan-on-drag={String(panOnDrag)}
+      data-connect-on-click={String(connectOnClick)}
+      data-connection-radius={connectionRadius}
+    >
       {nodes.map((node) => (
         <div key={node.id}>
           {node.data.node ? (
@@ -119,9 +141,10 @@ vi.mock("@xyflow/react", async () => ({
         aria-label="Draw boundary gesture"
         onClick={() => {
           const preventDefault = vi.fn();
-          onMouseDown?.({ clientX: 10, clientY: 20, preventDefault });
-          onMouseMove?.({ clientX: 210, clientY: 160, preventDefault });
-          onMouseUp?.({ clientX: 210, clientY: 160, preventDefault });
+          const stopPropagation = vi.fn();
+          onMouseDown?.({ button: 0, clientX: 10, clientY: 20, preventDefault, stopPropagation });
+          onMouseMove?.({ clientX: 210, clientY: 160, preventDefault, stopPropagation });
+          onMouseUp?.({ clientX: 210, clientY: 160, preventDefault, stopPropagation });
         }}
       />
       <button
@@ -166,6 +189,15 @@ const moduleCanvas = node({
   parentId: "module-web",
   position: { x: 420, y: 160 }
 });
+const functionRenderWidget = node({
+  id: "function-render-widget",
+  kind: "function",
+  name: "renderWidget",
+  parentId: "module-web",
+  position: { x: 420, y: 330 },
+  childCount: 0,
+  hasChildren: false
+});
 const processWeb = node({
   id: "process-web",
   kind: "process",
@@ -197,6 +229,38 @@ const formatSelection = node({
   attachedToId: "input-user-select",
   position: { x: 20, y: 270 },
   size: { width: 132, height: 68 }
+});
+const functionInput = node({
+  id: "function-render-widget-input",
+  kind: "input",
+  name: "props",
+  attachedToId: "function-render-widget",
+  position: { x: 20, y: 160 },
+  size: { width: 190, height: 90 }
+});
+const functionProcess = node({
+  id: "function-render-widget-process",
+  kind: "process",
+  name: "Process renderWidget",
+  attachedToId: "function-render-widget",
+  position: { x: 260, y: 160 },
+  size: { width: 220, height: 100 }
+});
+const functionOutput = node({
+  id: "function-render-widget-output",
+  kind: "output",
+  name: "Rendered JSX",
+  attachedToId: "function-render-widget",
+  position: { x: 540, y: 160 },
+  size: { width: 190, height: 90 }
+});
+const functionFormat = node({
+  id: "function-render-widget-output-format",
+  kind: "format",
+  name: "JSX.Element",
+  attachedToId: "function-render-widget-output",
+  position: { x: 560, y: 280 },
+  size: { width: 150, height: 68 }
 });
 const frontendBoundary: GraphBoundary = boundary({
   id: "boundary-frontend",
@@ -247,7 +311,10 @@ const hierarchy: HierarchyNode[] = [
             memberNames: ["Hierarchy Selection", "Render Workspace Scope"]
           }
         ],
-        children: [{ ...moduleCanvas, children: [], boundaryLabels: [], boundaryGroups: [] }]
+        children: [
+          { ...moduleCanvas, children: [], boundaryLabels: [], boundaryGroups: [] },
+          { ...functionRenderWidget, children: [], boundaryLabels: [], boundaryGroups: [] }
+        ]
       }
     ]
   }
@@ -276,7 +343,7 @@ const moduleCanvasGraph: CanvasGraph = {
   rootNodeId: "module-web",
   scopeNodeId: "module-web",
   scopeLabel: "Web Workspace",
-  nodes: [inputSelection, processWeb, moduleCanvas, outputWorkspace, formatSelection],
+  nodes: [inputSelection, processWeb, moduleCanvas, functionRenderWidget, outputWorkspace, formatSelection],
   edges: [
     {
       id: "flow-input-process",
@@ -288,6 +355,8 @@ const moduleCanvasGraph: CanvasGraph = {
       codeContext: "Selection flows from the hierarchy tree into the render process.",
       color: "#059669",
       animated: true,
+      pointingEnabled: true,
+      pointingDirection: "source_to_target",
       agentStatus: "none",
       gitStatus: null,
       tags: [],
@@ -303,6 +372,8 @@ const moduleCanvasGraph: CanvasGraph = {
       codeContext: "The input node describes the selection id format.",
       color: "#ca8a04",
       animated: false,
+      pointingEnabled: false,
+      pointingDirection: "source_to_target",
       agentStatus: "none",
       gitStatus: null,
       tags: [],
@@ -350,11 +421,117 @@ const moduleCanvasGraph: CanvasGraph = {
   reuses: []
 };
 
+const functionCanvasGraph: CanvasGraph = {
+  project,
+  rootNodeId: "function-render-widget",
+  scopeNodeId: "function-render-widget",
+  scopeLabel: "renderWidget",
+  nodes: [functionRenderWidget, functionInput, functionProcess, functionOutput, functionFormat],
+  edges: [
+    {
+      id: "function-flow-input-process",
+      projectId: project.id,
+      kind: "flows",
+      sourceNodeId: functionInput.id,
+      targetNodeId: functionProcess.id,
+      label: "parameter",
+      codeContext: "props flows into renderWidget.",
+      color: "#059669",
+      animated: true,
+      pointingEnabled: true,
+      pointingDirection: "source_to_target",
+      agentStatus: "none",
+      gitStatus: null,
+      tags: [],
+      createdAt: "now"
+    },
+    {
+      id: "function-flow-process-output",
+      projectId: project.id,
+      kind: "flows",
+      sourceNodeId: functionProcess.id,
+      targetNodeId: functionOutput.id,
+      label: "return",
+      codeContext: "renderWidget returns JSX.",
+      color: "#059669",
+      animated: true,
+      pointingEnabled: true,
+      pointingDirection: "source_to_target",
+      agentStatus: "none",
+      gitStatus: null,
+      tags: [],
+      createdAt: "now"
+    },
+    {
+      id: "function-format-output",
+      projectId: project.id,
+      kind: "describes_format",
+      sourceNodeId: functionOutput.id,
+      targetNodeId: functionFormat.id,
+      label: "format",
+      codeContext: "The function output is JSX.",
+      color: "#ca8a04",
+      animated: false,
+      pointingEnabled: true,
+      pointingDirection: "source_to_target",
+      agentStatus: "none",
+      gitStatus: null,
+      tags: [],
+      createdAt: "now"
+    }
+  ],
+  boundaries: [],
+  dependencies: [],
+  io: [
+    {
+      nodeId: functionInput.id,
+      ioKind: "user",
+      channel: "function parameter",
+      schemaHint: "WidgetProps",
+      notes: ""
+    },
+    {
+      nodeId: functionOutput.id,
+      ioKind: "artifact",
+      channel: "return value",
+      schemaHint: "JSX.Element",
+      notes: ""
+    }
+  ],
+  processes: [
+    {
+      nodeId: functionProcess.id,
+      processKind: "render",
+      trigger: "function call",
+      notes: ""
+    }
+  ],
+  formats: [
+    {
+      nodeId: functionFormat.id,
+      formatKind: "type",
+      spec: "JSX.Element",
+      example: null,
+      notes: ""
+    }
+  ],
+  basicDetails: [],
+  customTypes: [],
+  nodeTypeStyles: [],
+  reuses: []
+};
+
 const frameworkDetail = detail(framework);
 const moduleDetail = detail(moduleWeb, {
   processes: [{ node: processWeb, details: moduleCanvasGraph.processes[0] }],
   inputs: [{ node: inputSelection, details: moduleCanvasGraph.io[0] }],
   outputs: [{ node: outputWorkspace, details: moduleCanvasGraph.io[1] }]
+});
+const functionDetail = detail(functionRenderWidget, {
+  processes: [{ node: functionProcess, details: functionCanvasGraph.processes[0] }],
+  inputs: [{ node: functionInput, details: functionCanvasGraph.io[0] }],
+  outputs: [{ node: functionOutput, details: functionCanvasGraph.io[1] }],
+  formats: [{ node: functionFormat, details: functionCanvasGraph.formats[0] }]
 });
 
 const defaultSettings = {
@@ -422,6 +599,9 @@ describe("GraphCode app shell", () => {
           return json(hierarchy);
         }
         if (url.startsWith("/api/projects/graphcode-self/canvas")) {
+          if (url.includes("rootNodeId=function-render-widget")) {
+            return json(functionCanvasGraph);
+          }
           return json(url.includes("rootNodeId=module-web") ? moduleCanvasGraph : frameworkCanvas);
         }
         if (url === "/api/projects/graphcode-self/settings") {
@@ -506,6 +686,8 @@ describe("GraphCode app shell", () => {
             projectId: project.id,
             color: payload.color ?? "#059669",
             animated: payload.animated ?? false,
+            pointingEnabled: payload.pointingEnabled ?? true,
+            pointingDirection: payload.pointingDirection ?? "source_to_target",
             agentStatus: "none",
             gitStatus: null,
             tags: [],
@@ -619,6 +801,9 @@ describe("GraphCode app shell", () => {
         if (url === "/api/nodes/module-web") {
           return json(moduleDetail);
         }
+        if (url === "/api/nodes/function-render-widget") {
+          return json(functionDetail);
+        }
         if (url.endsWith("/layout") && init?.method === "PATCH") {
           return json(moduleWeb);
         }
@@ -702,6 +887,20 @@ describe("GraphCode app shell", () => {
 
     expect(await within(screen.getByTestId("react-flow")).findByText("Render Workspace Scope")).toBeInTheDocument();
     expect(fetch).toHaveBeenCalledWith(expect.stringContaining("rootNodeId=module-web"), expect.any(Object));
+  });
+
+  it("double-clicking a leaf function opens its workflow canvas", async () => {
+    render(<App />);
+
+    const canvas = within(await screen.findByTestId("react-flow"));
+    fireEvent.doubleClick(await canvas.findByText("Web Workspace"));
+    fireEvent.doubleClick(await within(screen.getByTestId("react-flow")).findByText("renderWidget"));
+
+    const functionCanvas = within(await screen.findByTestId("react-flow"));
+    expect(await functionCanvas.findByText("props")).toBeInTheDocument();
+    expect(await functionCanvas.findByText("Process renderWidget")).toBeInTheDocument();
+    expect(await functionCanvas.findByText("Rendered JSX")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("rootNodeId=function-render-widget"), expect.any(Object));
   });
 
   it("persists drag and resize layout edits", async () => {
@@ -812,8 +1011,15 @@ describe("GraphCode app shell", () => {
     fireEvent.doubleClick(await within(await screen.findByTestId("react-flow")).findByText("Web Workspace"));
     fireEvent.click(screen.getByText("Add"));
     fireEvent.click(await screen.findByText("Edge"));
-    await screen.findByText("Draw edge");
-    fireEvent.click(screen.getByLabelText("Draw edge gesture"));
+    await screen.findByText("Select source block");
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-pan-on-drag", "false");
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-nodes-draggable", "false");
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-nodes-connectable", "false");
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-connect-on-click", "false");
+    expect(screen.getByTestId("react-flow").className).toContain("workspace-flow-draw-edge");
+    fireEvent.click(within(screen.getByTestId("react-flow")).getByText("Hierarchy Selection"));
+    await screen.findByText("Select target block");
+    fireEvent.click(within(screen.getByTestId("react-flow")).getByText("Render Workspace Scope"));
     fireEvent.change(await screen.findByLabelText("Short Description"), { target: { value: "render input" } });
     fireEvent.change(screen.getByLabelText("Code Context"), { target: { value: "Canvas-drawn edge context." } });
     fireEvent.click(screen.getByText("Add edge"));
@@ -885,6 +1091,8 @@ describe("GraphCode app shell", () => {
     fireEvent.click(await screen.findByLabelText("Select edge selection"));
     fireEvent.change(await screen.findByLabelText("Color"), { target: { value: "#111827" } });
     fireEvent.click(screen.getByLabelText("Animated"));
+    fireEvent.change(screen.getByLabelText("Pointing Direction"), { target: { value: "target_to_source" } });
+    fireEvent.click(screen.getByLabelText("Pointing"));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
@@ -899,6 +1107,20 @@ describe("GraphCode app shell", () => {
         expect.objectContaining({
           method: "PATCH",
           body: JSON.stringify({ animated: false })
+        })
+      );
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/edges/flow-input-process",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ pointingDirection: "target_to_source" })
+        })
+      );
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/edges/flow-input-process",
+        expect.objectContaining({
+          method: "PATCH",
+          body: JSON.stringify({ pointingEnabled: false })
         })
       );
     });
@@ -928,6 +1150,10 @@ describe("GraphCode app shell", () => {
     fireEvent.click(screen.getByText("Add"));
     fireEvent.click(await screen.findByText("Boundary"));
     await screen.findByText("Draw boundary");
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-pan-on-drag", "false");
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-nodes-draggable", "false");
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-elements-selectable", "false");
+    expect(screen.getByTestId("react-flow").className).toContain("workspace-flow-draw-boundary");
     fireEvent.click(screen.getByLabelText("Draw boundary gesture"));
     fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Frontend Flow" } });
     fireEvent.change(screen.getByLabelText("Short Description"), { target: { value: "Selection modules" } });
@@ -1033,8 +1259,10 @@ describe("GraphCode app shell", () => {
     fireEvent.doubleClick(await within(await screen.findByTestId("react-flow")).findByText("Web Workspace"));
     fireEvent.click(screen.getByText("Add"));
     fireEvent.click(await screen.findByText("Edge"));
-    await screen.findByText("Draw edge");
-    fireEvent.click(screen.getByLabelText("Draw edge gesture"));
+    await screen.findByText("Select source block");
+    fireEvent.click(within(screen.getByTestId("react-flow")).getByText("Hierarchy Selection"));
+    await screen.findByText("Select target block");
+    fireEvent.click(within(screen.getByTestId("react-flow")).getByText("Render Workspace Scope"));
     fireEvent.change(await screen.findByLabelText("Short Description"), { target: { value: "render input" } });
     fireEvent.click(screen.getByText("Add edge"));
 

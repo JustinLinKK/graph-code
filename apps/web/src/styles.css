@@ -636,6 +636,13 @@ select {
   text-transform: uppercase;
 }
 
+.node-card-topline span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .node-card-icon {
   display: grid;
   place-items: center;
@@ -646,6 +653,7 @@ select {
 
 .node-card-name {
   display: -webkit-box;
+  flex: 0 0 auto;
   margin-top: 10px;
   overflow: hidden;
   color: var(--card-heading);
@@ -672,6 +680,7 @@ select {
 
 .graph-node-card p {
   display: -webkit-box;
+  flex: 0 0 auto;
   margin: 7px 0 0;
   overflow: hidden;
   color: var(--card-muted);
@@ -684,6 +693,7 @@ select {
 
 .node-card-tags {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 5px;
   margin-top: 8px;
@@ -692,6 +702,7 @@ select {
 
 .node-status-row {
   display: flex;
+  flex: 0 0 auto;
   flex-wrap: wrap;
   gap: 5px;
   margin-top: 8px;
@@ -1390,6 +1401,15 @@ select {
 .workspace-flow,
 .react-flow__pane {
   background: var(--canvas-surface);
+}
+
+.workspace-flow-draw-boundary .react-flow__pane {
+  cursor: crosshair;
+}
+
+.workspace-flow-draw-edge .react-flow__pane,
+.workspace-flow-draw-edge .graph-node-card {
+  cursor: pointer;
 }
 
 .react-flow__controls {

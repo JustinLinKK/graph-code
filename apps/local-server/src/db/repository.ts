@@ -22,6 +22,7 @@ import {
   type DependencyDetails,
   type DependencyKind,
   type EdgeMutation,
+  type EdgePointingDirection,
   type EdgeUpdate,
   FORMAT_KINDS,
   type FormatDetails,
@@ -65,6 +66,7 @@ import {
   isAttachmentNodeKind,
   isDomainNodeKind
 } from "@graphcode/graph-model";
+import type { CodeGraphSnapshot, CodeGraphSymbol, CodeGraphWorkflowNode } from "@graphcode/parser";
 import type { GraphDatabase } from "./connection";
 import { layoutCanvasWithBoundaryGroups } from "../layout/elk";
 
@@ -123,6 +125,8 @@ type EdgeRow = {
   code_context: string;
   color: string;
   animated: 0 | 1;
+  pointing_enabled: 0 | 1;
+  pointing_direction: EdgePointingDirection;
   agent_status: AgentStatus;
   created_at: string;
 };
@@ -313,6 +317,8 @@ type NewGraphEdge = {
   codeContext?: string;
   color?: string;
   animated?: boolean;
+  pointingEnabled?: boolean;
+  pointingDirection?: EdgePointingDirection;
   agentStatus?: AgentStatus;
 };
 
@@ -367,6 +373,14 @@ type NewBasicBlockDetails = {
   valueHint?: string | null;
   required?: boolean;
   notes?: string;
+};
+
+export type CodeGraphRefreshResult = {
+  nodeCount: number;
+  edgeCount: number;
+  fileCount: number;
+  symbolCount: number;
+  workflowNodeCount: number;
 };
 
 export class GraphRepository {
@@ -1097,8 +1111,8 @@ export class GraphRepository {
     this.db
       .prepare(
         `
-        INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, agent_status)
-        VALUES (@id, @projectId, @kind, @sourceNodeId, @targetNodeId, @label, @codeContext, @color, @animated, @agentStatus)
+        INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, pointing_enabled, pointing_direction, agent_status)
+        VALUES (@id, @projectId, @kind, @sourceNodeId, @targetNodeId, @label, @codeContext, @color, @animated, @pointingEnabled, @pointingDirection, @agentStatus)
       `
       )
       .run({
@@ -1107,6 +1121,8 @@ export class GraphRepository {
         codeContext: input.codeContext ?? "",
         color: input.color ?? defaultEdgeColor(input.kind),
         animated: input.animated === true ? 1 : 0,
+        pointingEnabled: input.pointingEnabled === false ? 0 : 1,
+        pointingDirection: input.pointingDirection ?? "source_to_target",
         agentStatus: input.agentStatus ?? "none"
       });
     return this.getEdge(input.id);
@@ -1123,6 +1139,8 @@ export class GraphRepository {
       codeContext: input.codeContext ?? "",
       color: input.color,
       animated: input.animated,
+      pointingEnabled: input.pointingEnabled,
+      pointingDirection: input.pointingDirection,
       agentStatus: "implemented"
     });
   }
@@ -1146,7 +1164,9 @@ export class GraphRepository {
       label: input.label === undefined ? existing.label : input.label,
       codeContext: input.codeContext ?? existing.codeContext,
       color: input.color ?? existing.color,
-      animated: input.animated ?? existing.animated
+      animated: input.animated ?? existing.animated,
+      pointingEnabled: input.pointingEnabled ?? existing.pointingEnabled,
+      pointingDirection: input.pointingDirection ?? existing.pointingDirection
     };
 
     if (!GRAPH_EDGE_KINDS.includes(next.kind)) {
@@ -1169,7 +1189,9 @@ export class GraphRepository {
           label = @label,
           code_context = @codeContext,
           color = @color,
-          animated = @animated
+          animated = @animated,
+          pointing_enabled = @pointingEnabled,
+          pointing_direction = @pointingDirection
         WHERE id = @id
       `
       )
@@ -1181,7 +1203,9 @@ export class GraphRepository {
         label: next.label ?? null,
         codeContext: next.codeContext ?? "",
         color: next.color,
-        animated: next.animated ? 1 : 0
+        animated: next.animated ? 1 : 0,
+        pointingEnabled: next.pointingEnabled ? 1 : 0,
+        pointingDirection: next.pointingDirection
       });
 
     return this.getEdge(edgeId);
@@ -1497,6 +1521,457 @@ export class GraphRepository {
     });
   }
 
+  replaceScannedCodeGraph(projectId: string, snapshot: CodeGraphSnapshot): CodeGraphRefreshResult {
+    this.getProject(projectId);
+    const save = this.db.transaction(() => {
+      this.deleteGeneratedCodeGraph(projectId);
+      const frameworkId = this.findOrCreateScanFramework(projectId);
+      const directoryIdByPath = new Map(snapshot.directories.map((directory) => [directory.path, directory.id]));
+      const fileIdByPath = new Map(snapshot.files.map((file) => [file.path, file.id]));
+      let workflowNodeCount = 0;
+
+      for (const directory of snapshot.directories) {
+        const isRoot = directory.parentPath === null;
+        const parentId = isRoot ? frameworkId : directoryIdByPath.get(directory.parentPath ?? ".");
+        if (!parentId) {
+          throw validationError(`Missing parent directory for ${directory.path}.`);
+        }
+        this.createNode({
+          id: directory.id,
+          projectId,
+          kind: "module",
+          name: directory.name,
+          summary: isRoot ? "Generated bottom-up code graph" : `Directory ${directory.path}`,
+          codeContext: isRoot
+            ? "Generated scanner root that decomposes repository code from directories into file modules and symbols."
+            : `Generated directory module for ${directory.path}.`,
+          codeDirectory: directory.path,
+          sourcePath: directory.path,
+          language: "typescript",
+          parentId,
+          position: { x: 80 + pathDepth(directory.path) * 260, y: 100 },
+          agentStatus: "implemented"
+        });
+      }
+
+      for (const file of snapshot.files) {
+        const parentId = directoryIdByPath.get(file.directoryPath);
+        if (!parentId) {
+          throw validationError(`Missing directory node for ${file.path}.`);
+        }
+        const symbolCount = snapshot.symbols.filter((symbol) => symbol.filePath === file.path).length;
+        this.createNode({
+          id: file.id,
+          projectId,
+          kind: "module",
+          name: file.name,
+          summary: `${file.language} file module with ${symbolCount} symbols`,
+          codeContext: `Generated file module for ${file.path}. Imports: ${file.imports.map((item) => item.moduleSpecifier).join(", ") || "none"}. Exports: ${file.exports.join(", ") || "none"}.`,
+          codeDirectory: file.path,
+          codeStartLine: file.startLine,
+          codeEndLine: file.endLine,
+          sourcePath: file.path,
+          sourceStartLine: file.startLine,
+          sourceEndLine: file.endLine,
+          language: file.language,
+          parentId,
+          agentStatus: "implemented"
+        });
+      }
+
+      const symbolById = new Map(snapshot.symbols.map((symbol) => [symbol.id, symbol]));
+      const orderedSymbols = [...snapshot.symbols].sort(
+        (a, b) => symbolHierarchyDepth(a, symbolById) - symbolHierarchyDepth(b, symbolById) || a.startLine - b.startLine || a.name.localeCompare(b.name)
+      );
+
+      for (const symbol of orderedSymbols) {
+        const parentId = symbol.parentSymbolId ?? fileIdByPath.get(symbol.filePath);
+        if (!parentId) {
+          throw validationError(`Missing file node for ${symbol.filePath}.`);
+        }
+        this.createNode({
+          id: symbol.id,
+          projectId,
+          kind: symbol.kind,
+          name: symbol.name,
+          summary: symbol.summary,
+          codeContext: `${symbol.signature}\n${symbol.summary}`,
+          codeDirectory: symbol.filePath,
+          codeStartLine: symbol.startLine,
+          codeEndLine: symbol.endLine,
+          sourcePath: symbol.filePath,
+          sourceStartLine: symbol.startLine,
+          sourceEndLine: symbol.endLine,
+          language: symbol.filePath.endsWith(".js") || symbol.filePath.endsWith(".jsx") ? "javascript" : "typescript",
+          parentId,
+          agentStatus: "implemented"
+        });
+      }
+
+      for (const symbol of orderedSymbols.filter((item) => item.kind === "function")) {
+        workflowNodeCount += this.createFunctionWorkflow(projectId, symbol);
+      }
+
+      for (const edge of snapshot.edges) {
+        if (!this.nodeExists(edge.sourceId) || !this.nodeExists(edge.targetId)) {
+          continue;
+        }
+        this.createEdge({
+          id: edge.id,
+          projectId,
+          kind: edge.kind,
+          sourceNodeId: edge.sourceId,
+          targetNodeId: edge.targetId,
+          label: edge.label,
+          codeContext: edge.codeContext,
+          agentStatus: "implemented"
+        });
+      }
+
+      this.db
+        .prepare("INSERT OR REPLACE INTO graph_revisions (id, project_id, revision, note) VALUES (?, ?, ?, ?)")
+        .run(
+          `code-graph-revision-${hashId(`${projectId}:${snapshot.files.length}:${snapshot.symbols.length}:${snapshot.edges.length}`)}`,
+          projectId,
+          100 + snapshot.files.length,
+          `Refreshed generated Code Graph from ${snapshot.files.length} files and ${snapshot.symbols.length} symbols`
+        );
+
+      return {
+        nodeCount: snapshot.directories.length + snapshot.files.length + snapshot.symbols.length + workflowNodeCount,
+        edgeCount: snapshot.edges.length + this.countGeneratedWorkflowEdges(projectId),
+        fileCount: snapshot.files.length,
+        symbolCount: snapshot.symbols.length,
+        workflowNodeCount
+      };
+    });
+
+    return save();
+  }
+
+  private deleteGeneratedCodeGraph(projectId: string): void {
+    this.db.prepare("DELETE FROM graph_nodes WHERE project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')").run(projectId);
+    this.db.prepare("DELETE FROM graph_revisions WHERE project_id = ? AND id LIKE 'code-graph-revision-%'").run(projectId);
+  }
+
+  private createFunctionWorkflow(projectId: string, symbol: CodeGraphSymbol): number {
+    const sourcePath = symbol.filePath;
+    const workflowInputs = symbol.parameters.length > 0 ? symbol.parameters : [{ name: "Invocation", typeHint: "function call" }];
+    const outputId = `${symbol.id}-output`;
+    const outputFormatId = `${outputId}-format`;
+    const workflow = symbol.workflow ?? {
+      nodes: [
+        {
+          id: `${symbol.id}-process`,
+          kind: "entry" as const,
+          name: `Entry ${symbol.name}`,
+          summary: `Function entry for ${symbol.name}`,
+          codeContext: symbol.signature,
+          startLine: symbol.startLine,
+          endLine: symbol.endLine
+        }
+      ],
+      edges: []
+    };
+    const entryNode = workflow.nodes.find((node) => node.kind === "entry") ?? workflow.nodes[0];
+    const hasThrowPath = workflow.nodes.some((node) => node.kind === "throw");
+    const throwOutputId = `${symbol.id}-throw-output`;
+    const throwOutputFormatId = `${throwOutputId}-format`;
+    let nodeCount = 0;
+
+    for (const workflowNode of workflow.nodes) {
+      const processKind = processKindForWorkflowNode(symbol, workflowNode);
+      this.createNode({
+        id: workflowNode.id,
+        projectId,
+        kind: "process",
+        name: workflowNode.kind === "entry" ? `${processKindLabel(processKind)} ${symbol.name}` : workflowNode.name,
+        summary: workflowNode.summary,
+        codeContext: workflowNode.codeContext || `Generated ${workflowNode.kind} workflow block for ${symbol.name}.`,
+        codeDirectory: sourcePath,
+        codeStartLine: workflowNode.startLine,
+        codeEndLine: workflowNode.endLine,
+        sourcePath,
+        sourceStartLine: workflowNode.startLine,
+        sourceEndLine: workflowNode.endLine,
+        language: sourceLanguage(sourcePath),
+        attachedToId: symbol.id,
+        agentStatus: "implemented"
+      });
+      this.createProcessDetails({
+        nodeId: workflowNode.id,
+        processKind,
+        trigger: workflowNode.kind === "entry" ? (symbol.symbolKind === "component" ? "render" : "function call") : workflowNode.kind,
+        notes: workflowNode.codeContext || symbol.signature
+      });
+      nodeCount += 1;
+    }
+
+    this.createNode({
+      id: outputId,
+      projectId,
+      kind: "output",
+      name: symbol.returnHint ? `Returns ${symbol.returnHint}` : "Return value",
+      summary: `Output produced by ${symbol.name}`,
+      codeContext: `Generated output boundary for ${symbol.name}.`,
+      codeDirectory: sourcePath,
+      codeStartLine: symbol.startLine,
+      codeEndLine: symbol.endLine,
+      sourcePath,
+      sourceStartLine: symbol.startLine,
+      sourceEndLine: symbol.endLine,
+      language: sourceLanguage(sourcePath),
+      attachedToId: symbol.id,
+      agentStatus: "implemented"
+    });
+    this.createIoDetails({
+      nodeId: outputId,
+      ioKind: "artifact",
+      channel: `${symbol.name} return`,
+      schemaHint: symbol.returnHint ?? "unknown",
+      notes: `Generated return boundary for ${symbol.name}.`
+    });
+    nodeCount += 1;
+
+    this.createNode({
+      id: outputFormatId,
+      projectId,
+      kind: "format",
+      name: symbol.returnHint ?? "return type",
+      summary: "Return format",
+      codeContext: `Generated return format for ${symbol.name}.`,
+      codeDirectory: sourcePath,
+      sourcePath,
+      attachedToId: outputId,
+      agentStatus: "implemented"
+    });
+    this.createFormatDetails({
+      nodeId: outputFormatId,
+      formatKind: "type",
+      spec: symbol.returnHint ?? "unknown",
+      notes: `Return type hint for ${symbol.name}.`
+    });
+    nodeCount += 1;
+
+    this.createEdge({
+      id: workflowEdgeId(outputId, "describes_format", outputFormatId),
+      projectId,
+      kind: "describes_format",
+      sourceNodeId: outputId,
+      targetNodeId: outputFormatId,
+      label: "format",
+      codeContext: `${outputFormatId} describes the return type of ${symbol.name}.`,
+      agentStatus: "implemented"
+    });
+
+    if (hasThrowPath) {
+      this.createNode({
+        id: throwOutputId,
+        projectId,
+        kind: "output",
+        name: "Throws error",
+        summary: `Exceptional output produced by ${symbol.name}`,
+        codeContext: `Generated throw boundary for ${symbol.name}.`,
+        codeDirectory: sourcePath,
+        codeStartLine: symbol.startLine,
+        codeEndLine: symbol.endLine,
+        sourcePath,
+        sourceStartLine: symbol.startLine,
+        sourceEndLine: symbol.endLine,
+        language: sourceLanguage(sourcePath),
+        attachedToId: symbol.id,
+        agentStatus: "implemented"
+      });
+      this.createIoDetails({
+        nodeId: throwOutputId,
+        ioKind: "artifact",
+        channel: `${symbol.name} throw`,
+        schemaHint: "Error",
+        notes: `Generated exceptional output boundary for ${symbol.name}.`
+      });
+      nodeCount += 1;
+
+      this.createNode({
+        id: throwOutputFormatId,
+        projectId,
+        kind: "format",
+        name: "Error",
+        summary: "Throw format",
+        codeContext: `Generated throw format for ${symbol.name}.`,
+        codeDirectory: sourcePath,
+        sourcePath,
+        attachedToId: throwOutputId,
+        agentStatus: "implemented"
+      });
+      this.createFormatDetails({
+        nodeId: throwOutputFormatId,
+        formatKind: "type",
+        spec: "Error",
+        notes: `Throw type hint for ${symbol.name}.`
+      });
+      nodeCount += 1;
+
+      this.createEdge({
+        id: workflowEdgeId(throwOutputId, "describes_format", throwOutputFormatId),
+        projectId,
+        kind: "describes_format",
+        sourceNodeId: throwOutputId,
+        targetNodeId: throwOutputFormatId,
+        label: "format",
+        codeContext: `${throwOutputFormatId} describes the throw output type of ${symbol.name}.`,
+        agentStatus: "implemented"
+      });
+    }
+
+    workflowInputs.forEach((parameter, index) => {
+      const inputId = `${symbol.id}-input-${hashId(`${parameter.name}:${index}`)}`;
+      const inputFormatId = `${inputId}-format`;
+      this.createNode({
+        id: inputId,
+        projectId,
+        kind: "input",
+        name: parameter.name,
+        summary: `Input to ${symbol.name}`,
+        codeContext: `Generated input boundary for ${symbol.name} parameter ${parameter.name}.`,
+        codeDirectory: sourcePath,
+        codeStartLine: symbol.startLine,
+        codeEndLine: symbol.endLine,
+        sourcePath,
+        sourceStartLine: symbol.startLine,
+        sourceEndLine: symbol.endLine,
+        language: sourceLanguage(sourcePath),
+        attachedToId: symbol.id,
+        agentStatus: "implemented"
+      });
+      this.createIoDetails({
+        nodeId: inputId,
+        ioKind: "artifact",
+        channel: `${symbol.name}.${parameter.name}`,
+        schemaHint: parameter.typeHint ?? "unknown",
+        notes: `Generated parameter boundary for ${symbol.signature}.`
+      });
+      nodeCount += 1;
+
+      this.createNode({
+        id: inputFormatId,
+        projectId,
+        kind: "format",
+        name: parameter.typeHint ?? "input type",
+        summary: "Input format",
+        codeContext: `Generated input format for ${symbol.name}.${parameter.name}.`,
+        codeDirectory: sourcePath,
+        sourcePath,
+        attachedToId: inputId,
+        agentStatus: "implemented"
+      });
+      this.createFormatDetails({
+        nodeId: inputFormatId,
+        formatKind: "type",
+        spec: parameter.typeHint ?? "unknown",
+        notes: `Type hint for ${symbol.name}.${parameter.name}.`
+      });
+      nodeCount += 1;
+
+      this.createEdge({
+        id: workflowEdgeId(inputId, "flows", entryNode.id),
+        projectId,
+        kind: "flows",
+        sourceNodeId: inputId,
+        targetNodeId: entryNode.id,
+        label: "parameter",
+        codeContext: `${parameter.name} flows into ${symbol.name}.`,
+        animated: true,
+        agentStatus: "implemented"
+      });
+      this.createEdge({
+        id: workflowEdgeId(inputId, "describes_format", inputFormatId),
+        projectId,
+        kind: "describes_format",
+        sourceNodeId: inputId,
+        targetNodeId: inputFormatId,
+        label: "format",
+        codeContext: `${inputFormatId} describes the ${parameter.name} input type.`,
+        agentStatus: "implemented"
+      });
+    });
+
+    for (const edge of workflow.edges) {
+      this.createEdge({
+        id: edge.id,
+        projectId,
+        kind: "flows",
+        sourceNodeId: edge.sourceId,
+        targetNodeId: edge.targetId,
+        label: edge.label,
+        codeContext: edge.codeContext,
+        animated: true,
+        agentStatus: "implemented"
+      });
+    }
+
+    const workflowOutgoing = new Set(workflow.edges.map((edge) => edge.sourceId));
+    for (const workflowNode of workflow.nodes) {
+      if (workflowNode.kind === "return") {
+        this.createEdge({
+          id: workflowEdgeId(workflowNode.id, "flows", outputId),
+          projectId,
+          kind: "flows",
+          sourceNodeId: workflowNode.id,
+          targetNodeId: outputId,
+          label: "return",
+          codeContext: `${symbol.name} returns through ${workflowNode.name}.`,
+          animated: true,
+          agentStatus: "implemented"
+        });
+        continue;
+      }
+
+      if (workflowNode.kind === "throw" && hasThrowPath) {
+        this.createEdge({
+          id: workflowEdgeId(workflowNode.id, "flows", throwOutputId),
+          projectId,
+          kind: "flows",
+          sourceNodeId: workflowNode.id,
+          targetNodeId: throwOutputId,
+          label: "throw",
+          codeContext: `${symbol.name} throws through ${workflowNode.name}.`,
+          animated: true,
+          agentStatus: "implemented"
+        });
+        continue;
+      }
+
+      if (!workflowOutgoing.has(workflowNode.id) && workflowNode.id !== outputId) {
+        this.createEdge({
+          id: workflowEdgeId(workflowNode.id, "flows", outputId),
+          projectId,
+          kind: "flows",
+          sourceNodeId: workflowNode.id,
+          targetNodeId: outputId,
+          label: "return",
+          codeContext: `${symbol.name} falls through to its return output.`,
+          animated: true,
+          agentStatus: "implemented"
+        });
+      }
+    }
+
+    return nodeCount;
+  }
+
+  private countGeneratedWorkflowEdges(projectId: string): number {
+    const row = this.db
+      .prepare(
+        "SELECT COUNT(*) AS count FROM graph_edges WHERE project_id = ? AND id LIKE 'code-edge-%' AND kind IN ('flows', 'describes_format')"
+      )
+      .get(projectId) as { count: number } | undefined;
+    return row?.count ?? 0;
+  }
+
+  private nodeExists(nodeId: string): boolean {
+    return Boolean(this.db.prepare("SELECT id FROM graph_nodes WHERE id = ?").get(nodeId));
+  }
+
   getHierarchy(projectId: string): HierarchyNode[] {
     const nodes = this.listNodes(projectId).filter((node) => isDomainNodeKind(node.kind));
     const nodeById = new Map(nodes.map((node) => [node.id, node]));
@@ -1538,12 +2013,19 @@ export class GraphRepository {
       byParent.set(node.parentId, siblings);
     }
 
-    const attachChildren = (node: HierarchyNode): HierarchyNode => ({
-      ...node,
-      children: (byParent.get(node.id) ?? []).sort(sortHierarchyNodes).map(attachChildren)
-    });
+    const attachChildren = (node: HierarchyNode, ancestorIds: Set<string> = new Set()): HierarchyNode => {
+      const nextAncestorIds = new Set(ancestorIds);
+      nextAncestorIds.add(node.id);
+      return {
+        ...node,
+        children: (byParent.get(node.id) ?? [])
+          .filter((child) => !nextAncestorIds.has(child.id))
+          .sort(sortHierarchyNodes)
+          .map((child) => attachChildren(child, nextAncestorIds))
+      };
+    };
 
-    return (byParent.get(null) ?? []).sort(sortHierarchyNodes).map(attachChildren);
+    return (byParent.get(null) ?? []).sort(sortHierarchyNodes).map((node) => attachChildren(node));
   }
 
   async getCanvasGraph(input: {
@@ -2865,9 +3347,11 @@ export class GraphRepository {
       return included;
     }
 
+    const expandableAttachmentIds = new Set<string>();
     for (const node of allNodes) {
       if (node.attachedToId === scopeNode.id && isAttachmentNodeKind(node.kind)) {
         included.add(node.id);
+        expandableAttachmentIds.add(node.id);
       }
     }
 
@@ -2878,8 +3362,9 @@ export class GraphRepository {
         if (!node.attachedToId || included.has(node.id)) {
           continue;
         }
-        if (isAttachmentNodeKind(node.kind) && included.has(node.attachedToId)) {
+        if (isAttachmentNodeKind(node.kind) && expandableAttachmentIds.has(node.attachedToId)) {
           included.add(node.id);
+          expandableAttachmentIds.add(node.id);
           changed = true;
         }
       }
@@ -3433,10 +3918,14 @@ export class GraphRepository {
 
     const parentId = input.parentId ?? null;
     const attachedToId = input.attachedToId ?? null;
+    const nodeId = updatingNodeId ?? input.id;
 
-    if ((parentId && parentId === updatingNodeId) || (attachedToId && attachedToId === updatingNodeId)) {
+    if ((parentId && parentId === nodeId) || (attachedToId && attachedToId === nodeId)) {
       throw validationError("A node cannot contain or attach to itself.");
     }
+
+    this.assertNoParentCycle(parentId, input.projectId, nodeId);
+    this.assertNoAttachmentCycle(attachedToId, input.projectId, nodeId);
 
     if (input.kind === "custom" && input.customTypeId) {
       const customType = this.db.prepare("SELECT * FROM custom_block_types WHERE id = ?").get(input.customTypeId) as CustomBlockTypeRow | undefined;
@@ -3487,11 +3976,11 @@ export class GraphRepository {
 
     if (input.kind === "function" || input.kind === "object") {
       if (!parentId || attachedToId) {
-        throw validationError("Function and object nodes must have a module parent and no attached_to_id.");
+        throw validationError("Function and object nodes must have a module or function parent and no attached_to_id.");
       }
       const parent = this.getNode(parentId);
-      if (parent.projectId !== input.projectId || parent.kind !== "module") {
-        throw validationError("Function and object nodes must be contained by a module.");
+      if (parent.projectId !== input.projectId || (parent.kind !== "module" && parent.kind !== "function")) {
+        throw validationError("Function and object nodes must be contained by a module or function.");
       }
       return;
     }
@@ -3521,6 +4010,42 @@ export class GraphRepository {
 
     if (owner.kind === "format") {
       throw validationError("Format nodes cannot attach to another format node.");
+    }
+  }
+
+  private assertNoParentCycle(parentId: string | null, projectId: string, nodeId: string): void {
+    const seen = new Set<string>();
+    let currentId = parentId;
+    while (currentId) {
+      if (currentId === nodeId || seen.has(currentId)) {
+        throw validationError("Node containment cannot create a cycle.");
+      }
+      seen.add(currentId);
+      const row = this.db.prepare("SELECT project_id, parent_id FROM graph_nodes WHERE id = ?").get(currentId) as
+        | { project_id: string; parent_id: string | null }
+        | undefined;
+      if (!row || row.project_id !== projectId) {
+        return;
+      }
+      currentId = row.parent_id;
+    }
+  }
+
+  private assertNoAttachmentCycle(attachedToId: string | null, projectId: string, nodeId: string): void {
+    const seen = new Set<string>();
+    let currentId = attachedToId;
+    while (currentId) {
+      if (currentId === nodeId || seen.has(currentId)) {
+        throw validationError("Node attachments cannot create a cycle.");
+      }
+      seen.add(currentId);
+      const row = this.db.prepare("SELECT project_id, attached_to_id FROM graph_nodes WHERE id = ?").get(currentId) as
+        | { project_id: string; attached_to_id: string | null }
+        | undefined;
+      if (!row || row.project_id !== projectId) {
+        return;
+      }
+      currentId = row.attached_to_id;
     }
   }
 
@@ -3793,6 +4318,8 @@ function mapEdge(row: EdgeRow, tags: GraphTag[] = []): GraphEdge {
     codeContext: row.code_context ?? "",
     color: row.color ?? defaultEdgeColor(row.kind),
     animated: row.animated === 1,
+    pointingEnabled: row.pointing_enabled !== 0,
+    pointingDirection: row.pointing_direction ?? "source_to_target",
     agentStatus: row.agent_status ?? "none",
     gitStatus: null,
     tags,
@@ -3945,6 +4472,84 @@ function defaultTagColor(seed: string): string {
   return TAG_COLORS[hash % TAG_COLORS.length];
 }
 
+function processKindForSymbol(symbol: CodeGraphSymbol): ProcessKind {
+  if (symbol.symbolKind === "component") {
+    return "render";
+  }
+  if (/^(run|start|open|load|save|seed|build|register|create|update|delete|replace)/i.test(symbol.name)) {
+    return "orchestrate";
+  }
+  if (/^(validate|assert|parse|normalize)/i.test(symbol.name)) {
+    return "validate";
+  }
+  return "transform";
+}
+
+function processKindForWorkflowNode(symbol: CodeGraphSymbol, workflowNode: CodeGraphWorkflowNode): ProcessKind {
+  if (workflowNode.kind === "entry") {
+    return processKindForSymbol(symbol);
+  }
+  if (workflowNode.kind === "condition") {
+    return "condition";
+  }
+  if (workflowNode.kind === "return" || workflowNode.kind === "throw") {
+    return "route";
+  }
+  return "transform";
+}
+
+function processKindLabel(kind: ProcessKind): string {
+  switch (kind) {
+    case "render":
+      return "Render";
+    case "orchestrate":
+      return "Orchestrate";
+    case "validate":
+      return "Validate";
+    case "persist":
+      return "Persist";
+    case "route":
+      return "Route";
+    case "analyze":
+      return "Analyze";
+    case "condition":
+      return "Condition";
+    case "transform":
+    default:
+      return "Process";
+  }
+}
+
+function symbolHierarchyDepth(symbol: CodeGraphSymbol, symbolById: Map<string, CodeGraphSymbol>): number {
+  let depth = 0;
+  let parentId = symbol.parentSymbolId;
+  const seen = new Set<string>();
+  while (parentId && !seen.has(parentId)) {
+    seen.add(parentId);
+    const parent = symbolById.get(parentId);
+    if (!parent) {
+      break;
+    }
+    depth += 1;
+    parentId = parent.parentSymbolId;
+  }
+  return depth;
+}
+
+function sourceLanguage(sourcePath: string): LanguageType {
+  return sourcePath.endsWith(".js") || sourcePath.endsWith(".jsx") || sourcePath.endsWith(".mjs") || sourcePath.endsWith(".cjs")
+    ? "javascript"
+    : "typescript";
+}
+
+function pathDepth(value: string): number {
+  return value === "." ? 0 : value.split("/").length;
+}
+
+function workflowEdgeId(sourceNodeId: string, kind: GraphEdgeKind, targetNodeId: string): string {
+  return `code-edge-${hashId(`${sourceNodeId}:${kind}:${targetNodeId}`)}`;
+}
+
 function normalizeTagName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, "-");
 }
@@ -4022,6 +4627,8 @@ function enrichSelfSeedEdge(edge: NewGraphEdge): NewGraphEdge {
     ...edge,
     color: edge.color ?? defaultEdgeColor(edge.kind),
     animated: edge.animated ?? edge.kind === "flows",
+    pointingEnabled: edge.pointingEnabled ?? true,
+    pointingDirection: edge.pointingDirection ?? "source_to_target",
     agentStatus: edge.agentStatus ?? "implemented",
     codeContext:
       edge.codeContext ??

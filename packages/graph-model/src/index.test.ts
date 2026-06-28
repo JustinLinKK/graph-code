@@ -20,6 +20,7 @@ import {
   isAttachmentNodeKind,
   isDomainNodeKind,
   nodeReuseMutationSchema,
+  processKindSchema,
   tagAssignmentSchema,
   nodeTypeStyleSchema,
   settingsValidationResultSchema,
@@ -52,11 +53,14 @@ describe("graph model enums", () => {
       label: "local API",
       codeContext: "The web client depends on the local server API contract.",
       color: "#0891b2",
-      animated: true
+      animated: true,
+      pointingEnabled: true,
+      pointingDirection: "bidirectional"
     });
 
     expect(parsed.codeContext).toContain("local server");
     expect(parsed.animated).toBe(true);
+    expect(parsed.pointingDirection).toBe("bidirectional");
     expect(
       graphEdgeSchema.parse({
         ...parsed,
@@ -167,6 +171,7 @@ describe("graph model enums", () => {
   it("accepts agent settings, statuses, validation, and run payloads", () => {
     expect(agentStatusSchema.parse("coded")).toBe("coded");
     expect(agentStatusSchema.parse("implemented")).toBe("implemented");
+    expect(processKindSchema.parse("condition")).toBe("condition");
     expect(gitStatusInfoSchema.parse({ worktree: "pending", change: "modified" }).change).toBe("modified");
     expect(
       agentConfigSchema.parse({

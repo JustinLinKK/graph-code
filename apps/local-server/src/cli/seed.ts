@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { scanRepositoryCodeGraph } from "@graphcode/parser";
 import { resolveDbPath, resolveRepoRoot } from "../config";
 import { openDatabase } from "../db/connection";
 import { GraphRepository } from "../db/repository";
@@ -10,6 +11,7 @@ const db = openDatabase(resolveDbPath());
 migrate(db);
 const repo = new GraphRepository(db);
 const project = repo.seedSelfGraph(repoRoot);
+repo.replaceScannedCodeGraph(project.id, scanRepositoryCodeGraph(repoRoot));
 db.close();
 
 const graphcodePath = path.join(repoRoot, ".graphcode");

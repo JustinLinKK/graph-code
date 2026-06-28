@@ -1,6 +1,8 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { scanRepositoryCodeGraph } from "@graphcode/parser";
 import { openDatabase, type GraphDatabase } from "./connection";
 import { GraphRepository } from "./repository";
 import { migrate } from "./schema";
@@ -126,6 +128,34 @@ describe("SQLite graph repository", () => {
       kind: "framework",
       name: "Framework"
     });
+    repo.createNode({
+      id: "module",
+      projectId: project.id,
+      kind: "module",
+      name: "Module",
+      parentId: "framework"
+    });
+    repo.createNode({
+      id: "parent-function",
+      projectId: project.id,
+      kind: "function",
+      name: "Parent Function",
+      parentId: "module"
+    });
+    repo.createNode({
+      id: "child-function",
+      projectId: project.id,
+      kind: "function",
+      name: "Child Function",
+      parentId: "parent-function"
+    });
+    repo.createNode({
+      id: "child-object",
+      projectId: project.id,
+      kind: "object",
+      name: "Child Object",
+      parentId: "parent-function"
+    });
 
     expect(() =>
       repo.createNode({
@@ -135,7 +165,48 @@ describe("SQLite graph repository", () => {
         name: "Bad Function",
         parentId: "framework"
       })
-    ).toThrow(/module/);
+    ).toThrow(/module or function/);
+  });
+
+  it("rejects indirect containment and attachment cycles", () => {
+    const project = repo.createProject({ id: "project", name: "Project", rootPath: "/tmp/project" });
+    repo.createNode({
+      id: "framework",
+      projectId: project.id,
+      kind: "framework",
+      name: "Framework"
+    });
+    repo.createNode({
+      id: "module-a",
+      projectId: project.id,
+      kind: "module",
+      name: "Module A",
+      parentId: "framework"
+    });
+    repo.createNode({
+      id: "module-b",
+      projectId: project.id,
+      kind: "module",
+      name: "Module B",
+      parentId: "module-a"
+    });
+    repo.createNode({
+      id: "api-a",
+      projectId: project.id,
+      kind: "api",
+      name: "API A",
+      attachedToId: "module-a"
+    });
+    repo.createNode({
+      id: "event-b",
+      projectId: project.id,
+      kind: "event",
+      name: "Event B",
+      attachedToId: "api-a"
+    });
+
+    expect(() => repo.updateNode("module-a", { parentId: "module-b" })).toThrow(/containment cannot create a cycle/);
+    expect(() => repo.updateNode("api-a", { attachedToId: "event-b" })).toThrow(/attachments cannot create a cycle/);
   });
 
   it("returns framework canvas data with only the next layer", async () => {
@@ -160,9 +231,41 @@ describe("SQLite graph repository", () => {
     expect(canvas.boundaries.map((boundary) => boundary.name)).toEqual(expect.arrayContaining(["Frontend", "Backend", "Shared Model", "Tooling"]));
   });
 
-  it("keeps scanner-created file nodes under a dedicated repository scan container", async () => {
-    const project = repo.seedSelfGraph(selfRootPath);
-    const scannedNode = repo.upsertScannedFileNode({
+  it("replaces shallow scanner nodes with a bottom-up Code Graph and function workflow", async () => {
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-codegraph-"));
+    fs.mkdirSync(path.join(rootPath, "src"), { recursive: true });
+    fs.writeFileSync(
+      path.join(rootPath, "src", "math.ts"),
+      [
+        "export function add(left: number, right: number): number {",
+        "  return left + right;",
+        "}",
+        "export function double(value: number): number {",
+        "  return add(value, value);",
+        "}",
+        "export function outer(flag: boolean): number {",
+        "  function inner(value: number): number {",
+        "    return value > 0 ? value : -value;",
+        "  }",
+        "  if (flag) {",
+        "    return inner(1);",
+        "  } else {",
+        "    throw new Error('flag');",
+        "  }",
+        "}",
+        "export function choose(value: number): number {",
+        "  switch (value) {",
+        "    case 1:",
+        "      return outer(true);",
+        "    default:",
+        "      return double(value);",
+        "  }",
+        "}"
+      ].join("\n")
+    );
+
+    const project = repo.seedSelfGraph(rootPath);
+    repo.upsertScannedFileNode({
       projectId: project.id,
       id: "scan-file-workspace",
       name: "workspace.ts",
@@ -170,31 +273,103 @@ describe("SQLite graph repository", () => {
       sourcePath: "apps/local-server/src/workspace.ts",
       language: "typescript"
     });
-    expect(scannedNode.parentId).toBeTruthy();
+    const result = repo.replaceScannedCodeGraph(project.id, scanRepositoryCodeGraph(rootPath));
+    const hierarchy = flattenHierarchy(repo.getHierarchy(project.id));
+    const codeRoot = hierarchy.find((node) => node.name === "Code Graph");
+    const mathFile = hierarchy.find((node) => node.name === "math.ts");
+    const add = hierarchy.find((node) => node.name === "add");
+    const outer = hierarchy.find((node) => node.name === "outer");
+    const inner = hierarchy.find((node) => node.name === "inner");
+    const staleScans = db.prepare("SELECT COUNT(*) AS count FROM graph_nodes WHERE id LIKE 'scan-%'").get() as { count: number };
 
-    const scanRoot = repo.getNode(scannedNode.parentId!);
-    expect(scanRoot.name).toBe("Repository Scan");
-    expect(scanRoot.kind).toBe("module");
-    expect(scanRoot.parentId).toBe("framework-graphcode-self");
-    expect(scannedNode.agentStatus).toBe("implemented");
+    expect(result.fileCount).toBe(1);
+    expect(result.symbolCount).toBe(5);
+    expect(result.workflowNodeCount).toBeGreaterThan(0);
+    expect(staleScans.count).toBe(0);
+    expect(codeRoot?.parentId).toBe("framework-graphcode-self");
+    expect(hierarchy.map((node) => node.name)).toEqual(expect.arrayContaining(["Code Graph", "src", "math.ts", "add", "double", "outer", "inner"]));
+    expect(inner?.parentId).toBe(outer?.id);
+    expect(hierarchy.every((node) => ["framework", "module", "website", "ui_component", "function", "object"].includes(node.kind))).toBe(true);
 
-    const frameworkCanvas = await repo.getCanvasGraph({
+    const codeCanvas = await repo.getCanvasGraph({
       projectId: project.id,
-      rootNodeId: "framework-graphcode-self",
+      rootNodeId: codeRoot!.id,
       includeAttachments: true
     });
-    expect(frameworkCanvas.nodes.map((node) => node.name)).toContain("Repository Scan");
-    expect(frameworkCanvas.nodes.map((node) => node.name)).not.toContain("workspace.ts");
+    expect(codeCanvas.nodes.map((node) => node.name)).toContain("src");
 
-    const scanCanvas = await repo.getCanvasGraph({
+    const fileCanvas = await repo.getCanvasGraph({
       projectId: project.id,
-      rootNodeId: scanRoot.id,
+      rootNodeId: mathFile!.id,
       includeAttachments: true
     });
-    expect(scanCanvas.nodes.map((node) => node.name)).toContain("workspace.ts");
+    expect(fileCanvas.nodes.map((node) => node.name)).toEqual(expect.arrayContaining(["add", "double", "outer", "choose"]));
+    expect(fileCanvas.nodes.map((node) => node.name)).not.toContain("inner");
+    expect(fileCanvas.nodes).toHaveLength(4);
+    expect(fileCanvas.nodes.every((node) => node.kind === "function" || node.kind === "object")).toBe(true);
+    expect(fileCanvas.edges.some((edge) => edge.kind === "calls" && edge.label === "add")).toBe(true);
+
+    const functionCanvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: outer!.id,
+      includeAttachments: true
+    });
+    expect(functionCanvas.nodes.map((node) => node.kind)).toEqual(expect.arrayContaining(["function", "input", "process", "output", "format"]));
+    expect(functionCanvas.nodes.map((node) => node.name)).toEqual(expect.arrayContaining(["inner", "flag", "Returns number", "Throws error"]));
+    expect(functionCanvas.processes.map((process) => process.processKind)).toContain("condition");
+    expect(functionCanvas.edges.map((edge) => edge.label)).toEqual(expect.arrayContaining(["if flag", "else", "throw", "return"]));
+    expect(functionCanvas.edges.map((edge) => edge.kind)).toEqual(expect.arrayContaining(["flows", "describes_format"]));
+
+    const innerCanvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: inner!.id,
+      includeAttachments: true
+    });
+    expect(innerCanvas.nodes.map((node) => node.name)).toEqual(expect.arrayContaining(["inner", "value", "Returns number"]));
+    expect(innerCanvas.edges.map((edge) => edge.label)).toEqual(expect.arrayContaining(["if value > 0", "else"]));
   });
 
-  it("returns local-server canvas data with rich attachments and basic blocks", async () => {
+  it("keeps large file canvases bounded while function canvases show workflow", async () => {
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-large-file-"));
+    fs.mkdirSync(path.join(rootPath, "src"), { recursive: true });
+    const sourceLines = Array.from({ length: 32 }, (_, index) => [
+      `export function step${index}(value: number): number {`,
+      `  if (value > ${index}) {`,
+      `    return value - ${index};`,
+      "  }",
+      `  return value + ${index};`,
+      "}"
+    ])
+      .flat()
+      .join("\n");
+    fs.writeFileSync(path.join(rootPath, "src", "large.ts"), sourceLines);
+
+    const project = repo.seedSelfGraph(rootPath);
+    repo.replaceScannedCodeGraph(project.id, scanRepositoryCodeGraph(rootPath));
+    const hierarchy = flattenHierarchy(repo.getHierarchy(project.id));
+    const largeFile = hierarchy.find((node) => node.name === "large.ts");
+    const step7 = hierarchy.find((node) => node.name === "step7");
+
+    const fileCanvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: largeFile!.id,
+      includeAttachments: true
+    });
+    expect(fileCanvas.nodes).toHaveLength(32);
+    expect(fileCanvas.nodes.every((node) => node.kind === "function")).toBe(true);
+    expect(fileCanvas.nodes.map((node) => node.kind)).not.toEqual(expect.arrayContaining(["input", "process", "output", "format"]));
+
+    const functionCanvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: step7!.id,
+      includeAttachments: true
+    });
+    expect(functionCanvas.nodes.map((node) => node.kind)).toEqual(expect.arrayContaining(["function", "input", "process", "output", "format"]));
+    expect(functionCanvas.nodes.map((node) => node.name)).toEqual(expect.arrayContaining(["step7", "value", "Returns number"]));
+    expect(functionCanvas.edges.map((edge) => edge.label)).toEqual(expect.arrayContaining(["if value > 7", "else"]));
+  });
+
+  it("returns local-server canvas data with owner-scoped attachments and basic blocks", async () => {
     const project = repo.seedSelfGraph(selfRootPath);
     const canvas = await repo.getCanvasGraph({
       projectId: project.id,
@@ -209,15 +384,17 @@ describe("SQLite graph repository", () => {
     expect(canvas.nodes.map((node) => node.kind)).toContain("dependency");
     expect(canvas.nodes.map((node) => node.kind)).toContain("database");
     expect(canvas.nodes.map((node) => node.kind)).toContain("config");
-    expect(canvas.nodes.map((node) => node.kind)).toContain("command");
     expect(canvas.nodes.map((node) => node.kind)).toContain("secret");
-    expect(canvas.nodes.map((node) => node.kind)).toContain("api");
+    expect(canvas.nodes.map((node) => node.kind)).not.toContain("command");
+    expect(canvas.nodes.map((node) => node.kind)).not.toContain("api");
     expect(canvas.nodes.map((node) => node.name)).toContain("Graph Repository");
     expect(canvas.nodes.map((node) => node.name)).toContain("GraphTag");
+    expect(canvas.nodes.map((node) => node.name)).toContain("Serve Graph Scope");
+    expect(canvas.nodes.map((node) => node.name)).not.toContain("Persist Graph State");
     expect(canvas.reuses.map((reuse) => reuse.nodeId)).toContain("object-graph-tag");
     expect(canvas.dependencies.map((dependency) => dependency.spec)).toContain("better-sqlite3");
     expect(canvas.formats.map((format) => format.spec)).toContain("SQLite rows");
-    expect(canvas.basicDetails.map((detail) => detail.basicKind)).toEqual(expect.arrayContaining(["database", "config", "command", "secret", "api"]));
+    expect(canvas.basicDetails.map((detail) => detail.basicKind)).toEqual(expect.arrayContaining(["database", "config", "secret"]));
     expect(canvas.boundaries.map((boundary) => boundary.name)).toContain("Backend Internals");
   });
 
@@ -282,13 +459,17 @@ describe("SQLite graph repository", () => {
       label: "local API",
       codeContext: "The browser app depends on this server API contract.",
       color: "#0891b2",
-      animated: true
+      animated: true,
+      pointingEnabled: true,
+      pointingDirection: "bidirectional"
     });
     const updated = repo.updateEdge(edge.id, {
       label: "workspace API",
       codeContext: "Changing this edge means updating fetch wrappers, routes, and route tests.",
       color: "#dc2626",
-      animated: false
+      animated: false,
+      pointingEnabled: false,
+      pointingDirection: "target_to_source"
     });
     const canvas = await repo.getCanvasGraph({
       projectId: project.id,
@@ -300,6 +481,8 @@ describe("SQLite graph repository", () => {
     expect(updated.codeContext).toContain("route tests");
     expect(updated.color).toBe("#dc2626");
     expect(updated.animated).toBe(false);
+    expect(updated.pointingEnabled).toBe(false);
+    expect(updated.pointingDirection).toBe("target_to_source");
     expect(canvas.edges.find((item) => item.id === edge.id)?.codeContext).toContain("fetch wrappers");
   });
 

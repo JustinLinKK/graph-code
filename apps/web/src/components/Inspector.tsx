@@ -1,4 +1,17 @@
-import type { AgentStatus, CustomBlockType, GitStatusInfo, GraphBoundary, GraphEdge, GraphNode, GraphNodeKind, GraphTag, NodeDetail, NodeTypeStyle, TagAssignment } from "@graphcode/graph-model";
+import type {
+  AgentStatus,
+  CustomBlockType,
+  EdgePointingDirection,
+  GitStatusInfo,
+  GraphBoundary,
+  GraphEdge,
+  GraphNode,
+  GraphNodeKind,
+  GraphTag,
+  NodeDetail,
+  NodeTypeStyle,
+  TagAssignment
+} from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
 import { Boxes, Code2, Database, FileInput, FileOutput, FileType, GitBranch, Link2, Package, Palette, Pencil, Play, Route, Tags, Workflow } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -18,7 +31,7 @@ type InspectorProps = {
   onUpdateNodeTypeStyle: (nodeKind: GraphNodeKind, color: string) => void;
   onUpdateCustomTypeStyle: (customTypeId: string, color: string) => void;
   onUpdateBoundaryStyle: (boundaryId: string, color: string) => void;
-  onUpdateEdgeStyle: (edgeId: string, patch: { color?: string; animated?: boolean }) => void;
+  onUpdateEdgeStyle: (edgeId: string, patch: { color?: string; animated?: boolean; pointingEnabled?: boolean; pointingDirection?: EdgePointingDirection }) => void;
   onUpdateNodeTags: (nodeId: string, input: TagAssignment) => void;
   onUpdateEdgeTags: (edgeId: string, input: TagAssignment) => void;
   onUpdateBoundaryTags: (boundaryId: string, input: TagAssignment) => void;
@@ -92,6 +105,26 @@ export function Inspector({
                 onChange={(event) => onUpdateEdgeStyle(selectedEdge.id, { animated: event.target.checked })}
               />
               <span>Animated</span>
+            </label>
+            <label className="inline-control">
+              <input
+                type="checkbox"
+                checked={selectedEdge.pointingEnabled}
+                onChange={(event) => onUpdateEdgeStyle(selectedEdge.id, { pointingEnabled: event.target.checked })}
+              />
+              <span>Pointing</span>
+            </label>
+            <label>
+              <span>Pointing Direction</span>
+              <select
+                disabled={!selectedEdge.pointingEnabled}
+                value={selectedEdge.pointingDirection}
+                onChange={(event) => onUpdateEdgeStyle(selectedEdge.id, { pointingDirection: event.target.value as EdgePointingDirection })}
+              >
+                <option value="source_to_target">Source to Target</option>
+                <option value="target_to_source">Target to Source</option>
+                <option value="bidirectional">Bidirectional</option>
+              </select>
             </label>
           </div>
         </section>

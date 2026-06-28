@@ -21,6 +21,7 @@ export const BASIC_NODE_KINDS = [
 export const ATTACHMENT_NODE_KINDS = BASIC_NODE_KINDS;
 export const GRAPH_NODE_KINDS = [...DOMAIN_NODE_KINDS, ...ATTACHMENT_NODE_KINDS] as const;
 export const GRAPH_EDGE_KINDS = ["calls", "imports", "uses", "owns", "impacts", "flows", "describes_format"] as const;
+export const EDGE_POINTING_DIRECTIONS = ["source_to_target", "target_to_source", "bidirectional"] as const;
 export const BASIC_DETAIL_NODE_KINDS = ["environment", "config", "secret", "command", "file", "database", "api", "event", "artifact", "custom"] as const;
 export const DEPENDENCY_KINDS = [
   "package",
@@ -34,7 +35,7 @@ export const DEPENDENCY_KINDS = [
   "tool"
 ] as const;
 export const IO_KINDS = ["api", "file", "user", "queue", "env", "artifact", "log", "database", "service"] as const;
-export const PROCESS_KINDS = ["transform", "validate", "route", "persist", "render", "orchestrate", "analyze"] as const;
+export const PROCESS_KINDS = ["transform", "validate", "route", "persist", "render", "orchestrate", "analyze", "condition"] as const;
 export const FORMAT_KINDS = ["type", "schema", "mime", "protocol", "artifact", "event"] as const;
 export const LANGUAGE_TYPES = [
   "unknown",
@@ -76,6 +77,7 @@ export const domainNodeKindSchema = z.enum(DOMAIN_NODE_KINDS);
 export const basicNodeKindSchema = z.enum(BASIC_NODE_KINDS);
 export const attachmentNodeKindSchema = z.enum(ATTACHMENT_NODE_KINDS);
 export const graphEdgeKindSchema = z.enum(GRAPH_EDGE_KINDS);
+export const edgePointingDirectionSchema = z.enum(EDGE_POINTING_DIRECTIONS);
 export const dependencyKindSchema = z.enum(DEPENDENCY_KINDS);
 export const ioKindSchema = z.enum(IO_KINDS);
 export const processKindSchema = z.enum(PROCESS_KINDS);
@@ -98,6 +100,7 @@ export type DomainNodeKind = z.infer<typeof domainNodeKindSchema>;
 export type BasicNodeKind = z.infer<typeof basicNodeKindSchema>;
 export type AttachmentNodeKind = z.infer<typeof attachmentNodeKindSchema>;
 export type GraphEdgeKind = z.infer<typeof graphEdgeKindSchema>;
+export type EdgePointingDirection = z.infer<typeof edgePointingDirectionSchema>;
 export type DependencyKind = z.infer<typeof dependencyKindSchema>;
 export type IoKind = z.infer<typeof ioKindSchema>;
 export type ProcessKind = z.infer<typeof processKindSchema>;
@@ -222,6 +225,8 @@ export const graphEdgeSchema = z.object({
   codeContext: z.string(),
   color: styleColorSchema,
   animated: z.boolean(),
+  pointingEnabled: z.boolean().default(true),
+  pointingDirection: edgePointingDirectionSchema.default("source_to_target"),
   agentStatus: agentStatusSchema.default("none"),
   gitStatus: gitStatusInfoSchema.nullable().default(null),
   tags: z.array(graphTagSchema).default([]),
@@ -372,7 +377,9 @@ export const edgeMutationSchema = z.object({
   label: z.string().nullable().optional(),
   codeContext: z.string().optional(),
   color: styleColorSchema.optional(),
-  animated: z.boolean().optional()
+  animated: z.boolean().optional(),
+  pointingEnabled: z.boolean().optional(),
+  pointingDirection: edgePointingDirectionSchema.optional()
 });
 
 export const edgeUpdateSchema = edgeMutationSchema.partial().extend({

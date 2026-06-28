@@ -52,6 +52,8 @@ const GRAPH_EDGES_SQL = `
     code_context TEXT NOT NULL DEFAULT '',
     color TEXT NOT NULL DEFAULT '#727782',
     animated INTEGER NOT NULL DEFAULT 0,
+    pointing_enabled INTEGER NOT NULL DEFAULT 1,
+    pointing_direction TEXT NOT NULL DEFAULT 'source_to_target' CHECK (pointing_direction IN ('source_to_target', 'target_to_source', 'bidirectional')),
     agent_status TEXT NOT NULL DEFAULT 'none' CHECK (agent_status IN ('none', 'planning', 'coded', 'reviewed', 'implemented', 'bugged')),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -217,7 +219,7 @@ export function migrate(db: GraphDatabase): void {
 
     CREATE TABLE IF NOT EXISTS process_details (
       node_id TEXT PRIMARY KEY REFERENCES graph_nodes(id) ON DELETE CASCADE,
-      process_kind TEXT NOT NULL CHECK (process_kind IN ('transform', 'validate', 'route', 'persist', 'render', 'orchestrate', 'analyze')),
+      process_kind TEXT NOT NULL CHECK (process_kind IN ('transform', 'validate', 'route', 'persist', 'render', 'orchestrate', 'analyze', 'condition')),
       trigger TEXT,
       notes TEXT NOT NULL DEFAULT ''
     );
@@ -373,6 +375,7 @@ export function migrate(db: GraphDatabase): void {
   `);
   ensureWorkspaceSettingsTable(db);
   ensureGraphStatusHistoryTable(db);
+  ensureProcessDetailsTable(db);
 }
 
 function ensureWorkspaceSettingsTable(db: GraphDatabase): void {
@@ -425,6 +428,28 @@ function ensureGraphStatusHistoryTable(db: GraphDatabase): void {
     SELECT id, project_id, entity_type, entity_id, ${normalizedStatusSql("status")}, note, agent_run_id, created_at
     FROM graph_status_history_old;
     DROP TABLE graph_status_history_old;
+  `);
+  db.pragma("foreign_keys = ON");
+}
+
+function ensureProcessDetailsTable(db: GraphDatabase): void {
+  const sql = getTableSql(db, "process_details");
+  if (!sql || sql.includes("'condition'")) {
+    return;
+  }
+
+  db.pragma("foreign_keys = OFF");
+  db.exec(`
+    ALTER TABLE process_details RENAME TO process_details_old;
+    CREATE TABLE process_details (
+      node_id TEXT PRIMARY KEY REFERENCES graph_nodes(id) ON DELETE CASCADE,
+      process_kind TEXT NOT NULL CHECK (process_kind IN ('transform', 'validate', 'route', 'persist', 'render', 'orchestrate', 'analyze', 'condition')),
+      trigger TEXT,
+      notes TEXT NOT NULL DEFAULT ''
+    );
+    INSERT INTO process_details (node_id, process_kind, trigger, notes)
+    SELECT node_id, process_kind, trigger, notes FROM process_details_old;
+    DROP TABLE process_details_old;
   `);
   db.pragma("foreign_keys = ON");
 }
@@ -487,6 +512,12 @@ function ensureGraphEdgesTable(db: GraphDatabase): void {
     }
     if (!tableHasColumn(db, "graph_edges", "animated")) {
       db.exec("ALTER TABLE graph_edges ADD COLUMN animated INTEGER NOT NULL DEFAULT 0;");
+    }
+    if (!tableHasColumn(db, "graph_edges", "pointing_enabled")) {
+      db.exec("ALTER TABLE graph_edges ADD COLUMN pointing_enabled INTEGER NOT NULL DEFAULT 1;");
+    }
+    if (!tableHasColumn(db, "graph_edges", "pointing_direction")) {
+      db.exec("ALTER TABLE graph_edges ADD COLUMN pointing_direction TEXT NOT NULL DEFAULT 'source_to_target';");
     }
     if (!tableHasColumn(db, "graph_edges", "agent_status")) {
       db.exec("ALTER TABLE graph_edges ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'none';");
@@ -611,17 +642,21 @@ function rebuildGraphEdgesTable(db: GraphDatabase): void {
   const hasCodeContext = tableHasColumn(db, "graph_edges", "code_context");
   const hasColor = tableHasColumn(db, "graph_edges", "color");
   const hasAnimated = tableHasColumn(db, "graph_edges", "animated");
+  const hasPointingEnabled = tableHasColumn(db, "graph_edges", "pointing_enabled");
+  const hasPointingDirection = tableHasColumn(db, "graph_edges", "pointing_direction");
   const hasAgentStatus = tableHasColumn(db, "graph_edges", "agent_status");
   db.pragma("foreign_keys = OFF");
   db.exec(`
     ALTER TABLE graph_edges RENAME TO graph_edges_old;
     ${GRAPH_EDGES_SQL}
-    INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, agent_status, created_at)
+    INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, pointing_enabled, pointing_direction, agent_status, created_at)
     SELECT
       id, project_id, kind, source_node_id, target_node_id, label,
       ${hasCodeContext ? "code_context" : "''"},
       ${hasColor ? "color" : "'#727782'"},
       ${hasAnimated ? "animated" : "0"},
+      ${hasPointingEnabled ? "pointing_enabled" : "1"},
+      ${hasPointingDirection ? "pointing_direction" : "'source_to_target'"},
       ${hasAgentStatus ? normalizedStatusSql("agent_status") : "'none'"},
       created_at
     FROM graph_edges_old;

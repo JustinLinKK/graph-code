@@ -1,4 +1,4 @@
-import type { AgentRun, CanvasGraph, GraphBoundary, GraphEdge, GraphNodeKind, HierarchyNode, NodeDetail, Project, TagAssignment, WorkspaceSettings } from "@graphcode/graph-model";
+import type { AgentRun, CanvasGraph, EdgePointingDirection, GraphBoundary, GraphEdge, GraphNodeKind, HierarchyNode, NodeDetail, Project, TagAssignment, WorkspaceSettings } from "@graphcode/graph-model";
 import { Button, Spinner } from "@heroui/react";
 import {
   Boxes,
@@ -71,7 +71,7 @@ type AppShellProps = {
   onUpdateNodeTypeStyle: (nodeKind: GraphNodeKind, color: string) => void;
   onUpdateCustomTypeStyle: (customTypeId: string, color: string) => void;
   onUpdateBoundaryStyle: (boundaryId: string, color: string) => void;
-  onUpdateEdgeStyle: (edgeId: string, patch: { color?: string; animated?: boolean }) => void;
+  onUpdateEdgeStyle: (edgeId: string, patch: { color?: string; animated?: boolean; pointingEnabled?: boolean; pointingDirection?: EdgePointingDirection }) => void;
   onUpdateNodeTags: (nodeId: string, input: TagAssignment) => void;
   onUpdateEdgeTags: (edgeId: string, input: TagAssignment) => void;
   onUpdateBoundaryTags: (boundaryId: string, input: TagAssignment) => void;

@@ -51,6 +51,7 @@ type HierarchyItemProps = {
 function HierarchyItem({ node, depth, selectedNodeId, selectedBoundaryId, nodeTypeStyles, onSelectNode, onOpenNode, onSelectBoundary }: HierarchyItemProps) {
   const [open, setOpen] = useState(true);
   const hasChildren = node.children.length > 0 || node.boundaryGroups.length > 0;
+  const canOpenScope = hasChildren || node.kind === "function" || node.kind === "object";
   const Icon = iconForKind(node.kind);
   const selected = selectedNodeId === node.id;
   const accentColor = nodeTypeStyles.find((style) => style.nodeKind === node.kind)?.color ?? nodePalette[node.kind].accent;
@@ -67,7 +68,7 @@ function HierarchyItem({ node, depth, selectedNodeId, selectedBoundaryId, nodeTy
         >
           {hasChildren ? open ? <ChevronDown size={15} /> : <ChevronRight size={15} /> : <span />}
         </button>
-        <button type="button" className="tree-label" onClick={() => onSelectNode(node.id)} onDoubleClick={() => hasChildren && onOpenNode(node.id)}>
+        <button type="button" className="tree-label" onClick={() => onSelectNode(node.id)} onDoubleClick={() => canOpenScope && onOpenNode(node.id)}>
           <span className={`tree-icon ${nodePalette[node.kind].className}`} style={{ color: accentColor, backgroundColor: `color-mix(in srgb, ${accentColor} 14%, white)` }}>
             <Icon size={15} />
           </span>
@@ -83,7 +84,7 @@ function HierarchyItem({ node, depth, selectedNodeId, selectedBoundaryId, nodeTy
             <small>{nodePalette[node.kind].label}</small>
           </span>
         </button>
-        {node.children.length > 0 ? (
+        {canOpenScope ? (
           <button type="button" className="tree-open" aria-label={`Open ${node.name} subgraph`} onClick={() => onOpenNode(node.id)}>
             <Maximize2 size={14} />
           </button>

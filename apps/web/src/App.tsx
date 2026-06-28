@@ -6,6 +6,7 @@ import type {
   CreateCustomBlockType,
   CustomBlockType,
   EdgeMutation,
+  EdgePointingDirection,
   EdgeUpdate,
   GraphBoundary,
   GraphEdge,
@@ -734,7 +735,7 @@ export default function App() {
   );
 
   const handleUpdateEdgeStyle = useCallback(
-    (edgeId: string, patch: { color?: string; animated?: boolean }) => {
+    (edgeId: string, patch: { color?: string; animated?: boolean; pointingEnabled?: boolean; pointingDirection?: EdgePointingDirection }) => {
       const before = canvas?.edges.find((edge) => edge.id === edgeId);
       if (!before) {
         return;
@@ -934,7 +935,9 @@ export default function App() {
             label: entry.before.label,
             codeContext: entry.before.codeContext,
             color: entry.before.color,
-            animated: entry.before.animated
+            animated: entry.before.animated,
+            pointingEnabled: entry.before.pointingEnabled,
+            pointingDirection: entry.before.pointingDirection
           });
           setCanvas((currentCanvas) =>
             currentCanvas

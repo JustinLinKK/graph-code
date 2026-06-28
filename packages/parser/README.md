@@ -1,13 +1,15 @@
 # Parser
 
-This package will extract software entities from source repositories.
+This package extracts a first-pass Code Graph from TypeScript-family repositories.
 
-Planned responsibilities:
+Current responsibilities:
 
-- Use Tree-sitter for language-aware parsing.
-- Start with one TypeScript or Python repository shape.
-- Convert syntax and project structure into graph-model entities.
-- Preserve stable entity identity across edits where practical.
-- Support incremental refresh after accepted changes.
+- Use the TypeScript compiler API for `.ts`, `.tsx`, `.js`, and `.jsx` files.
+- Convert directories, files, functions, methods, components, classes, interfaces, types, and enums into stable graph snapshot entities.
+- Preserve nested source ownership with `parentSymbolId` for function-local symbols.
+- Emit per-function statement-level CFG workflow nodes and labeled `flows` edges for branches, loops, returns, throws, catch/finally paths, and ternary expressions.
+- Resolve internal relative imports and lightweight local call edges.
+- Preserve deterministic IDs, source paths, and line ranges for generated graph rows.
+- Feed the local server's scanner-backed `.graphcode` refresh.
 
-No parser implementation has been added yet.
+The exported entrypoint is `scanRepositoryCodeGraph(rootPath, options?)`.

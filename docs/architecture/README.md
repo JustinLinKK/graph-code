@@ -11,4 +11,7 @@ Use it for decisions about:
 - Local versus global agent responsibilities.
 - Test execution, diff review, and graph refresh flows.
 
-No architecture decision records have been added yet.
+Current notes:
+
+- [Agent System Prompts](agent-system-prompts.md)
+- [Function Hierarchy and CFG Workflows](function-hierarchy-and-cfg.md)

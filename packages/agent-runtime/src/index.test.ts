@@ -64,8 +64,7 @@ function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
     readSourceFile: vi.fn(async () => "export const value = 1;\n"),
     writeCodeProposal: vi.fn(async () => {}),
     readGitStatus: vi.fn(async () => ""),
-    listScannableFiles: vi.fn(async () => ["src/a.ts", "src/b.ts", "README.md"]),
-    upsertScannedFileNode: vi.fn(async (_projectId, filePath) => ({ ...node, id: `scan-${filePath}`, name: filePath, source: { ...node.source, path: filePath } })),
+    refreshCodeGraph: vi.fn(async () => ({ nodeCount: 12, edgeCount: 4, fileCount: 3, symbolCount: 5, workflowNodeCount: 4 })),
     ...overrides
   };
 }
@@ -121,7 +120,7 @@ describe("GraphCode agent runtime", () => {
     ).rejects.toThrow(/escaped/);
   });
 
-  it("scans files with the configured parallel limit", async () => {
+  it("refreshes the parser-backed code graph", async () => {
     const tools = toolbox();
     const result = await runScanningAgent(
       { projectId: "project" },
@@ -129,8 +128,9 @@ describe("GraphCode agent runtime", () => {
     );
 
     expect(result.response).toContain("Scanned 3 files");
-    expect(tools.upsertScannedFileNode).toHaveBeenCalledTimes(3);
-    expect(tools.setStatuses).toHaveBeenCalledWith("project", expect.arrayContaining([expect.objectContaining({ status: "implemented" })]));
+    expect(result.response).toContain("12 Code Graph nodes");
+    expect(tools.refreshCodeGraph).toHaveBeenCalledWith("project", undefined);
+    expect(tools.setStatuses).not.toHaveBeenCalled();
   });
 
   it("marks reviewed or bugged after review", async () => {

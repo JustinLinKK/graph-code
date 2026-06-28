@@ -27,6 +27,7 @@ import {
   type WorkspaceSettingsMutation
 } from "@graphcode/graph-model";
 import { runCodingAgent, runPlanningAgent, runReviewAgent, runScanningAgent, type GraphCodeToolbox } from "@graphcode/agent-runtime";
+import { scanRepositoryCodeGraph } from "@graphcode/parser";
 import { openDatabase, type GraphDatabase } from "./db/connection";
 import { GraphRepository, validationError } from "./db/repository";
 import { migrate } from "./db/schema";
@@ -52,7 +53,9 @@ export class WorkspaceRuntime {
   }
 
   seedSelfGraph(): Project {
-    return this.repository.seedSelfGraph(this.selfRootPath);
+    const project = this.repository.seedSelfGraph(this.selfRootPath);
+    this.refreshCodeGraph(project.id);
+    return project;
   }
 
   getSettings(projectId: string): WorkspaceSettings {
@@ -294,7 +297,7 @@ export class WorkspaceRuntime {
     const shouldSeedSelfGraph =
       isSelfWorkspace && (!existingProject || this.repository.listProjectNodes(existingProject.id).length === 0);
     if (shouldSeedSelfGraph) {
-      const project = this.repository.seedSelfGraph(rootPath);
+      const project = this.seedSelfGraph();
       this.writeWorkspaceManifest(graphcodePath, project.id, rootPath);
       return {
         status: existingProject ? "opened" : "created",
@@ -406,17 +409,18 @@ export class WorkspaceRuntime {
         this.repository.storeCodeProposal({ projectId: inputProjectId, agentRunId: runId, targetNodeId, diff });
       },
       readGitStatus: async (inputProjectId) => this.readGitStatus(inputProjectId),
-      listScannableFiles: async (inputProjectId) => this.listScannableFiles(inputProjectId),
-      upsertScannedFileNode: async (inputProjectId, filePath, summary, language) =>
-        this.repository.upsertScannedFileNode({
-          projectId: inputProjectId,
-          id: `scan-${hashPath(filePath)}`,
-          name: path.basename(filePath),
-          summary,
-          sourcePath: filePath,
-          language: normalizeLanguage(language)
-        })
+      refreshCodeGraph: async (inputProjectId, rootPath) => this.refreshCodeGraph(inputProjectId, rootPath)
     };
+  }
+
+  private refreshCodeGraph(projectId: string, requestedRootPath?: string) {
+    const project = this.repository.getProject(projectId);
+    const rootPath = path.resolve(project.rootPath);
+    if (requestedRootPath && !samePath(requestedRootPath, rootPath)) {
+      throw validationError("Scanning root path must match the active project root.");
+    }
+    const snapshot = scanRepositoryCodeGraph(rootPath);
+    return this.repository.replaceScannedCodeGraph(projectId, snapshot);
   }
 
   private async readSourceFile(projectId: string, relativePath: string): Promise<string> {

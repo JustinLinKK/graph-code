@@ -29,6 +29,9 @@ importers:
       '@graphcode/graph-model':
         specifier: workspace:*
         version: link:../../packages/graph-model
+      '@graphcode/parser':
+        specifier: workspace:*
+        version: link:../../packages/parser
       better-sqlite3:
         specifier: ^11.10.0
         version: 11.10.0
@@ -153,6 +156,19 @@ importers:
       typescript:
         specifier: ^5.8.3
         version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.32.0)(tsx@4.22.4)
+
+  packages/parser:
+    dependencies:
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
+    devDependencies:
+      '@types/node':
+        specifier: ^24.0.7
+        version: 24.13.2
       vitest:
         specifier: ^3.2.4
         version: 3.2.6(@types/node@24.13.2)(jiti@2.7.0)(jsdom@26.1.0)(lightningcss@1.32.0)(tsx@4.22.4)

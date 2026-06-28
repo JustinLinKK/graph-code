@@ -154,18 +154,55 @@ function measureNodeForLayout(node: GraphNode): { width: number; height: number 
   const longestWord = Math.max(0, ...`${node.name} ${node.summary}`.split(/\s+/).map((part) => part.length));
   const summaryLength = node.summary.trim().length;
   const nameLength = node.name.trim().length;
-  const widthFromWord = Math.min(420, Math.max(baseWidth, 150 + longestWord * 7));
+  const chipLabels = [
+    node.agentStatus !== "none" ? node.agentStatus : null,
+    node.gitStatus ? node.gitStatus.worktree : null,
+    node.gitStatus?.change ? node.gitStatus.change : null,
+    ...node.tags.slice(0, 2).map((tag) => tag.name)
+  ].filter(Boolean) as string[];
+  const longestChip = Math.max(0, ...chipLabels.map((label) => label.length));
+  const widthFromWord = Math.min(440, Math.max(baseWidth, 154 + Math.max(longestWord * 7.4, longestChip * 6.4)));
   const widthFromSummary = summaryLength > 58 ? Math.max(widthFromWord, 292) : widthFromWord;
-  const maxMeasuredWidth = node.kind === "format" ? 280 : 420;
+  const maxMeasuredWidth = node.kind === "format" ? 292 : 440;
   const width = Math.max(baseWidth, Math.min(maxMeasuredWidth, widthFromSummary));
-  const nameLines = Math.min(2, Math.max(1, Math.ceil(nameLength / Math.max(14, Math.floor((width - 48) / 8.5)))));
-  const summaryLines = summaryLength === 0 ? 1 : Math.min(3, Math.ceil(summaryLength / Math.max(18, Math.floor((width - 34) / 6.8))));
-  const statusRows = node.agentStatus !== "none" || node.gitStatus ? 1 : 0;
-  const tagRows = node.tags.length > 0 ? 1 : 0;
-  const contentHeight = 66 + nameLines * 19 + summaryLines * 18 + statusRows * 27 + tagRows * 24;
+  const contentWidth = Math.max(96, width - 26);
+  const nameLines = Math.min(2, Math.max(1, Math.ceil(nameLength / Math.max(10, Math.floor(contentWidth / 8.4)))));
+  const summaryLines = summaryLength === 0 ? 1 : Math.min(3, Math.ceil(summaryLength / Math.max(14, Math.floor(contentWidth / 6.5))));
+  const statusCount = (node.agentStatus !== "none" ? 1 : 0) + (node.gitStatus ? 1 : 0) + (node.gitStatus?.change ? 1 : 0);
+  const statusRows = estimateChipRows(chipLabels.slice(0, statusCount), contentWidth);
+  const tagRows = estimateChipRows(chipLabels.slice(statusCount), contentWidth);
+  const potentialReuseRows = node.kind === "function" || node.kind === "object" ? 1 : 0;
+  const contentHeight =
+    24 +
+    24 +
+    10 +
+    nameLines * 19 +
+    7 +
+    summaryLines * 18 +
+    (statusRows > 0 ? 8 + statusRows * 20 : 0) +
+    (tagRows + potentialReuseRows > 0 ? 8 + (tagRows + potentialReuseRows) * 21 : 0);
   const minHeight = node.kind === "format" ? 96 : node.kind === "ui_component" ? 136 : 128;
-  const height = Math.max(baseHeight, Math.min(260, Math.max(minHeight, contentHeight)));
+  const height = Math.max(baseHeight, minHeight, contentHeight);
   return { width: Math.round(width), height: Math.round(height) };
+}
+
+function estimateChipRows(labels: string[], contentWidth: number): number {
+  if (labels.length === 0) {
+    return 0;
+  }
+  let rows = 1;
+  let rowWidth = 0;
+  for (const label of labels) {
+    const chipWidth = Math.min(contentWidth, Math.max(44, 22 + label.length * 7));
+    const nextWidth = rowWidth === 0 ? chipWidth : rowWidth + 5 + chipWidth;
+    if (nextWidth > contentWidth && rowWidth > 0) {
+      rows += 1;
+      rowWidth = chipWidth;
+    } else {
+      rowWidth = nextWidth;
+    }
+  }
+  return rows;
 }
 
 const BOUNDARY_PADDING_X = 48;

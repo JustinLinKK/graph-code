@@ -11,6 +11,12 @@ let app: Awaited<ReturnType<typeof buildServer>>;
 const selfRootPath = path.join(os.tmpdir(), "graphcode-self-routes");
 
 beforeEach(async () => {
+  await fs.promises.rm(selfRootPath, { recursive: true, force: true });
+  await fs.promises.mkdir(path.join(selfRootPath, "src"), { recursive: true });
+  await fs.promises.writeFile(
+    path.join(selfRootPath, "src", "scanned.ts"),
+    ["export function scanned(value: number): number {", "  return value + 1;", "}"].join("\n")
+  );
   app = await buildServer({
     dbPath: path.join(os.tmpdir(), `graphcode-routes-${crypto.randomUUID()}.sqlite`),
     seedSelf: true,
@@ -53,11 +59,20 @@ describe("graph API routes", () => {
     const body = response.json();
     expect(body.nodes.some((node: { kind: string }) => node.kind === "dependency")).toBe(true);
     expect(body.nodes.some((node: { kind: string }) => node.kind === "database")).toBe(true);
-    expect(body.nodes.some((node: { kind: string }) => node.kind === "command")).toBe(true);
+    expect(body.nodes.some((node: { kind: string }) => node.kind === "config")).toBe(true);
     expect(body.nodes.some((node: { name: string }) => node.name === "Browser API Request")).toBe(true);
+    expect(body.nodes.some((node: { name: string }) => node.name === "Persist Graph State")).toBe(false);
     expect(body.boundaries.some((boundary: { name: string }) => boundary.name === "Backend Internals")).toBe(true);
     expect(body.edges.every((edge: { codeContext: string }) => typeof edge.codeContext === "string")).toBe(true);
-    expect(body.edges.every((edge: { color: string; animated: boolean }) => typeof edge.color === "string" && typeof edge.animated === "boolean")).toBe(true);
+    expect(
+      body.edges.every(
+        (edge: { color: string; animated: boolean; pointingEnabled: boolean; pointingDirection: string }) =>
+          typeof edge.color === "string" &&
+          typeof edge.animated === "boolean" &&
+          typeof edge.pointingEnabled === "boolean" &&
+          ["source_to_target", "target_to_source", "bidirectional"].includes(edge.pointingDirection)
+      )
+    ).toBe(true);
     expect(body.nodeTypeStyles.some((style: { nodeKind: string }) => style.nodeKind === "ui_component")).toBe(true);
     expect(body.reuses.some((reuse: { nodeId: string }) => reuse.nodeId === "object-graph-tag")).toBe(true);
     expect(body.nodes.some((node: { tags: Array<{ name: string }> }) => node.tags.some((tag) => tag.name === "taggable"))).toBe(true);
@@ -229,6 +244,11 @@ describe("graph API routes", () => {
     });
     expect(scanResponse.statusCode).toBe(200);
     expect(scanResponse.json().response).toContain("Scanned");
+    expect(scanResponse.json().response).toContain("Code Graph nodes");
+
+    const hierarchyAfterScan = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/hierarchy" });
+    expect(JSON.stringify(hierarchyAfterScan.json())).toContain("Code Graph");
+    expect(JSON.stringify(hierarchyAfterScan.json())).toContain("scanned.ts");
 
     const gitResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/git-status" });
     expect(gitResponse.statusCode).toBe(200);
@@ -297,13 +317,16 @@ describe("graph API routes", () => {
         label: "workspace API",
         codeContext: "The frontend calls the local backend for workspace data.",
         color: "#0891b2",
-        animated: true
+        animated: true,
+        pointingEnabled: true,
+        pointingDirection: "bidirectional"
       }
     });
 
     expect(createResponse.statusCode).toBe(200);
     const created = createResponse.json();
     expect(created.codeContext).toContain("workspace data");
+    expect(created.pointingDirection).toBe("bidirectional");
 
     const updateResponse = await app.inject({
       method: "PATCH",
@@ -312,12 +335,16 @@ describe("graph API routes", () => {
         label: "local API",
         codeContext: "Updated edge context for route and fetch wrapper tests.",
         color: "#dc2626",
-        animated: false
+        animated: false,
+        pointingEnabled: false,
+        pointingDirection: "target_to_source"
       }
     });
 
     expect(updateResponse.statusCode).toBe(200);
     expect(updateResponse.json().label).toBe("local API");
+    expect(updateResponse.json().pointingEnabled).toBe(false);
+    expect(updateResponse.json().pointingDirection).toBe("target_to_source");
     expect(updateResponse.json().codeContext).toContain("fetch wrapper");
     expect(updateResponse.json().color).toBe("#dc2626");
     expect(updateResponse.json().animated).toBe(false);

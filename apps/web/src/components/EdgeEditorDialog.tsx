@@ -1,7 +1,9 @@
 import {
+  EDGE_POINTING_DIRECTIONS,
   GRAPH_EDGE_KINDS,
   type CanvasGraph,
   type EdgeMutation,
+  type EdgePointingDirection,
   type EdgeUpdate,
   type GraphEdge,
   type GraphEdgeKind
@@ -30,6 +32,9 @@ export function EdgeEditorDialog({ open, mode, edge, draft, canvas, loading, err
   const [targetNodeId, setTargetNodeId] = useState(edge?.targetNodeId ?? draft?.targetNodeId ?? secondNodeId);
   const [label, setLabel] = useState(edge?.label ?? "");
   const [codeContext, setCodeContext] = useState(edge?.codeContext ?? "");
+  const [animated, setAnimated] = useState(edge?.animated ?? false);
+  const [pointingEnabled, setPointingEnabled] = useState(edge?.pointingEnabled ?? true);
+  const [pointingDirection, setPointingDirection] = useState<EdgePointingDirection>(edge?.pointingDirection ?? "source_to_target");
 
   useEffect(() => {
     if (!open) {
@@ -40,6 +45,9 @@ export function EdgeEditorDialog({ open, mode, edge, draft, canvas, loading, err
     setTargetNodeId(edge?.targetNodeId ?? draft?.targetNodeId ?? secondNodeId);
     setLabel(edge?.label ?? "");
     setCodeContext(edge?.codeContext ?? "");
+    setAnimated(edge?.animated ?? false);
+    setPointingEnabled(edge?.pointingEnabled ?? true);
+    setPointingDirection(edge?.pointingDirection ?? "source_to_target");
   }, [draft?.sourceNodeId, draft?.targetNodeId, edge, firstNodeId, open, secondNodeId]);
 
   if (!open) {
@@ -54,7 +62,10 @@ export function EdgeEditorDialog({ open, mode, edge, draft, canvas, loading, err
       sourceNodeId,
       targetNodeId,
       label: label.trim() || null,
-      codeContext: codeContext.trim()
+      codeContext: codeContext.trim(),
+      animated,
+      pointingEnabled,
+      pointingDirection
     });
   };
 
@@ -106,6 +117,28 @@ export function EdgeEditorDialog({ open, mode, edge, draft, canvas, loading, err
           </select>
         </label>
 
+        <div className="form-grid">
+          <label className="inline-control">
+            <input type="checkbox" checked={animated} onChange={(event) => setAnimated(event.target.checked)} />
+            <span>Animated</span>
+          </label>
+          <label className="inline-control">
+            <input type="checkbox" checked={pointingEnabled} onChange={(event) => setPointingEnabled(event.target.checked)} />
+            <span>Pointing</span>
+          </label>
+        </div>
+
+        <label className="form-field">
+          <span>Pointing Direction</span>
+          <select disabled={!pointingEnabled} value={pointingDirection} onChange={(event) => setPointingDirection(event.target.value as EdgePointingDirection)}>
+            {EDGE_POINTING_DIRECTIONS.map((direction) => (
+              <option key={direction} value={direction}>
+                {pointingDirectionLabel(direction)}
+              </option>
+            ))}
+          </select>
+        </label>
+
         <label className="form-field">
           <span>Short Description</span>
           <input value={label} placeholder="Visible edge label" onChange={(event) => setLabel(event.target.value)} />
@@ -132,4 +165,16 @@ export function EdgeEditorDialog({ open, mode, edge, draft, canvas, loading, err
       </form>
     </div>
   );
+}
+
+function pointingDirectionLabel(direction: EdgePointingDirection): string {
+  switch (direction) {
+    case "target_to_source":
+      return "Target to Source";
+    case "bidirectional":
+      return "Bidirectional";
+    case "source_to_target":
+    default:
+      return "Source to Target";
+  }
 }
