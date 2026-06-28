@@ -1,5 +1,13 @@
 import crypto from "node:crypto";
 import {
+  AGENT_KINDS,
+  type AgentConfig,
+  type AgentConfigView,
+  type AgentKind,
+  type AgentMessage,
+  type AgentRun,
+  type AgentRunStatus,
+  type AgentStatus,
   BASIC_DETAIL_NODE_KINDS,
   type BasicBlockDetails,
   type BasicDetailNodeKind,
@@ -22,6 +30,10 @@ import {
   type GraphBoundary,
   type GraphEdge,
   type GraphEdgeKind,
+  type GraphPatch,
+  graphPatchSchema,
+  type GraphStatusHistory,
+  type GraphStatusPatch,
   type GraphNode,
   type GraphNodeKind,
   type GraphNodeReuse,
@@ -45,8 +57,11 @@ import {
   type ProcessDetails,
   type ProcessKind,
   type Project,
+  type SettingsValidationResult,
   type TagAssignment,
   type TagMutation,
+  type WorkspaceSettings,
+  type WorkspaceSettingsMutation,
   isAttachmentNodeKind,
   isDomainNodeKind
 } from "@graphcode/graph-model";
@@ -82,6 +97,7 @@ type NodeRow = {
   ui_y: number;
   ui_width: number;
   ui_height: number;
+  agent_status: AgentStatus;
   created_at: string;
   updated_at: string;
 };
@@ -107,6 +123,67 @@ type EdgeRow = {
   code_context: string;
   color: string;
   animated: 0 | 1;
+  agent_status: AgentStatus;
+  created_at: string;
+};
+
+type WorkspaceSettingsRow = {
+  project_id: string;
+  theme: WorkspaceSettings["general"]["theme"];
+  github_enabled: 0 | 1;
+  github_repository: string;
+  github_client_id: string;
+  github_access_token: string;
+  github_user_login: string;
+  github_token_scopes: string;
+  github_connected_at: string | null;
+  github_last_validated_at: string | null;
+  auto_review_after_coding: 0 | 1;
+};
+
+type AgentSettingsRow = {
+  project_id: string;
+  agent_kind: AgentKind;
+  provider: AgentConfig["provider"];
+  model: string;
+  parallel_limit: number;
+  api_key_source_type: AgentConfig["apiKeySource"]["type"];
+  api_key_source_value: string;
+  system_prompt_source_type: AgentConfig["systemPromptSource"]["type"];
+  system_prompt_source_value: string;
+};
+
+type AgentRunRow = {
+  id: string;
+  project_id: string;
+  agent_kind: AgentKind;
+  status: AgentRunStatus;
+  target_node_id: string | null;
+  prompt: string;
+  response: string;
+  diff: string;
+  graph_patch_json: string | null;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type AgentMessageRow = {
+  id: string;
+  run_id: string;
+  role: AgentMessage["role"];
+  content: string;
+  created_at: string;
+};
+
+type GraphStatusHistoryRow = {
+  id: string;
+  project_id: string;
+  entity_type: GraphStatusPatch["entityType"];
+  entity_id: string;
+  status: AgentStatus;
+  note: string;
+  agent_run_id: string | null;
   created_at: string;
 };
 
@@ -223,6 +300,7 @@ export type NewGraphNode = {
   sourceEndLine?: number | null;
   position?: { x: number; y: number };
   size?: { width: number; height: number };
+  agentStatus?: AgentStatus;
 };
 
 type NewGraphEdge = {
@@ -235,6 +313,7 @@ type NewGraphEdge = {
   codeContext?: string;
   color?: string;
   animated?: boolean;
+  agentStatus?: AgentStatus;
 };
 
 type NewGraphBoundary = {
@@ -296,6 +375,366 @@ export class GraphRepository {
   listProjects(): Project[] {
     const rows = this.db.prepare("SELECT * FROM projects ORDER BY created_at ASC").all() as ProjectRow[];
     return rows.map(mapProject);
+  }
+
+  getWorkspaceSettings(projectId: string): WorkspaceSettings {
+    this.ensureDefaultSettings(projectId);
+    const row = this.db.prepare("SELECT * FROM workspace_settings WHERE project_id = ?").get(projectId) as WorkspaceSettingsRow;
+    const agentRows = this.db
+      .prepare("SELECT * FROM agent_settings WHERE project_id = ? ORDER BY agent_kind ASC")
+      .all(projectId) as AgentSettingsRow[];
+    return {
+      general: {
+        theme: row.theme
+      },
+      github: {
+        enabled: row.github_enabled === 1,
+        repository: row.github_repository,
+        clientId: row.github_client_id ?? "",
+        auth: {
+          connected: Boolean((row.github_access_token ?? "").trim() && (row.github_user_login ?? "").trim()),
+          username: row.github_user_login || null,
+          tokenConfigured: Boolean((row.github_access_token ?? "").trim()),
+          scopes: parseScopes(row.github_token_scopes ?? ""),
+          connectedAt: row.github_connected_at ?? null,
+          lastValidatedAt: row.github_last_validated_at ?? null
+        }
+      },
+      automation: {
+        autoReviewAfterCoding: row.auto_review_after_coding !== 0
+      },
+      agents: agentRows.map(mapAgentSettingsView)
+    };
+  }
+
+  getAgentConfig(projectId: string, agentKind: AgentKind): AgentConfig {
+    this.ensureDefaultSettings(projectId);
+    const row = this.db
+      .prepare("SELECT * FROM agent_settings WHERE project_id = ? AND agent_kind = ?")
+      .get(projectId, agentKind) as AgentSettingsRow | undefined;
+    if (!row) {
+      return defaultAgentConfig(agentKind);
+    }
+    return mapAgentSettings(row);
+  }
+
+  saveWorkspaceSettings(projectId: string, input: WorkspaceSettingsMutation): WorkspaceSettings {
+    this.getProject(projectId);
+    const write = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `
+          INSERT INTO workspace_settings (project_id, theme, github_enabled, github_repository, github_client_id, auto_review_after_coding, created_at, updated_at)
+          VALUES (@projectId, @theme, @githubEnabled, @githubRepository, @githubClientId, @autoReviewAfterCoding, datetime('now'), datetime('now'))
+          ON CONFLICT(project_id)
+          DO UPDATE SET
+            theme = excluded.theme,
+            github_enabled = excluded.github_enabled,
+            github_repository = excluded.github_repository,
+            github_client_id = excluded.github_client_id,
+            auto_review_after_coding = excluded.auto_review_after_coding,
+            updated_at = datetime('now')
+        `
+        )
+        .run({
+          projectId,
+          theme: input.general.theme,
+          githubEnabled: input.github.enabled ? 1 : 0,
+          githubRepository: input.github.repository.trim(),
+          githubClientId: input.github.clientId.trim(),
+          autoReviewAfterCoding: input.automation.autoReviewAfterCoding ? 1 : 0
+        });
+
+      for (const agent of input.agents) {
+        const existing = this.getAgentConfig(projectId, agent.agentKind);
+        const apiKeyValue = agent.apiKeySource.value?.trim()
+          ? agent.apiKeySource.value
+          : agent.apiKeySource.type === existing.apiKeySource.type
+            ? existing.apiKeySource.value
+            : "";
+        const systemPromptValue = agent.systemPromptSource.value?.trim()
+          ? agent.systemPromptSource.value
+          : agent.systemPromptSource.type === existing.systemPromptSource.type
+            ? existing.systemPromptSource.value
+            : "";
+        this.upsertAgentSettings(projectId, {
+          ...agent,
+          apiKeySource: {
+            ...agent.apiKeySource,
+            value: apiKeyValue
+          },
+          systemPromptSource: {
+            ...agent.systemPromptSource,
+            value: systemPromptValue
+          }
+        });
+      }
+      for (const agentKind of AGENT_KINDS) {
+        if (!input.agents.some((agent) => agent.agentKind === agentKind)) {
+          this.upsertAgentSettings(projectId, defaultAgentConfig(agentKind));
+        }
+      }
+    });
+    write();
+    return this.getWorkspaceSettings(projectId);
+  }
+
+  getGithubAccessToken(projectId: string): string | null {
+    this.ensureDefaultSettings(projectId);
+    const row = this.db.prepare("SELECT github_access_token FROM workspace_settings WHERE project_id = ?").get(projectId) as
+      | { github_access_token: string }
+      | undefined;
+    return row?.github_access_token?.trim() || null;
+  }
+
+  saveGithubAuth(input: { projectId: string; accessToken: string; username: string; scopes: string[] }): WorkspaceSettings {
+    this.ensureDefaultSettings(input.projectId);
+    this.db
+      .prepare(
+        `
+        UPDATE workspace_settings
+        SET
+          github_access_token = @accessToken,
+          github_user_login = @username,
+          github_token_scopes = @scopes,
+          github_connected_at = COALESCE(github_connected_at, datetime('now')),
+          github_last_validated_at = datetime('now'),
+          updated_at = datetime('now')
+        WHERE project_id = @projectId
+      `
+      )
+      .run({
+        projectId: input.projectId,
+        accessToken: input.accessToken,
+        username: input.username,
+        scopes: input.scopes.join(",")
+      });
+    return this.getWorkspaceSettings(input.projectId);
+  }
+
+  disconnectGithub(projectId: string): WorkspaceSettings {
+    this.ensureDefaultSettings(projectId);
+    this.db
+      .prepare(
+        `
+        UPDATE workspace_settings
+        SET
+          github_access_token = '',
+          github_user_login = '',
+          github_token_scopes = '',
+          github_connected_at = NULL,
+          github_last_validated_at = NULL,
+          updated_at = datetime('now')
+        WHERE project_id = ?
+      `
+      )
+      .run(projectId);
+    return this.getWorkspaceSettings(projectId);
+  }
+
+  validateWorkspaceSettings(projectId: string, input: WorkspaceSettingsMutation): SettingsValidationResult {
+    this.getProject(projectId);
+    const fieldErrors: Record<string, string> = {};
+    const seen = new Set<AgentKind>();
+    if (input.github.enabled) {
+      if (!input.github.repository.trim()) {
+        fieldErrors["github.repository"] = "Repository is required when GitHub integration is enabled.";
+      }
+      if (!input.github.clientId.trim() && !process.env.GRAPHCODE_GITHUB_CLIENT_ID?.trim()) {
+        fieldErrors["github.clientId"] = "GitHub OAuth client ID is required to connect.";
+      }
+    }
+    input.agents.forEach((agent, index) => {
+      const existing = this.getAgentConfig(projectId, agent.agentKind);
+      const effectiveApiKeyValue =
+        agent.apiKeySource.value?.trim() || (agent.apiKeySource.type === existing.apiKeySource.type ? (existing.apiKeySource.value ?? "").trim() : "");
+      const effectiveSystemPromptValue =
+        agent.systemPromptSource.value?.trim() ||
+        (agent.systemPromptSource.type === existing.systemPromptSource.type ? (existing.systemPromptSource.value ?? "").trim() : "");
+      if (seen.has(agent.agentKind)) {
+        fieldErrors[`agents.${index}.agentKind`] = "Each agent can only be configured once.";
+      }
+      seen.add(agent.agentKind);
+      if (!agent.model.trim()) {
+        fieldErrors[`agents.${index}.model`] = "Model is required.";
+      }
+      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+        if (!effectiveApiKeyValue) {
+          fieldErrors[`agents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
+        } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
+          fieldErrors[`agents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
+        }
+      }
+      if (agent.provider === "claudecode" && !agent.model.trim()) {
+        fieldErrors[`agents.${index}.model`] = "Claude Code command or model label is required.";
+      }
+      if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
+        fieldErrors[`agents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
+      }
+    });
+
+    return {
+      ok: Object.keys(fieldErrors).length === 0,
+      testedAt: new Date().toISOString(),
+      fieldErrors
+    };
+  }
+
+  listAgentRuns(projectId: string, limit = 24): AgentRun[] {
+    this.getProject(projectId);
+    const rows = this.db
+      .prepare("SELECT * FROM agent_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT ?")
+      .all(projectId, limit) as AgentRunRow[];
+    return rows.map(mapAgentRun);
+  }
+
+  getAgentRun(runId: string): AgentRun {
+    const row = this.db.prepare("SELECT * FROM agent_runs WHERE id = ?").get(runId) as AgentRunRow | undefined;
+    if (!row) {
+      throw notFound(`Agent run not found: ${runId}`);
+    }
+    return mapAgentRun(row);
+  }
+
+  createAgentRun(input: {
+    projectId: string;
+    agentKind: AgentKind;
+    targetNodeId?: string | null;
+    prompt?: string;
+    status?: AgentRunStatus;
+    response?: string;
+    diff?: string;
+    graphPatch?: GraphPatch | null;
+    error?: string | null;
+  }): AgentRun {
+    this.getProject(input.projectId);
+    if (input.targetNodeId) {
+      this.getNode(input.targetNodeId);
+    }
+    const id = `run-${crypto.randomUUID()}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO agent_runs (
+          id, project_id, agent_kind, status, target_node_id,
+          prompt, response, diff, graph_patch_json, error
+        )
+        VALUES (
+          @id, @projectId, @agentKind, @status, @targetNodeId,
+          @prompt, @response, @diff, @graphPatchJson, @error
+        )
+      `
+      )
+      .run({
+        id,
+        projectId: input.projectId,
+        agentKind: input.agentKind,
+        status: input.status ?? "queued",
+        targetNodeId: input.targetNodeId ?? null,
+        prompt: input.prompt ?? "",
+        response: input.response ?? "",
+        diff: input.diff ?? "",
+        graphPatchJson: input.graphPatch ? JSON.stringify(input.graphPatch) : null,
+        error: input.error ?? null
+      });
+    return this.getAgentRun(id);
+  }
+
+  updateAgentRun(
+    runId: string,
+    input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error">> & { graphPatch?: GraphPatch | null }
+  ): AgentRun {
+    const existing = this.getAgentRun(runId);
+    this.db
+      .prepare(
+        `
+        UPDATE agent_runs
+        SET
+          status = @status,
+          response = @response,
+          diff = @diff,
+          graph_patch_json = @graphPatchJson,
+          error = @error,
+          updated_at = datetime('now')
+        WHERE id = @id
+      `
+      )
+      .run({
+        id: runId,
+        status: input.status ?? existing.status,
+        response: input.response ?? existing.response,
+        diff: input.diff ?? existing.diff,
+        graphPatchJson: input.graphPatch === undefined ? (existing.graphPatch ? JSON.stringify(existing.graphPatch) : null) : input.graphPatch ? JSON.stringify(input.graphPatch) : null,
+        error: input.error === undefined ? existing.error : input.error
+      });
+    return this.getAgentRun(runId);
+  }
+
+  addAgentMessage(input: { runId: string; role: AgentMessage["role"]; content: string }): AgentMessage {
+    this.getAgentRun(input.runId);
+    const id = `msg-${crypto.randomUUID()}`;
+    this.db
+      .prepare("INSERT INTO agent_messages (id, run_id, role, content) VALUES (?, ?, ?, ?)")
+      .run(id, input.runId, input.role, input.content);
+    const row = this.db.prepare("SELECT * FROM agent_messages WHERE id = ?").get(id) as AgentMessageRow;
+    return mapAgentMessage(row);
+  }
+
+  listAgentMessages(runId: string): AgentMessage[] {
+    this.getAgentRun(runId);
+    const rows = this.db.prepare("SELECT * FROM agent_messages WHERE run_id = ? ORDER BY created_at ASC").all(runId) as AgentMessageRow[];
+    return rows.map(mapAgentMessage);
+  }
+
+  setGraphStatuses(projectId: string, patches: GraphStatusPatch[]): GraphStatusHistory[] {
+    this.getProject(projectId);
+    const saved: GraphStatusHistory[] = [];
+    const write = this.db.transaction(() => {
+      for (const patch of patches) {
+        if (patch.entityType === "node") {
+          this.getNode(patch.entityId);
+          this.db.prepare("UPDATE graph_nodes SET agent_status = ?, updated_at = datetime('now') WHERE id = ?").run(patch.status, patch.entityId);
+        } else if (patch.entityType === "edge") {
+          this.getEdge(patch.entityId);
+          this.db.prepare("UPDATE graph_edges SET agent_status = ? WHERE id = ?").run(patch.status, patch.entityId);
+        } else {
+          this.getBoundary(patch.entityId);
+        }
+        const id = `status-${crypto.randomUUID()}`;
+        this.db
+          .prepare(
+            `
+            INSERT INTO graph_status_history (id, project_id, entity_type, entity_id, status, note, agent_run_id)
+            VALUES (@id, @projectId, @entityType, @entityId, @status, @note, @agentRunId)
+          `
+          )
+          .run({
+            id,
+            projectId,
+            entityType: patch.entityType,
+            entityId: patch.entityId,
+            status: patch.status,
+            note: patch.note ?? "",
+            agentRunId: patch.agentRunId ?? null
+          });
+        const row = this.db.prepare("SELECT * FROM graph_status_history WHERE id = ?").get(id) as GraphStatusHistoryRow;
+        saved.push(mapGraphStatusHistory(row));
+      }
+    });
+    write();
+    return saved;
+  }
+
+  storeCodeProposal(input: { projectId: string; agentRunId?: string | null; targetNodeId?: string | null; diff: string }): string {
+    this.getProject(input.projectId);
+    if (input.targetNodeId) {
+      this.getNode(input.targetNodeId);
+    }
+    const id = `proposal-${crypto.randomUUID()}`;
+    this.db
+      .prepare("INSERT INTO code_proposals (id, project_id, agent_run_id, target_node_id, diff) VALUES (?, ?, ?, ?, ?)")
+      .run(id, input.projectId, input.agentRunId ?? null, input.targetNodeId ?? null, input.diff);
+    return id;
   }
 
   clearAllGraphData(): void {
@@ -510,14 +949,14 @@ export class GraphRepository {
           code_context, code_directory, code_start_line, code_end_line, language,
           parent_id, attached_to_id, custom_type_id,
           source_path, source_start_line, source_end_line, ui_x, ui_y,
-          ui_width, ui_height
+          ui_width, ui_height, agent_status
         )
         VALUES (
           @id, @projectId, @kind, @name, @summary,
           @codeContext, @codeDirectory, @codeStartLine, @codeEndLine, @language,
           @parentId, @attachedToId, @customTypeId,
           @sourcePath, @sourceStartLine, @sourceEndLine, @uiX, @uiY,
-          @uiWidth, @uiHeight
+          @uiWidth, @uiHeight, @agentStatus
         )
       `
       )
@@ -541,7 +980,8 @@ export class GraphRepository {
         uiX: input.position?.x ?? 0,
         uiY: input.position?.y ?? 0,
         uiWidth: input.size?.width ?? defaultSizeForKind(input.kind).width,
-        uiHeight: input.size?.height ?? defaultSizeForKind(input.kind).height
+        uiHeight: input.size?.height ?? defaultSizeForKind(input.kind).height,
+        agentStatus: input.agentStatus ?? "none"
       });
     return this.getNode(input.id);
   }
@@ -565,7 +1005,8 @@ export class GraphRepository {
       sourceStartLine: input.codeStartLine ?? null,
       sourceEndLine: input.codeEndLine ?? null,
       position: input.position,
-      size: input.size
+      size: input.size,
+      agentStatus: "implemented"
     });
   }
 
@@ -586,7 +1027,8 @@ export class GraphRepository {
       attachedToId: input.attachedToId === undefined ? existing.attachedToId : input.attachedToId,
       customTypeId: input.customTypeId === undefined ? existing.customTypeId : input.customTypeId,
       position: input.position ?? existing.position,
-      size: input.size ?? existing.size
+      size: input.size ?? existing.size,
+      agentStatus: existing.agentStatus
     };
     this.assertValidNode(next, nodeId);
 
@@ -613,6 +1055,7 @@ export class GraphRepository {
           ui_y = @uiY,
           ui_width = @uiWidth,
           ui_height = @uiHeight,
+          agent_status = @agentStatus,
           updated_at = datetime('now')
         WHERE id = @id
       `
@@ -633,7 +1076,8 @@ export class GraphRepository {
         uiX: next.position?.x ?? existing.position.x,
         uiY: next.position?.y ?? existing.position.y,
         uiWidth: next.size?.width ?? existing.size.width,
-        uiHeight: next.size?.height ?? existing.size.height
+        uiHeight: next.size?.height ?? existing.size.height,
+        agentStatus: next.agentStatus ?? existing.agentStatus
       });
 
     return this.getNode(nodeId);
@@ -653,8 +1097,8 @@ export class GraphRepository {
     this.db
       .prepare(
         `
-        INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated)
-        VALUES (@id, @projectId, @kind, @sourceNodeId, @targetNodeId, @label, @codeContext, @color, @animated)
+        INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, agent_status)
+        VALUES (@id, @projectId, @kind, @sourceNodeId, @targetNodeId, @label, @codeContext, @color, @animated, @agentStatus)
       `
       )
       .run({
@@ -662,7 +1106,8 @@ export class GraphRepository {
         label: input.label ?? null,
         codeContext: input.codeContext ?? "",
         color: input.color ?? defaultEdgeColor(input.kind),
-        animated: input.animated === true ? 1 : 0
+        animated: input.animated === true ? 1 : 0,
+        agentStatus: input.agentStatus ?? "none"
       });
     return this.getEdge(input.id);
   }
@@ -677,7 +1122,8 @@ export class GraphRepository {
       label: input.label ?? null,
       codeContext: input.codeContext ?? "",
       color: input.color,
-      animated: input.animated
+      animated: input.animated,
+      agentStatus: "implemented"
     });
   }
 
@@ -996,6 +1442,59 @@ export class GraphRepository {
       throw notFound(`Node not found: ${nodeId}`);
     }
     return mapNode(row, this.getChildCount(row.id), this.getTagsForEntity("node", row.id));
+  }
+
+  listProjectNodes(projectId: string): GraphNode[] {
+    this.getProject(projectId);
+    return this.listNodes(projectId);
+  }
+
+  listProjectEdges(projectId: string): GraphEdge[] {
+    this.getProject(projectId);
+    return this.listEdges(projectId);
+  }
+
+  upsertScannedFileNode(input: {
+    projectId: string;
+    id: string;
+    name: string;
+    summary: string;
+    sourcePath: string;
+    language: LanguageType;
+    parentId?: string | null;
+  }): GraphNode {
+    const parentId = input.parentId ?? this.findDefaultScanParentId(input.projectId);
+    const existing = this.db.prepare("SELECT id FROM graph_nodes WHERE id = ?").get(input.id) as { id: string } | undefined;
+    if (existing) {
+      const existingNode = this.getNode(input.id);
+      const updated = this.updateNode(input.id, {
+        kind: "module",
+        name: input.name,
+        summary: input.summary,
+        codeContext: `Scanned file: ${input.sourcePath}`,
+        codeDirectory: input.sourcePath,
+        language: input.language,
+        parentId
+      });
+      if (existingNode.agentStatus === "none") {
+        this.db.prepare("UPDATE graph_nodes SET agent_status = 'implemented', updated_at = datetime('now') WHERE id = ?").run(input.id);
+        return this.getNode(input.id);
+      }
+      return updated;
+    }
+    return this.createNode({
+      id: input.id,
+      projectId: input.projectId,
+      kind: "module",
+      name: input.name,
+      summary: input.summary,
+      codeContext: `Scanned file: ${input.sourcePath}`,
+      codeDirectory: input.sourcePath,
+      sourcePath: input.sourcePath,
+      language: input.language,
+      parentId,
+      agentStatus: "implemented"
+    });
   }
 
   getHierarchy(projectId: string): HierarchyNode[] {
@@ -2428,6 +2927,121 @@ export class GraphRepository {
     return rows.map((row) => this.mapBoundary(row));
   }
 
+  private findDefaultScanParentId(projectId: string): string {
+    return this.findOrCreateScanRoot(projectId);
+  }
+
+  private findOrCreateScanRoot(projectId: string): string {
+    const scanRootId = `scan-root-${hashId(projectId)}`;
+    const existing = this.db.prepare("SELECT id FROM graph_nodes WHERE project_id = ? AND id = ?").get(projectId, scanRootId) as
+      | { id: string }
+      | undefined;
+    if (existing) {
+      return existing.id;
+    }
+
+    const frameworkId = this.findOrCreateScanFramework(projectId);
+    return this.createNode({
+      id: scanRootId,
+      projectId,
+      kind: "module",
+      name: "Repository Scan",
+      summary: "Scanner-generated file map",
+      codeContext: "Container for scanner-generated file blocks.",
+      parentId: frameworkId,
+      agentStatus: "implemented"
+    }).id;
+  }
+
+  private findOrCreateScanFramework(projectId: string): string {
+    const framework = this.db.prepare("SELECT id FROM graph_nodes WHERE project_id = ? AND kind = 'framework' ORDER BY name ASC LIMIT 1").get(projectId) as
+      | { id: string }
+      | undefined;
+    if (framework) {
+      return framework.id;
+    }
+
+    const project = this.getProject(projectId);
+    const frameworkId = `scan-framework-${hashId(projectId)}`;
+    const existing = this.db.prepare("SELECT id FROM graph_nodes WHERE project_id = ? AND id = ?").get(projectId, frameworkId) as
+      | { id: string }
+      | undefined;
+    if (existing) {
+      return existing.id;
+    }
+
+    return this.createNode({
+      id: frameworkId,
+      projectId,
+      kind: "framework",
+      name: project.name || "Scanned Workspace",
+      summary: "Scanned repository workspace",
+      codeContext: "Root created by the scanner for a blank workspace.",
+      agentStatus: "implemented"
+    }).id;
+  }
+
+  private ensureDefaultSettings(projectId: string): void {
+    this.getProject(projectId);
+    const existing = this.db.prepare("SELECT project_id FROM workspace_settings WHERE project_id = ?").get(projectId);
+    if (!existing) {
+      this.db
+        .prepare(
+          "INSERT INTO workspace_settings (project_id, theme, github_enabled, github_repository, github_client_id, auto_review_after_coding) VALUES (?, 'system', 0, '', '', 1)"
+        )
+        .run(projectId);
+    }
+    for (const agentKind of AGENT_KINDS) {
+      const row = this.db
+        .prepare("SELECT agent_kind FROM agent_settings WHERE project_id = ? AND agent_kind = ?")
+        .get(projectId, agentKind);
+      if (!row) {
+        this.upsertAgentSettings(projectId, defaultAgentConfig(agentKind));
+      }
+    }
+  }
+
+  private upsertAgentSettings(projectId: string, agent: AgentConfig): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO agent_settings (
+          project_id, agent_kind, provider, model, parallel_limit,
+          api_key_source_type, api_key_source_value,
+          system_prompt_source_type, system_prompt_source_value,
+          created_at, updated_at
+        )
+        VALUES (
+          @projectId, @agentKind, @provider, @model, @parallelLimit,
+          @apiKeySourceType, @apiKeySourceValue,
+          @systemPromptSourceType, @systemPromptSourceValue,
+          datetime('now'), datetime('now')
+        )
+        ON CONFLICT(project_id, agent_kind)
+        DO UPDATE SET
+          provider = excluded.provider,
+          model = excluded.model,
+          parallel_limit = excluded.parallel_limit,
+          api_key_source_type = excluded.api_key_source_type,
+          api_key_source_value = excluded.api_key_source_value,
+          system_prompt_source_type = excluded.system_prompt_source_type,
+          system_prompt_source_value = excluded.system_prompt_source_value,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        projectId,
+        agentKind: agent.agentKind,
+        provider: agent.provider,
+        model: agent.model,
+        parallelLimit: agent.parallelLimit,
+        apiKeySourceType: agent.apiKeySource.type,
+        apiKeySourceValue: agent.apiKeySource.value ?? "",
+        systemPromptSourceType: agent.systemPromptSource.type,
+        systemPromptSourceValue: agent.systemPromptSource.value ?? ""
+      });
+  }
+
   private listReusesForScope(projectId: string, scopeNodeId: string): GraphNodeReuse[] {
     const rows = this.db
       .prepare("SELECT * FROM graph_node_reuses WHERE project_id = ? AND scope_node_id = ? ORDER BY label ASC, node_id ASC")
@@ -2938,6 +3552,149 @@ function mapProject(row: ProjectRow): Project {
   };
 }
 
+function parseScopes(value: string): string[] {
+  return value
+    .split(",")
+    .map((scope) => scope.trim())
+    .filter(Boolean);
+}
+
+function defaultAgentConfig(agentKind: AgentKind): AgentConfig {
+  return {
+    agentKind,
+    provider: "fake",
+    model: agentKind === "scanning" ? "graphcode-scanner-v1" : "graphcode-fake-v1",
+    parallelLimit: agentKind === "scanning" ? 8 : 4,
+    apiKeySource: {
+      type: "env",
+      value: defaultApiKeyEnv(agentKind)
+    },
+    systemPromptSource: {
+      type: "manual",
+      value: defaultSystemPrompt(agentKind)
+    }
+  };
+}
+
+function defaultApiKeyEnv(agentKind: AgentKind): string {
+  switch (agentKind) {
+    case "planning":
+      return "OPENAI_API_KEY";
+    case "coding":
+      return "OPENAI_API_KEY";
+    case "review":
+      return "OPENAI_API_KEY";
+    case "scanning":
+      return "OPENAI_API_KEY";
+    default:
+      return "";
+  }
+}
+
+function defaultSystemPrompt(agentKind: AgentKind): string {
+  switch (agentKind) {
+    case "planning":
+      return "Plan graph changes as small validated graph patches.";
+    case "coding":
+      return "Produce scoped unified diffs only for the selected graph block.";
+    case "review":
+      return "Review proposed diffs for bugs, scope leaks, and missing tests.";
+    case "scanning":
+      return "Scan repositories into concise GraphCode blocks and edges.";
+    default:
+      return "";
+  }
+}
+
+function mapAgentSettingsView(row: AgentSettingsRow): AgentConfigView {
+  const apiValue = row.api_key_source_value ?? "";
+  const promptValue = row.system_prompt_source_value ?? "";
+  return {
+    agentKind: row.agent_kind,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: ""
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_type === "manual" ? promptValue : ""
+    },
+    apiKeyConfigured: apiValue.trim().length > 0,
+    systemPromptConfigured: promptValue.trim().length > 0
+  };
+}
+
+function mapAgentSettings(row: AgentSettingsRow): AgentConfig {
+  return {
+    agentKind: row.agent_kind,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: row.api_key_source_value
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_value
+    }
+  };
+}
+
+function mapAgentRun(row: AgentRunRow): AgentRun {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    agentKind: row.agent_kind,
+    status: row.status,
+    targetNodeId: row.target_node_id,
+    prompt: row.prompt,
+    response: row.response,
+    diff: row.diff,
+    graphPatch: parseGraphPatch(row.graph_patch_json),
+    error: row.error,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function parseGraphPatch(value: string | null): GraphPatch | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    return graphPatchSchema.parse(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function mapAgentMessage(row: AgentMessageRow): AgentMessage {
+  return {
+    id: row.id,
+    runId: row.run_id,
+    role: row.role,
+    content: row.content,
+    createdAt: row.created_at
+  };
+}
+
+function mapGraphStatusHistory(row: GraphStatusHistoryRow): GraphStatusHistory {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    entityType: row.entity_type,
+    entityId: row.entity_id,
+    status: row.status,
+    note: row.note,
+    agentRunId: row.agent_run_id,
+    createdAt: row.created_at
+  };
+}
+
 function mapCustomBlockType(row: CustomBlockTypeRow): CustomBlockType {
   return {
     id: row.id,
@@ -3017,6 +3774,8 @@ function mapNode(row: NodeRow, childCount: number, tags: GraphTag[] = []): Graph
     },
     childCount,
     hasChildren: childCount > 0,
+    agentStatus: row.agent_status ?? "none",
+    gitStatus: null,
     tags,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -3034,6 +3793,8 @@ function mapEdge(row: EdgeRow, tags: GraphTag[] = []): GraphEdge {
     codeContext: row.code_context ?? "",
     color: row.color ?? defaultEdgeColor(row.kind),
     animated: row.animated === 1,
+    agentStatus: row.agent_status ?? "none",
+    gitStatus: null,
     tags,
     createdAt: row.created_at
   };
@@ -3251,7 +4012,8 @@ function enrichSelfSeedNode(node: NewGraphNode): NewGraphNode {
   return {
     ...node,
     summary,
-    codeContext
+    codeContext,
+    agentStatus: node.agentStatus ?? "implemented"
   };
 }
 
@@ -3260,6 +4022,7 @@ function enrichSelfSeedEdge(edge: NewGraphEdge): NewGraphEdge {
     ...edge,
     color: edge.color ?? defaultEdgeColor(edge.kind),
     animated: edge.animated ?? edge.kind === "flows",
+    agentStatus: edge.agentStatus ?? "implemented",
     codeContext:
       edge.codeContext ??
       [

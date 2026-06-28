@@ -1,19 +1,30 @@
 import { describe, expect, it } from "vitest";
 import {
+  agentConfigSchema,
+  agentRunSchema,
+  agentStatusSchema,
   boundaryMutationSchema,
   edgeMutationSchema,
+  graphPatchSchema,
+  githubDevicePollRequestSchema,
+  githubDeviceStartResponseSchema,
+  gitStatusInfoSchema,
   graphNodeReuseSchema,
   graphTagSchema,
   graphBoundarySchema,
   graphEdgeSchema,
   graphNodeKindSchema,
+  graphStatusPatchSchema,
   hierarchyBoundaryGroupSchema,
   hierarchyBoundaryLabelSchema,
   isAttachmentNodeKind,
   isDomainNodeKind,
   nodeReuseMutationSchema,
   tagAssignmentSchema,
-  nodeTypeStyleSchema
+  nodeTypeStyleSchema,
+  settingsValidationResultSchema,
+  workspaceSettingsSchema,
+  workspaceSettingsMutationSchema
 } from "./index";
 
 describe("graph model enums", () => {
@@ -151,5 +162,119 @@ describe("graph model enums", () => {
         updatedAt: "now"
       }).nodeKind
     ).toBe("ui_component");
+  });
+
+  it("accepts agent settings, statuses, validation, and run payloads", () => {
+    expect(agentStatusSchema.parse("coded")).toBe("coded");
+    expect(agentStatusSchema.parse("implemented")).toBe("implemented");
+    expect(gitStatusInfoSchema.parse({ worktree: "pending", change: "modified" }).change).toBe("modified");
+    expect(
+      agentConfigSchema.parse({
+        agentKind: "coding",
+        provider: "openrouter",
+        model: "openai/gpt-4.1-mini",
+        parallelLimit: 3,
+        apiKeySource: { type: "env", value: "OPENROUTER_API_KEY" },
+        systemPromptSource: { type: "manual", value: "Stay scoped." }
+      }).provider
+    ).toBe("openrouter");
+    expect(
+      workspaceSettingsMutationSchema.parse({
+        general: { theme: "dark" },
+        github: { enabled: true, repository: "owner/repo", clientId: "github-client" },
+        automation: { autoReviewAfterCoding: true },
+        agents: [
+          {
+            agentKind: "planning",
+            provider: "fake",
+            model: "fake",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Plan." }
+          }
+        ]
+      }).general.theme
+    ).toBe("dark");
+    expect(
+      workspaceSettingsSchema.parse({
+        general: { theme: "dark" },
+        github: {
+          enabled: true,
+          repository: "owner/repo",
+          clientId: "github-client",
+          auth: {
+            connected: true,
+            username: "octocat",
+            tokenConfigured: true,
+            scopes: ["repo", "read:user"],
+            connectedAt: "now",
+            lastValidatedAt: "now"
+          }
+        },
+        automation: { autoReviewAfterCoding: true },
+        agents: []
+      }).github.auth.username
+    ).toBe("octocat");
+    expect(
+      settingsValidationResultSchema.parse({
+        ok: false,
+        testedAt: "now",
+        fieldErrors: { "agents.0.model": "Required" }
+      }).fieldErrors["agents.0.model"]
+    ).toBe("Required");
+    expect(
+      agentRunSchema.parse({
+        id: "run-1",
+        projectId: "project",
+        agentKind: "coding",
+        status: "succeeded",
+        targetNodeId: "node-1",
+        prompt: "Do it",
+        response: "Done",
+        diff: "diff --git",
+        graphPatch: null,
+        error: null,
+        createdAt: "now",
+        updatedAt: "now"
+      }).status
+    ).toBe("succeeded");
+  });
+
+  it("accepts graph patches and status updates", () => {
+    expect(
+      graphPatchSchema.parse({
+        summary: "Mark block planned",
+        operations: [{ entityType: "node", entityId: "node-1", action: "update", fields: { summary: "new" } }]
+      }).operations[0].entityType
+    ).toBe("node");
+    expect(
+      graphStatusPatchSchema.parse({
+        entityType: "edge",
+        entityId: "edge-1",
+        status: "reviewed",
+        note: "Looks good"
+      }).status
+    ).toBe("reviewed");
+    expect(
+      graphStatusPatchSchema.parse({
+        entityType: "node",
+        entityId: "node-1",
+        status: "implemented"
+      }).status
+    ).toBe("implemented");
+  });
+
+  it("accepts GitHub device flow payloads", () => {
+    expect(
+      githubDeviceStartResponseSchema.parse({
+        deviceCode: "device",
+        userCode: "ABCD-EFGH",
+        verificationUri: "https://github.com/login/device",
+        expiresIn: 900,
+        interval: 5,
+        message: "Open GitHub"
+      }).userCode
+    ).toBe("ABCD-EFGH");
+    expect(githubDevicePollRequestSchema.parse({ deviceCode: "device", clientId: "client" }).deviceCode).toBe("device");
   });
 });

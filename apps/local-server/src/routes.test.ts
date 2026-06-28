@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDatabase } from "./db/connection";
 import { GraphRepository } from "./db/repository";
 import { migrate } from "./db/schema";
@@ -20,6 +20,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   await app.close();
+  vi.unstubAllGlobals();
 });
 
 describe("graph API routes", () => {
@@ -60,6 +61,178 @@ describe("graph API routes", () => {
     expect(body.nodeTypeStyles.some((style: { nodeKind: string }) => style.nodeKind === "ui_component")).toBe(true);
     expect(body.reuses.some((reuse: { nodeId: string }) => reuse.nodeId === "object-graph-tag")).toBe(true);
     expect(body.nodes.some((node: { tags: Array<{ name: string }> }) => node.tags.some((tag) => tag.name === "taggable"))).toBe(true);
+  });
+
+  it("saves settings, validates Claude Code command, and lists agent runs", async () => {
+    const settingsResponse = await app.inject({
+      method: "GET",
+      url: "/api/projects/graphcode-self/settings"
+    });
+    expect(settingsResponse.statusCode).toBe(200);
+    expect(settingsResponse.json().agents.some((agent: { agentKind: string }) => agent.agentKind === "coding")).toBe(true);
+
+    const saveResponse = await app.inject({
+      method: "PUT",
+      url: "/api/projects/graphcode-self/settings",
+      payload: {
+        general: { theme: "dark" },
+        github: { enabled: true, repository: "owner/repo", clientId: "github-client" },
+        automation: { autoReviewAfterCoding: true },
+        agents: [
+          {
+            agentKind: "coding",
+            provider: "fake",
+            model: "fake",
+            parallelLimit: 2,
+            apiKeySource: { type: "manual", value: "secret" },
+            systemPromptSource: { type: "manual", value: "Stay scoped." }
+          },
+          {
+            agentKind: "planning",
+            provider: "claudecode",
+            model: "definitely-missing-claude-command",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Plan." }
+          },
+          {
+            agentKind: "review",
+            provider: "fake",
+            model: "fake",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Review." }
+          },
+          {
+            agentKind: "scanning",
+            provider: "fake",
+            model: "fake",
+            parallelLimit: 2,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Scan." }
+          }
+        ]
+      }
+    });
+    expect(saveResponse.statusCode).toBe(200);
+    expect(saveResponse.json().validation.ok).toBe(false);
+    expect(JSON.stringify(saveResponse.json().validation.fieldErrors)).toContain("Claude Code command");
+
+    const runsResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/agent-runs" });
+    expect(runsResponse.statusCode).toBe(200);
+    expect(runsResponse.json()).toEqual([]);
+  });
+
+  it("connects and disconnects GitHub with OAuth device flow routes", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: unknown) => {
+        const url = String(input);
+        if (url === "https://github.com/login/device/code") {
+          return jsonResponse({
+            device_code: "device-code",
+            user_code: "ABCD-EFGH",
+            verification_uri: "https://github.com/login/device",
+            expires_in: 900,
+            interval: 5,
+            message: "Enter the code"
+          });
+        }
+        if (url === "https://github.com/login/oauth/access_token") {
+          return jsonResponse({
+            access_token: "gho_token",
+            token_type: "bearer",
+            scope: "repo,read:user"
+          });
+        }
+        if (url === "https://api.github.com/user") {
+          return jsonResponse({ login: "octocat" });
+        }
+        if (url === "https://api.github.com/repos/owner/repo") {
+          return jsonResponse({ full_name: "owner/repo" });
+        }
+        return jsonResponse({ message: "not found" }, 404);
+      })
+    );
+
+    const startResponse = await app.inject({
+      method: "POST",
+      url: "/api/projects/graphcode-self/github/device/start",
+      payload: { clientId: "github-client" }
+    });
+    expect(startResponse.statusCode).toBe(200);
+    expect(startResponse.json().userCode).toBe("ABCD-EFGH");
+
+    const pollResponse = await app.inject({
+      method: "POST",
+      url: "/api/projects/graphcode-self/github/device/poll",
+      payload: { deviceCode: "device-code", clientId: "github-client", repository: "owner/repo" }
+    });
+    expect(pollResponse.statusCode).toBe(200);
+    expect(pollResponse.json().status).toBe("connected");
+    expect(pollResponse.json().settings.github.auth.username).toBe("octocat");
+    expect(pollResponse.json().settings.github.auth.tokenConfigured).toBe(true);
+
+    const disconnectResponse = await app.inject({
+      method: "POST",
+      url: "/api/projects/graphcode-self/github/disconnect"
+    });
+    expect(disconnectResponse.statusCode).toBe(200);
+    expect(disconnectResponse.json().github.auth.connected).toBe(false);
+  });
+
+  it("runs fake planning, coding, review, scanning, and git-status routes", async () => {
+    const planningResponse = await app.inject({
+      method: "POST",
+      url: "/api/agents/planning",
+      payload: {
+        projectId: "graphcode-self",
+        prompt: "Plan a panel",
+        scopeNodeId: "module-web"
+      }
+    });
+    expect(planningResponse.statusCode).toBe(200);
+    expect(planningResponse.json().status).toBe("succeeded");
+
+    const codingResponse = await app.inject({
+      method: "POST",
+      url: "/api/agents/coding",
+      payload: {
+        projectId: "graphcode-self",
+        nodeId: "module-web",
+        prompt: "Add a placeholder"
+      }
+    });
+    expect(codingResponse.statusCode).toBe(200);
+    expect(codingResponse.json().status).toBe("succeeded");
+    expect(codingResponse.json().diff).toContain("diff --git");
+
+    const runsAfterCodingResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/agent-runs" });
+    expect(runsAfterCodingResponse.statusCode).toBe(200);
+    expect(runsAfterCodingResponse.json().some((run: { agentKind: string; prompt: string }) => run.agentKind === "review" && run.prompt.includes(codingResponse.json().id))).toBe(true);
+
+    const reviewResponse = await app.inject({
+      method: "POST",
+      url: "/api/agents/review",
+      payload: {
+        projectId: "graphcode-self",
+        runId: codingResponse.json().id
+      }
+    });
+    expect(reviewResponse.statusCode).toBe(200);
+    expect(reviewResponse.json().status).toBe("succeeded");
+
+    const scanResponse = await app.inject({
+      method: "POST",
+      url: "/api/agents/scanning",
+      payload: { projectId: "graphcode-self" }
+    });
+    expect(scanResponse.statusCode).toBe(200);
+    expect(scanResponse.json().response).toContain("Scanned");
+
+    const gitResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/git-status" });
+    expect(gitResponse.statusCode).toBe(200);
+    expect(typeof gitResponse.json().status).toBe("string");
   });
 
   it("updates tags and reusable placements through the API", async () => {
@@ -254,6 +427,28 @@ describe("graph API routes", () => {
     expect(await fileExists(path.join(rootPath, ".graphcode", "graphcode.sqlite"))).toBe(true);
   });
 
+  it("recovers the self workspace graph when its .graphcode database is empty", async () => {
+    await app.close();
+    const rootPath = path.join(os.tmpdir(), `graphcode-self-open-${crypto.randomUUID()}`);
+    await fs.promises.mkdir(path.join(rootPath, ".graphcode"), { recursive: true });
+    app = await buildServer({
+      dbPath: path.join(os.tmpdir(), `graphcode-empty-self-${crypto.randomUUID()}.sqlite`),
+      selfRootPath: rootPath
+    });
+
+    const openResponse = await app.inject({
+      method: "POST",
+      url: "/api/workspaces/open",
+      payload: { rootPath }
+    });
+    expect(openResponse.statusCode).toBe(200);
+    expect(openResponse.json().project.id).toBe("graphcode-self");
+
+    const hierarchyResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/hierarchy" });
+    expect(hierarchyResponse.statusCode).toBe(200);
+    expect(JSON.stringify(hierarchyResponse.json())).toContain("Web Workspace");
+  });
+
   it("preserves existing database contents on normal startup", async () => {
     await app.close();
 
@@ -285,4 +480,11 @@ async function fileExists(filePath: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
 }

@@ -1,0 +1,80 @@
+import type { AgentKind, AgentProvider, AgentStatus, GitChangeStatus, GitWorktreeStatus } from "@graphcode/graph-model";
+
+export function agentKindLabel(agentKind: AgentKind): string {
+  switch (agentKind) {
+    case "planning":
+      return "Planning";
+    case "coding":
+      return "Coding";
+    case "review":
+      return "Review";
+    case "scanning":
+      return "Scanning";
+    default:
+      return agentKind;
+  }
+}
+
+export function providerLabel(provider: AgentProvider): string {
+  switch (provider) {
+    case "claudecode":
+      return "Claude Code";
+    case "openai":
+      return "OpenAI";
+    case "gemini":
+      return "Gemini";
+    case "openrouter":
+      return "OpenRouter";
+    case "fake":
+      return "Fake";
+    default:
+      return provider;
+  }
+}
+
+export function agentStatusLabel(status: AgentStatus): string {
+  switch (status) {
+    case "none":
+      return "None";
+    case "planning":
+      return "Planning";
+    case "coded":
+      return "Coded";
+    case "reviewed":
+      return "Reviewed";
+    case "implemented":
+      return "Implemented";
+    case "bugged":
+      return "Bugged";
+    default:
+      return status;
+  }
+}
+
+export function gitWorktreeLabel(status: GitWorktreeStatus): string {
+  switch (status) {
+    case "untracked":
+      return "Untracked";
+    case "pending":
+      return "Pending";
+    case "staged":
+      return "Staged";
+    case "committed":
+      return "Committed";
+    default:
+      return status;
+  }
+}
+
+export function gitChangeLabel(status: GitChangeStatus | null): string {
+  switch (status) {
+    case "new":
+      return "New";
+    case "modified":
+      return "Modified";
+    case "deleted":
+      return "Deleted";
+    default:
+      return "No File Change";
+  }
+}

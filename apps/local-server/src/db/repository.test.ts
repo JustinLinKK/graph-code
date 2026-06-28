@@ -45,9 +45,57 @@ describe("SQLite graph repository", () => {
         "format_details",
         "graph_node_layouts",
         "graph_node_type_styles",
-        "graph_revisions"
+        "graph_revisions",
+        "workspace_settings",
+        "agent_settings",
+        "agent_runs",
+        "agent_messages",
+        "graph_status_history",
+        "code_proposals"
       ])
     );
+  });
+
+  it("saves settings with masked views and records agent status history", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const settings = repo.saveWorkspaceSettings(project.id, {
+      general: { theme: "dark" },
+      github: { enabled: true, repository: "owner/repo", clientId: "github-client" },
+      automation: { autoReviewAfterCoding: false },
+      agents: [
+        {
+          agentKind: "coding",
+          provider: "openai",
+          model: "gpt-4.1-mini",
+          parallelLimit: 2,
+          apiKeySource: { type: "manual", value: "secret-value" },
+          systemPromptSource: { type: "manual", value: "Stay scoped." }
+        }
+      ]
+    });
+    const raw = repo.getAgentConfig(project.id, "coding");
+    const run = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "coding",
+      targetNodeId: "module-web",
+      prompt: "Patch",
+      status: "succeeded",
+      diff: "diff --git"
+    });
+    const history = repo.setGraphStatuses(project.id, [
+      { entityType: "node", entityId: "module-web", status: "coded", agentRunId: run.id, note: "coded" }
+    ]);
+    repo.storeCodeProposal({ projectId: project.id, agentRunId: run.id, targetNodeId: "module-web", diff: "diff --git" });
+
+    expect(settings.general.theme).toBe("dark");
+    expect(settings.github.clientId).toBe("github-client");
+    expect(settings.github.auth.tokenConfigured).toBe(false);
+    expect(settings.automation.autoReviewAfterCoding).toBe(false);
+    expect(settings.agents.find((agent) => agent.agentKind === "coding")?.apiKeySource.value).toBe("");
+    expect(settings.agents.find((agent) => agent.agentKind === "coding")?.apiKeyConfigured).toBe(true);
+    expect(raw.apiKeySource.value).toBe("secret-value");
+    expect(history[0].status).toBe("coded");
+    expect(repo.getNode("module-web").agentStatus).toBe("coded");
   });
 
   it("seeds a valid self-repo hierarchy and keeps attachments out of the hierarchy tree", () => {
@@ -64,6 +112,7 @@ describe("SQLite graph repository", () => {
     expect(flattened.map((node) => node.name)).toContain("Graph Model");
     expect(flattened.map((node) => node.name)).toContain("Parser Package");
     expect(flattened.map((node) => node.kind)).toEqual(expect.arrayContaining(["website", "ui_component"]));
+    expect(flattened.every((node) => node.agentStatus === "implemented")).toBe(true);
     expect(flattened.every((node) => ["framework", "module", "website", "ui_component", "function", "object"].includes(node.kind))).toBe(true);
     expect(flattened.some((node) => node.boundaryLabels.length > 0)).toBe(true);
     expect(flattened.flatMap((node) => node.boundaryGroups).map((boundary) => boundary.name)).toContain("Frontend");
@@ -109,6 +158,40 @@ describe("SQLite graph repository", () => {
       "Web Workspace"
     ]);
     expect(canvas.boundaries.map((boundary) => boundary.name)).toEqual(expect.arrayContaining(["Frontend", "Backend", "Shared Model", "Tooling"]));
+  });
+
+  it("keeps scanner-created file nodes under a dedicated repository scan container", async () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const scannedNode = repo.upsertScannedFileNode({
+      projectId: project.id,
+      id: "scan-file-workspace",
+      name: "workspace.ts",
+      summary: "typescript file workspace.ts",
+      sourcePath: "apps/local-server/src/workspace.ts",
+      language: "typescript"
+    });
+    expect(scannedNode.parentId).toBeTruthy();
+
+    const scanRoot = repo.getNode(scannedNode.parentId!);
+    expect(scanRoot.name).toBe("Repository Scan");
+    expect(scanRoot.kind).toBe("module");
+    expect(scanRoot.parentId).toBe("framework-graphcode-self");
+    expect(scannedNode.agentStatus).toBe("implemented");
+
+    const frameworkCanvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: "framework-graphcode-self",
+      includeAttachments: true
+    });
+    expect(frameworkCanvas.nodes.map((node) => node.name)).toContain("Repository Scan");
+    expect(frameworkCanvas.nodes.map((node) => node.name)).not.toContain("workspace.ts");
+
+    const scanCanvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: scanRoot.id,
+      includeAttachments: true
+    });
+    expect(scanCanvas.nodes.map((node) => node.name)).toContain("workspace.ts");
   });
 
   it("returns local-server canvas data with rich attachments and basic blocks", async () => {
@@ -314,6 +397,26 @@ describe("SQLite graph repository", () => {
     const memberNodes = canvas.nodes.filter((node) => boundary?.memberNodeIds.includes(node.id));
     expect(memberNodes.length).toBeGreaterThan(0);
     expect(memberNodes.every((node) => nodeCenterInside(node, boundary!))).toBe(true);
+  });
+
+  it("auto-layout reserves boundary header space before member blocks", async () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    repo.updateBoundary("boundary-backend-internals", {
+      summary: "Local API and persistence modules with a longer boundary description that should keep member blocks below the label area."
+    });
+
+    const canvas = await repo.autoLayoutScope({
+      projectId: project.id,
+      scopeNodeId: "module-local-server",
+      includeAttachments: true
+    });
+    const boundary = canvas.boundaries.find((item) => item.id === "boundary-backend-internals");
+    const memberNodes = canvas.nodes.filter((node) => boundary?.memberNodeIds.includes(node.id));
+    const firstMemberTop = Math.min(...memberNodes.map((node) => node.position.y));
+
+    expect(boundary).toBeDefined();
+    expect(memberNodes.length).toBeGreaterThan(0);
+    expect(firstMemberTop - boundary!.position.y).toBeGreaterThanOrEqual(80);
   });
 
   it("auto-layout expands undersized blocks to fit longer descriptions", async () => {

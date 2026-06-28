@@ -1,7 +1,9 @@
 import type {
+  AgentRun,
   BoundaryMutation,
   BoundaryUpdate,
   CanvasGraph,
+  CodingAgentRequest,
   CreateCustomBlockType,
   CustomBlockType,
   CustomBlockTypeUpdate,
@@ -9,6 +11,10 @@ import type {
   EdgeUpdate,
   GraphBoundary,
   GraphEdge,
+  GithubDevicePollRequest,
+  GithubDevicePollResponse,
+  GithubDeviceStartRequest,
+  GithubDeviceStartResponse,
   GraphNode,
   GraphNodeReuse,
   HierarchyNode,
@@ -20,7 +26,13 @@ import type {
   NodeTypeStyle,
   NodeTypeStyleUpdate,
   OpenWorkspaceResult,
+  PlanningChatRequest,
   Project,
+  ReviewAgentRequest,
+  ScanningAgentRequest,
+  WorkspaceSettings,
+  WorkspaceSettingsMutation,
+  SettingsValidationResult,
   TagAssignment
 } from "@graphcode/graph-model";
 
@@ -82,6 +94,77 @@ export async function getCanvasGraph(
   params.set("includeAttachments", String(options.includeAttachments ?? true));
   const suffix = params.toString() ? `?${params.toString()}` : "";
   return request<CanvasGraph>(`/api/projects/${projectId}/canvas${suffix}`);
+}
+
+export async function getWorkspaceSettings(projectId: string): Promise<WorkspaceSettings> {
+  return request<WorkspaceSettings>(`/api/projects/${projectId}/settings`);
+}
+
+export async function saveWorkspaceSettings(
+  projectId: string,
+  settings: WorkspaceSettingsMutation
+): Promise<{ settings: WorkspaceSettings; validation: SettingsValidationResult }> {
+  return request<{ settings: WorkspaceSettings; validation: SettingsValidationResult }>(`/api/projects/${projectId}/settings`, {
+    method: "PUT",
+    body: JSON.stringify(settings)
+  });
+}
+
+export async function listAgentRuns(projectId: string): Promise<AgentRun[]> {
+  return request<AgentRun[]>(`/api/projects/${projectId}/agent-runs`);
+}
+
+export async function getGitStatus(projectId: string): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/projects/${projectId}/git-status`);
+}
+
+export async function startGithubDeviceFlow(projectId: string, input: GithubDeviceStartRequest): Promise<GithubDeviceStartResponse> {
+  return request<GithubDeviceStartResponse>(`/api/projects/${projectId}/github/device/start`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function pollGithubDeviceFlow(projectId: string, input: GithubDevicePollRequest): Promise<GithubDevicePollResponse> {
+  return request<GithubDevicePollResponse>(`/api/projects/${projectId}/github/device/poll`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function disconnectGithub(projectId: string): Promise<WorkspaceSettings> {
+  return request<WorkspaceSettings>(`/api/projects/${projectId}/github/disconnect`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function runPlanningAgent(input: PlanningChatRequest): Promise<AgentRun> {
+  return request<AgentRun>("/api/agents/planning", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function runCodingAgent(input: CodingAgentRequest): Promise<AgentRun> {
+  return request<AgentRun>("/api/agents/coding", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function runReviewAgent(input: ReviewAgentRequest): Promise<AgentRun> {
+  return request<AgentRun>("/api/agents/review", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function runScanningAgent(input: ScanningAgentRequest): Promise<AgentRun> {
+  return request<AgentRun>("/api/agents/scanning", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
 }
 
 export async function getNodeDetail(nodeId: string): Promise<NodeDetail> {

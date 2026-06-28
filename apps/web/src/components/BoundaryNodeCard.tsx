@@ -22,9 +22,13 @@ export function BoundaryNodeCard({ data, selected }: NodeProps) {
         handleClassName="boundary-resizer-handle"
         onResizeEnd={(_, params) => cardData.onResizeEnd?.(boundary.id, { width: params.width, height: params.height })}
       />
-      <div className="boundary-node-title">{boundary.name}</div>
-      {boundary.summary ? <p>{boundary.summary}</p> : null}
-      <span>{boundary.memberCount} blocks</span>
+      <div className="boundary-node-header">
+        <div className="boundary-node-heading">
+          <div className="boundary-node-title">{boundary.name}</div>
+          <span className="boundary-node-count">{boundary.memberCount} blocks</span>
+        </div>
+        {boundary.summary ? <p>{boundary.summary}</p> : null}
+      </div>
     </div>
   );
 }

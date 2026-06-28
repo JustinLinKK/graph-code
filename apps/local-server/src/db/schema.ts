@@ -22,6 +22,7 @@ const GRAPH_NODES_SQL = `
     ui_y REAL NOT NULL DEFAULT 0,
     ui_width REAL NOT NULL DEFAULT 224,
     ui_height REAL NOT NULL DEFAULT 120,
+    agent_status TEXT NOT NULL DEFAULT 'none' CHECK (agent_status IN ('none', 'planning', 'coded', 'reviewed', 'implemented', 'bugged')),
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -51,6 +52,7 @@ const GRAPH_EDGES_SQL = `
     code_context TEXT NOT NULL DEFAULT '',
     color TEXT NOT NULL DEFAULT '#727782',
     animated INTEGER NOT NULL DEFAULT 0,
+    agent_status TEXT NOT NULL DEFAULT 'none' CHECK (agent_status IN ('none', 'planning', 'coded', 'reviewed', 'implemented', 'bugged')),
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `;
@@ -162,6 +164,12 @@ const GRAPH_TABLES = [
   "graph_revisions",
   "graph_nodes",
   "custom_block_types",
+  "workspace_settings",
+  "agent_settings",
+  "agent_runs",
+  "agent_messages",
+  "graph_status_history",
+  "code_proposals",
   "graph_edges_old",
   "graph_nodes_old"
 ] as const;
@@ -265,6 +273,80 @@ export function migrate(db: GraphDatabase): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS workspace_settings (
+      project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
+      theme TEXT NOT NULL DEFAULT 'system' CHECK (theme IN ('light', 'dark', 'system')),
+      github_enabled INTEGER NOT NULL DEFAULT 0,
+      github_repository TEXT NOT NULL DEFAULT '',
+      github_client_id TEXT NOT NULL DEFAULT '',
+      github_access_token TEXT NOT NULL DEFAULT '',
+      github_user_login TEXT NOT NULL DEFAULT '',
+      github_token_scopes TEXT NOT NULL DEFAULT '',
+      github_connected_at TEXT,
+      github_last_validated_at TEXT,
+      auto_review_after_coding INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_settings (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
+      provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter')),
+      model TEXT NOT NULL DEFAULT '',
+      parallel_limit INTEGER NOT NULL DEFAULT 4,
+      api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
+      api_key_source_value TEXT NOT NULL DEFAULT '',
+      system_prompt_source_type TEXT NOT NULL DEFAULT 'manual' CHECK (system_prompt_source_type IN ('manual', 'file')),
+      system_prompt_source_value TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, agent_kind)
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
+      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+      target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+      prompt TEXT NOT NULL DEFAULT '',
+      response TEXT NOT NULL DEFAULT '',
+      diff TEXT NOT NULL DEFAULT '',
+      graph_patch_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_messages (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'tool', 'system')),
+      content TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS graph_status_history (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('node', 'edge', 'boundary')),
+      entity_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('none', 'planning', 'coded', 'reviewed', 'implemented', 'bugged')),
+      note TEXT NOT NULL DEFAULT '',
+      agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS code_proposals (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+      target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+      diff TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE INDEX IF NOT EXISTS idx_graph_nodes_project ON graph_nodes(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_nodes_parent ON graph_nodes(parent_id);
     CREATE INDEX IF NOT EXISTS idx_graph_nodes_attached_to ON graph_nodes(attached_to_id);
@@ -283,7 +365,68 @@ export function migrate(db: GraphDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_graph_boundary_tags_tag ON graph_boundary_tags(tag_id);
     CREATE INDEX IF NOT EXISTS idx_graph_node_reuses_scope ON graph_node_reuses(project_id, scope_node_id);
     CREATE INDEX IF NOT EXISTS idx_graph_node_reuses_node ON graph_node_reuses(project_id, node_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_project ON agent_runs(project_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_agent_runs_target ON agent_runs(target_node_id);
+    CREATE INDEX IF NOT EXISTS idx_agent_messages_run ON agent_messages(run_id, created_at);
+    CREATE INDEX IF NOT EXISTS idx_graph_status_history_entity ON graph_status_history(project_id, entity_type, entity_id);
+    CREATE INDEX IF NOT EXISTS idx_code_proposals_project ON code_proposals(project_id, created_at);
   `);
+  ensureWorkspaceSettingsTable(db);
+  ensureGraphStatusHistoryTable(db);
+}
+
+function ensureWorkspaceSettingsTable(db: GraphDatabase): void {
+  if (!getTableSql(db, "workspace_settings")) {
+    return;
+  }
+  if (!tableHasColumn(db, "workspace_settings", "github_client_id")) {
+    db.exec("ALTER TABLE workspace_settings ADD COLUMN github_client_id TEXT NOT NULL DEFAULT '';");
+  }
+  if (!tableHasColumn(db, "workspace_settings", "github_access_token")) {
+    db.exec("ALTER TABLE workspace_settings ADD COLUMN github_access_token TEXT NOT NULL DEFAULT '';");
+  }
+  if (!tableHasColumn(db, "workspace_settings", "github_user_login")) {
+    db.exec("ALTER TABLE workspace_settings ADD COLUMN github_user_login TEXT NOT NULL DEFAULT '';");
+  }
+  if (!tableHasColumn(db, "workspace_settings", "github_token_scopes")) {
+    db.exec("ALTER TABLE workspace_settings ADD COLUMN github_token_scopes TEXT NOT NULL DEFAULT '';");
+  }
+  if (!tableHasColumn(db, "workspace_settings", "github_connected_at")) {
+    db.exec("ALTER TABLE workspace_settings ADD COLUMN github_connected_at TEXT;");
+  }
+  if (!tableHasColumn(db, "workspace_settings", "github_last_validated_at")) {
+    db.exec("ALTER TABLE workspace_settings ADD COLUMN github_last_validated_at TEXT;");
+  }
+  if (!tableHasColumn(db, "workspace_settings", "auto_review_after_coding")) {
+    db.exec("ALTER TABLE workspace_settings ADD COLUMN auto_review_after_coding INTEGER NOT NULL DEFAULT 1;");
+  }
+}
+
+function ensureGraphStatusHistoryTable(db: GraphDatabase): void {
+  const sql = getTableSql(db, "graph_status_history");
+  if (!sql || sql.includes("'implemented'")) {
+    return;
+  }
+
+  db.pragma("foreign_keys = OFF");
+  db.exec(`
+    ALTER TABLE graph_status_history RENAME TO graph_status_history_old;
+    CREATE TABLE graph_status_history (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('node', 'edge', 'boundary')),
+      entity_id TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('none', 'planning', 'coded', 'reviewed', 'implemented', 'bugged')),
+      note TEXT NOT NULL DEFAULT '',
+      agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    INSERT INTO graph_status_history (id, project_id, entity_type, entity_id, status, note, agent_run_id, created_at)
+    SELECT id, project_id, entity_type, entity_id, ${normalizedStatusSql("status")}, note, agent_run_id, created_at
+    FROM graph_status_history_old;
+    DROP TABLE graph_status_history_old;
+  `);
+  db.pragma("foreign_keys = ON");
 }
 
 function ensureCustomBlockTypesTable(db: GraphDatabase): void {
@@ -308,10 +451,19 @@ function ensureGraphNodesTable(db: GraphDatabase): void {
     sql.includes("'website'") &&
     sql.includes("'ui_component'")
   ) {
+    if (!tableHasColumn(db, "graph_nodes", "agent_status")) {
+      db.exec("ALTER TABLE graph_nodes ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'none';");
+    }
+    if (!sql.includes("'implemented'")) {
+      rebuildGraphNodesTable(db);
+    }
     return;
   }
 
   if (sql.includes("'custom'") && sql.includes("ui_width") && sql.includes("code_context") && sql.includes("custom_type_id")) {
+    if (!tableHasColumn(db, "graph_nodes", "agent_status")) {
+      db.exec("ALTER TABLE graph_nodes ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'none';");
+    }
     rebuildGraphNodesTable(db);
     return;
   }
@@ -336,19 +488,16 @@ function ensureGraphEdgesTable(db: GraphDatabase): void {
     if (!tableHasColumn(db, "graph_edges", "animated")) {
       db.exec("ALTER TABLE graph_edges ADD COLUMN animated INTEGER NOT NULL DEFAULT 0;");
     }
+    if (!tableHasColumn(db, "graph_edges", "agent_status")) {
+      db.exec("ALTER TABLE graph_edges ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'none';");
+    }
+    if (!sql.includes("'implemented'")) {
+      rebuildGraphEdgesTable(db);
+    }
     return;
   }
 
-  db.pragma("foreign_keys = OFF");
-  db.exec(`
-    ALTER TABLE graph_edges RENAME TO graph_edges_old;
-    ${GRAPH_EDGES_SQL}
-    INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, created_at)
-    SELECT id, project_id, kind, source_node_id, target_node_id, label, '', '#727782', 0, created_at
-    FROM graph_edges_old;
-    DROP TABLE graph_edges_old;
-  `);
-  db.pragma("foreign_keys = ON");
+  rebuildGraphEdgesTable(db);
 }
 
 function ensureGraphBoundariesTables(db: GraphDatabase): void {
@@ -409,6 +558,12 @@ function resetGraphStorage(db: GraphDatabase): void {
     DROP TABLE IF EXISTS basic_block_details;
     DROP TABLE IF EXISTS graph_edges;
     DROP TABLE IF EXISTS graph_revisions;
+    DROP TABLE IF EXISTS code_proposals;
+    DROP TABLE IF EXISTS graph_status_history;
+    DROP TABLE IF EXISTS agent_messages;
+    DROP TABLE IF EXISTS agent_runs;
+    DROP TABLE IF EXISTS agent_settings;
+    DROP TABLE IF EXISTS workspace_settings;
     DROP TABLE IF EXISTS graph_edges_old;
     DROP TABLE IF EXISTS graph_nodes_old;
     DROP TABLE IF EXISTS graph_nodes;
@@ -437,19 +592,53 @@ function rebuildGraphNodesTable(db: GraphDatabase): void {
       code_context, code_directory, code_start_line, code_end_line, language,
       parent_id, attached_to_id, custom_type_id,
       source_path, source_start_line, source_end_line, ui_x, ui_y,
-      ui_width, ui_height, created_at, updated_at
+      ui_width, ui_height, agent_status, created_at, updated_at
     )
     SELECT
       id, project_id, kind, name, summary,
       code_context, code_directory, code_start_line, code_end_line, language,
       parent_id, attached_to_id, custom_type_id,
       source_path, source_start_line, source_end_line, ui_x, ui_y,
-      ui_width, ui_height, created_at, updated_at
+      ui_width, ui_height, ${normalizedStatusSql("agent_status")}, created_at, updated_at
     FROM graph_nodes;
     DROP TABLE graph_nodes;
     ALTER TABLE graph_nodes_new RENAME TO graph_nodes;
   `);
   db.pragma("foreign_keys = ON");
+}
+
+function rebuildGraphEdgesTable(db: GraphDatabase): void {
+  const hasCodeContext = tableHasColumn(db, "graph_edges", "code_context");
+  const hasColor = tableHasColumn(db, "graph_edges", "color");
+  const hasAnimated = tableHasColumn(db, "graph_edges", "animated");
+  const hasAgentStatus = tableHasColumn(db, "graph_edges", "agent_status");
+  db.pragma("foreign_keys = OFF");
+  db.exec(`
+    ALTER TABLE graph_edges RENAME TO graph_edges_old;
+    ${GRAPH_EDGES_SQL}
+    INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, agent_status, created_at)
+    SELECT
+      id, project_id, kind, source_node_id, target_node_id, label,
+      ${hasCodeContext ? "code_context" : "''"},
+      ${hasColor ? "color" : "'#727782'"},
+      ${hasAnimated ? "animated" : "0"},
+      ${hasAgentStatus ? normalizedStatusSql("agent_status") : "'none'"},
+      created_at
+    FROM graph_edges_old;
+    DROP TABLE graph_edges_old;
+  `);
+  db.pragma("foreign_keys = ON");
+}
+
+function normalizedStatusSql(columnName: string): string {
+  return `CASE ${columnName}
+    WHEN 'planning' THEN 'planning'
+    WHEN 'coded' THEN 'coded'
+    WHEN 'reviewed' THEN 'reviewed'
+    WHEN 'implemented' THEN 'implemented'
+    WHEN 'bugged' THEN 'bugged'
+    ELSE 'none'
+  END`;
 }
 
 function getTableSql(db: GraphDatabase, tableName: string): string | null {

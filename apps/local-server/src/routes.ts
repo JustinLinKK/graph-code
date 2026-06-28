@@ -3,10 +3,13 @@ import { z } from "zod";
 import {
   boundaryMutationSchema,
   boundaryUpdateSchema,
+  codingAgentRequestSchema,
   createCustomBlockTypeSchema,
   customBlockTypeUpdateSchema,
   edgeMutationSchema,
   edgeUpdateSchema,
+  githubDevicePollRequestSchema,
+  githubDeviceStartRequestSchema,
   graphNodeKindSchema,
   layoutPatchSchema,
   nodeReuseMutationSchema,
@@ -14,6 +17,10 @@ import {
   nodeTypeStyleUpdateSchema,
   nodeUpdateSchema,
   openWorkspaceSchema,
+  planningChatRequestSchema,
+  reviewAgentRequestSchema,
+  scanningAgentRequestSchema,
+  workspaceSettingsMutationSchema,
   tagAssignmentSchema
 } from "@graphcode/graph-model";
 import type { WorkspaceRuntime } from "./workspace";
@@ -86,12 +93,71 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
   app.get("/api/projects/:projectId/canvas", async (request) => {
     const { projectId } = projectParamsSchema.parse(request.params);
     const query = canvasQuerySchema.parse(request.query);
-    return await runtime.repo().getCanvasGraph({
+    return await runtime.getCanvasGraph({
       projectId,
       rootNodeId: query.rootNodeId ?? null,
       depth: query.depth ?? null,
       includeAttachments: query.includeAttachments
     });
+  });
+
+  app.get("/api/projects/:projectId/settings", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return runtime.getSettings(projectId);
+  });
+
+  app.put("/api/projects/:projectId/settings", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const body = workspaceSettingsMutationSchema.parse(request.body);
+    return runtime.saveSettings(projectId, body);
+  });
+
+  app.get("/api/projects/:projectId/agent-runs", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return runtime.listAgentRuns(projectId);
+  });
+
+  app.get("/api/projects/:projectId/git-status", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const status = await runtime.readGitStatus(projectId);
+    return { status };
+  });
+
+  app.post("/api/projects/:projectId/github/device/start", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const body = githubDeviceStartRequestSchema.parse(request.body ?? {});
+    return runtime.startGithubDeviceFlow(projectId, body);
+  });
+
+  app.post("/api/projects/:projectId/github/device/poll", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    const body = githubDevicePollRequestSchema.parse(request.body ?? {});
+    return runtime.pollGithubDeviceFlow(projectId, body);
+  });
+
+  app.post("/api/projects/:projectId/github/disconnect", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return runtime.disconnectGithub(projectId);
+  });
+
+  app.post("/api/agents/planning", async (request) => {
+    const body = planningChatRequestSchema.parse(request.body);
+    return runtime.runPlanning(body);
+  });
+
+  app.post("/api/agents/coding", async (request) => {
+    const body = codingAgentRequestSchema.parse(request.body);
+    return runtime.runCoding(body);
+  });
+
+  app.post("/api/agents/review", async (request) => {
+    const body = reviewAgentRequestSchema.parse(request.body);
+    return runtime.runReview(body);
+  });
+
+  app.post("/api/agents/scanning", async (request) => {
+    const body = scanningAgentRequestSchema.parse(request.body);
+    return runtime.runScanning(body);
   });
 
   app.post("/api/projects/:projectId/layout/auto", async (request) => {

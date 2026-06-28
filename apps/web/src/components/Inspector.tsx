@@ -1,7 +1,8 @@
-import type { CustomBlockType, GraphBoundary, GraphEdge, GraphNode, GraphNodeKind, GraphTag, NodeDetail, NodeTypeStyle, TagAssignment } from "@graphcode/graph-model";
+import type { AgentStatus, CustomBlockType, GitStatusInfo, GraphBoundary, GraphEdge, GraphNode, GraphNodeKind, GraphTag, NodeDetail, NodeTypeStyle, TagAssignment } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
-import { Boxes, Code2, Database, FileInput, FileOutput, FileType, GitBranch, Link2, Package, Palette, Pencil, Route, Tags, Workflow } from "lucide-react";
+import { Boxes, Code2, Database, FileInput, FileOutput, FileType, GitBranch, Link2, Package, Palette, Pencil, Play, Route, Tags, Workflow } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { nodePalette } from "../graphStyles";
 
 type InspectorProps = {
@@ -21,6 +22,8 @@ type InspectorProps = {
   onUpdateNodeTags: (nodeId: string, input: TagAssignment) => void;
   onUpdateEdgeTags: (edgeId: string, input: TagAssignment) => void;
   onUpdateBoundaryTags: (boundaryId: string, input: TagAssignment) => void;
+  agentBusy: boolean;
+  onStartCode: (nodeId: string) => void;
 };
 
 export function Inspector({
@@ -39,7 +42,9 @@ export function Inspector({
   onUpdateEdgeStyle,
   onUpdateNodeTags,
   onUpdateEdgeTags,
-  onUpdateBoundaryTags
+  onUpdateBoundaryTags,
+  agentBusy,
+  onStartCode
 }: InspectorProps) {
   if (selectedEdge) {
     const source = canvasNodes.find((node) => node.id === selectedEdge.sourceNodeId);
@@ -67,6 +72,8 @@ export function Inspector({
             <small>{target?.name ?? selectedEdge.targetNodeId}</small>
           </div>
         </section>
+
+        <StatusSection agentStatus={selectedEdge.agentStatus} gitStatus={selectedEdge.gitStatus} />
 
         <section className="inspector-section">
           <h3>
@@ -226,6 +233,8 @@ export function Inspector({
         </div>
       </section>
 
+      <StatusSection agentStatus={node.agentStatus} gitStatus={node.gitStatus} />
+
       <TagEditor title="Tags" tags={node.tags ?? []} onSave={(input) => onUpdateNodeTags(node.id, input)} />
 
       {detail.reusedIn.length > 0 ? (
@@ -254,6 +263,12 @@ export function Inspector({
           Code Context
         </h3>
         {node.code.context ? <p className="context-box">{node.code.context}</p> : <p className="muted">No code context yet.</p>}
+        <div className="inspector-action-row">
+          <Button size="sm" variant="primary" isDisabled={agentBusy} onPress={() => onStartCode(node.id)}>
+            <Play size={15} />
+            Start code
+          </Button>
+        </div>
       </section>
 
       <section className="inspector-section">
@@ -385,6 +400,31 @@ export function Inspector({
         </div>
       </section>
     </div>
+  );
+}
+
+function StatusSection({ agentStatus, gitStatus }: { agentStatus: AgentStatus; gitStatus: GitStatusInfo | null }) {
+  return (
+    <section className="inspector-section">
+      <h3>
+        <GitBranch size={15} />
+        Status
+      </h3>
+      <div className="status-detail-grid">
+        <div>
+          <span>GraphCode</span>
+          <strong>{agentStatusLabel(agentStatus)}</strong>
+        </div>
+        <div>
+          <span>Git Worktree</span>
+          <strong>{gitStatus ? gitWorktreeLabel(gitStatus.worktree) : "Not Linked"}</strong>
+        </div>
+        <div>
+          <span>Git Change</span>
+          <strong>{gitStatus ? gitChangeLabel(gitStatus.change) : "Not Linked"}</strong>
+        </div>
+      </div>
+    </section>
   );
 }
 

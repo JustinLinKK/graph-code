@@ -5,7 +5,7 @@ import App from "./App";
 
 vi.mock("@xyflow/react", async () => ({
   applyNodeChanges: (_changes: unknown, nodes: unknown) => nodes,
-  Background: () => <div data-testid="background" />,
+  Background: ({ color, gap, size }: { color?: string; gap?: number; size?: number }) => <div data-testid="background" data-color={color} data-gap={gap} data-size={size} />,
   Controls: () => <div data-testid="controls" />,
   Handle: () => null,
   MarkerType: { ArrowClosed: "arrowclosed" },
@@ -26,6 +26,8 @@ vi.mock("@xyflow/react", async () => ({
     onMouseDown,
     onMouseMove,
     onMouseUp,
+    className,
+    colorMode,
     children
   }: {
     nodes: Array<{
@@ -58,9 +60,11 @@ vi.mock("@xyflow/react", async () => ({
     onMouseDown?: (event: { clientX: number; clientY: number; preventDefault: () => void }) => void;
     onMouseMove?: (event: { clientX: number; clientY: number; preventDefault: () => void }) => void;
     onMouseUp?: (event: { clientX: number; clientY: number; preventDefault: () => void }) => void;
+    className?: string;
+    colorMode?: string;
     children: React.ReactNode;
   }) => (
-    <div data-testid="react-flow">
+    <div data-testid="react-flow" className={className} data-color-mode={colorMode}>
       {nodes.map((node) => (
         <div key={node.id}>
           {node.data.node ? (
@@ -83,7 +87,7 @@ vi.mock("@xyflow/react", async () => ({
             </>
           ) : null}
           {node.data.boundary ? (
-            <>
+            <div data-testid={`boundary-${node.id}`} data-width={node.style?.width} data-height={node.style?.height}>
               <button type="button" onClick={() => onNodeClick?.({}, node)}>
                 {node.data.boundary.name}
               </button>
@@ -101,7 +105,7 @@ vi.mock("@xyflow/react", async () => ({
                   onNodeDragStop?.({}, draggedNode);
                 }}
               />
-            </>
+            </div>
           ) : null}
         </div>
       ))}
@@ -284,6 +288,8 @@ const moduleCanvasGraph: CanvasGraph = {
       codeContext: "Selection flows from the hierarchy tree into the render process.",
       color: "#059669",
       animated: true,
+      agentStatus: "none",
+      gitStatus: null,
       tags: [],
       createdAt: "now"
     },
@@ -297,6 +303,8 @@ const moduleCanvasGraph: CanvasGraph = {
       codeContext: "The input node describes the selection id format.",
       color: "#ca8a04",
       animated: false,
+      agentStatus: "none",
+      gitStatus: null,
       tags: [],
       createdAt: "now"
     }
@@ -349,9 +357,60 @@ const moduleDetail = detail(moduleWeb, {
   outputs: [{ node: outputWorkspace, details: moduleCanvasGraph.io[1] }]
 });
 
+const defaultSettings = {
+  general: { theme: "system" },
+  github: {
+    enabled: false,
+    repository: "",
+    clientId: "",
+    auth: {
+      connected: false,
+      username: null,
+      tokenConfigured: false,
+      scopes: [],
+      connectedAt: null,
+      lastValidatedAt: null
+    }
+  },
+  automation: { autoReviewAfterCoding: true },
+  agents: ["planning", "coding", "review", "scanning"].map((agentKind) => ({
+    agentKind,
+    provider: "fake",
+    model: "fake",
+    parallelLimit: agentKind === "scanning" ? 8 : 4,
+    apiKeySource: { type: "env", value: "" },
+    systemPromptSource: { type: "manual", value: `${agentKind} prompt` },
+    apiKeyConfigured: false,
+    systemPromptConfigured: true
+  }))
+};
+
+function settingsViewFromMutation(input: any) {
+  return {
+    ...defaultSettings,
+    general: input.general ?? defaultSettings.general,
+    github: {
+      ...defaultSettings.github,
+      ...(input.github ?? {}),
+      auth: defaultSettings.github.auth
+    },
+    automation: input.automation ?? defaultSettings.automation,
+    agents: defaultSettings.agents.map((agent) => {
+      const next = input.agents?.find((item: { agentKind: string }) => item.agentKind === agent.agentKind);
+      return {
+        ...agent,
+        ...(next ?? {}),
+        apiKeyConfigured: Boolean(next?.apiKeySource?.value) || agent.apiKeyConfigured,
+        systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
+      };
+    })
+  };
+}
+
 describe("GraphCode app shell", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    document.documentElement.dataset.theme = "system";
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -364,6 +423,75 @@ describe("GraphCode app shell", () => {
         }
         if (url.startsWith("/api/projects/graphcode-self/canvas")) {
           return json(url.includes("rootNodeId=module-web") ? moduleCanvasGraph : frameworkCanvas);
+        }
+        if (url === "/api/projects/graphcode-self/settings") {
+          if (init?.method === "PUT") {
+            const payload = JSON.parse(String(init.body ?? "{}"));
+            return json({
+              settings: settingsViewFromMutation(payload),
+              validation: { ok: true, testedAt: "now", fieldErrors: {} }
+            });
+          }
+          return json(defaultSettings);
+        }
+        if (url === "/api/projects/graphcode-self/agent-runs") {
+          return json([]);
+        }
+        if (url === "/api/projects/graphcode-self/git-status") {
+          return json({ status: "" });
+        }
+        if (url === "/api/projects/graphcode-self/github/device/start") {
+          return json({
+            deviceCode: "device-code",
+            userCode: "ABCD-EFGH",
+            verificationUri: "https://github.com/login/device",
+            expiresIn: 900,
+            interval: 5,
+            message: "Enter code"
+          });
+        }
+        if (url === "/api/projects/graphcode-self/github/device/poll") {
+          return json({
+            status: "connected",
+            message: "GitHub connected.",
+            settings: {
+              ...defaultSettings,
+              github: {
+                ...defaultSettings.github,
+                enabled: true,
+                repository: "owner/repo",
+                clientId: "client-id",
+                auth: {
+                  connected: true,
+                  username: "octocat",
+                  tokenConfigured: true,
+                  scopes: ["repo", "read:user"],
+                  connectedAt: "now",
+                  lastValidatedAt: "now"
+                }
+              }
+            }
+          });
+        }
+        if (url === "/api/projects/graphcode-self/github/disconnect") {
+          return json(defaultSettings);
+        }
+        if (url === "/api/agents/planning" || url === "/api/agents/coding" || url === "/api/agents/review" || url === "/api/agents/scanning") {
+          const payload = JSON.parse(String(init?.body ?? "{}"));
+          return json({
+            id: "run-test",
+            projectId: payload.projectId ?? project.id,
+            agentKind: url.split("/").at(-1)?.replace("review", "review") ?? "planning",
+            status: "succeeded",
+            targetNodeId: payload.nodeId ?? payload.scopeNodeId ?? null,
+            prompt: payload.prompt ?? "",
+            response: "Agent completed",
+            diff: "diff --git",
+            graphPatch: null,
+            error: null,
+            createdAt: "now",
+            updatedAt: "now"
+          });
         }
         if (url === "/api/projects/graphcode-self/layout/auto") {
           return json({ ...moduleCanvasGraph, nodes: moduleCanvasGraph.nodes.map((item) => ({ ...item, position: { x: item.position.x + 10, y: item.position.y + 10 } })) });
@@ -378,6 +506,8 @@ describe("GraphCode app shell", () => {
             projectId: project.id,
             color: payload.color ?? "#059669",
             animated: payload.animated ?? false,
+            agentStatus: "none",
+            gitStatus: null,
             tags: [],
             createdAt: "now",
             ...payload
@@ -589,6 +719,14 @@ describe("GraphCode app shell", () => {
         })
       );
     });
+  });
+
+  it("expands rendered boundary boxes around labels and member blocks", async () => {
+    render(<App />);
+
+    const boundaryBox = await screen.findByTestId("boundary-boundary-frontend");
+
+    expect(Number(boundaryBox.dataset.height)).toBeGreaterThan(frontendBoundary.size.height);
   });
 
   it("runs explicit auto-layout for the active scope", async () => {
@@ -806,6 +944,89 @@ describe("GraphCode app shell", () => {
     });
   });
 
+  it("switches to planning chat and sends a planning prompt", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Planning/i }));
+    fireEvent.change(screen.getByPlaceholderText("Ask the planning agent to modify the graph"), {
+      target: { value: "Add cache node" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/agents/planning",
+        expect.objectContaining({
+          method: "POST"
+        })
+      );
+    });
+  });
+
+  it("starts a coding agent run from the node detail panel", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /Start code/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/agents/coding",
+        expect.objectContaining({
+          method: "POST"
+        })
+      );
+    });
+  });
+
+  it("opens settings and saves validated agent settings", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByLabelText("Settings"));
+    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Agents/i }));
+    expect(screen.getByRole("heading", { name: "Planning" })).toBeInTheDocument();
+    expect(screen.getAllByText("Environment Variable Name")[0]).toBeInTheDocument();
+
+    fireEvent.change(screen.getAllByLabelText("API Key Source")[0], { target: { value: "file" } });
+    const keyFile = new File(["OPENAI_API_KEY=abc123"], "key.env", { type: "text/plain" });
+    fireEvent.change(screen.getAllByLabelText("Select Key File")[0], { target: { files: [keyFile] } });
+    expect(await screen.findByText("API key read successfully")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /GitHub/i }));
+    expect(screen.getByText("Not Connected")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
+    expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /I Authorized/i }));
+    expect(await screen.findByText(/GitHub connected/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/projects/graphcode-self/settings",
+        expect.objectContaining({
+          method: "PUT"
+        })
+      );
+    });
+  });
+
+  it("updates the canvas background when Night theme is saved", async () => {
+    render(<App />);
+
+    expect(await screen.findByTestId("background")).toHaveAttribute("data-color", "#d4d7dd");
+
+    fireEvent.click(await screen.findByLabelText("Settings"));
+    fireEvent.change(await screen.findByLabelText("Display Theme"), { target: { value: "dark" } });
+    fireEvent.click(screen.getByRole("button", { name: /^Save$/i }));
+
+    await waitFor(() => {
+      expect(document.documentElement.dataset.theme).toBe("dark");
+      expect(screen.getByTestId("background")).toHaveAttribute("data-color", "#334155");
+      expect(screen.getByTestId("react-flow")).toHaveAttribute("data-color-mode", "dark");
+    });
+  });
+
   it("uses ctrl+z to undo the last created edge", async () => {
     render(<App />);
 
@@ -873,6 +1094,8 @@ function node(input: TestNodeInput): GraphNode {
     customTypeId: input.customTypeId ?? null,
     childCount: input.childCount ?? 0,
     hasChildren: input.hasChildren ?? (input.childCount ?? 0) > 0,
+    agentStatus: input.agentStatus ?? "none",
+    gitStatus: input.gitStatus ?? null,
     tags: input.tags ?? [],
     createdAt: input.createdAt ?? "now",
     updatedAt: input.updatedAt ?? "now"

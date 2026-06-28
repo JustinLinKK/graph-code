@@ -1,4 +1,5 @@
 import type {
+  AgentRun,
   BoundaryMutation,
   BoundaryUpdate,
   CanvasGraph,
@@ -16,6 +17,9 @@ import type {
   NodeMutation,
   NodeUpdate,
   Project,
+  WorkspaceSettings,
+  WorkspaceSettingsMutation,
+  SettingsValidationResult,
   TagAssignment
 } from "@graphcode/graph-model";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -29,10 +33,21 @@ import {
   deleteEdge,
   getCanvasGraph,
   getHierarchy,
+  getGitStatus,
   getNodeDetail,
+  getWorkspaceSettings,
+  listAgentRuns,
   listProjects,
   openWorkspace,
+  disconnectGithub,
+  pollGithubDeviceFlow,
+  runCodingAgent,
+  runPlanningAgent,
+  runReviewAgent,
+  runScanningAgent,
+  saveWorkspaceSettings,
   seedSelfWorkspace,
+  startGithubDeviceFlow,
   updateCustomBlockType,
   updateBoundary,
   updateBoundaryTags,
@@ -49,6 +64,7 @@ import { BoundaryEditorDialog, type BoundaryDraft } from "./components/BoundaryE
 import { EdgeEditorDialog } from "./components/EdgeEditorDialog";
 import type { MemberLayout } from "./components/WorkspaceCanvas";
 import { WorkspaceDialog } from "./components/WorkspaceDialog";
+import { SettingsPage } from "./components/SettingsPage";
 import { nodePalette } from "./graphStyles";
 
 export default function App() {
@@ -81,6 +97,12 @@ export default function App() {
   const [drawBoundaryMode, setDrawBoundaryMode] = useState(false);
   const [drawEdgeMode, setDrawEdgeMode] = useState(false);
   const [edgeDraft, setEdgeDraft] = useState<{ sourceNodeId: string; targetNodeId: string } | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settings, setSettings] = useState<WorkspaceSettings | null>(null);
+  const [settingsValidation, setSettingsValidation] = useState<SettingsValidationResult | null>(null);
+  const [agentRuns, setAgentRuns] = useState<AgentRun[]>([]);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [gitStatus, setGitStatus] = useState("");
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const undoStackRef = useRef<UndoEntry[]>([]);
   const undoingRef = useRef(false);
@@ -127,6 +149,14 @@ export default function App() {
       } else {
         setSelectedDetail(null);
       }
+      const [nextSettings, nextRuns, nextGitStatus] = await Promise.all([
+        getWorkspaceSettings(projectId),
+        listAgentRuns(projectId),
+        getGitStatus(projectId).catch(() => ({ status: "" }))
+      ]);
+      setSettings(nextSettings);
+      setAgentRuns(nextRuns);
+      setGitStatus(nextGitStatus.status);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to load project.");
     } finally {
@@ -153,6 +183,9 @@ export default function App() {
         setSelectedEdgeId(null);
         setSelectedBoundaryId(null);
         setSelectedDetail(null);
+        setSettings(null);
+        setAgentRuns([]);
+        setGitStatus("");
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to connect to the local server.");
@@ -1075,6 +1108,155 @@ export default function App() {
     }
   }, [bootstrap, canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]);
 
+  const refreshAgentState = useCallback(async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    const [nextRuns, nextGitStatus] = await Promise.all([listAgentRuns(selectedProjectId), getGitStatus(selectedProjectId).catch(() => ({ status: "" }))]);
+    setAgentRuns(nextRuns);
+    setGitStatus(nextGitStatus.status);
+  }, [selectedProjectId]);
+
+  const handleSaveSettings = useCallback(
+    async (input: WorkspaceSettingsMutation) => {
+      if (!selectedProjectId) {
+        return;
+      }
+      setAgentBusy(true);
+      try {
+        const result = await saveWorkspaceSettings(selectedProjectId, input);
+        setSettings(result.settings);
+        setSettingsValidation(result.validation);
+      } catch (settingsError) {
+        setError(settingsError instanceof Error ? settingsError.message : "Failed to save settings.");
+      } finally {
+        setAgentBusy(false);
+      }
+    },
+    [selectedProjectId]
+  );
+
+  const handleStartGithubDeviceFlow = useCallback(
+    async (input: { clientId?: string; repository?: string }) => {
+      if (!selectedProjectId) {
+        throw new Error("No project selected.");
+      }
+      return startGithubDeviceFlow(selectedProjectId, input);
+    },
+    [selectedProjectId]
+  );
+
+  const handlePollGithubDeviceFlow = useCallback(
+    async (input: { deviceCode: string; clientId?: string; repository?: string }) => {
+      if (!selectedProjectId) {
+        throw new Error("No project selected.");
+      }
+      const result = await pollGithubDeviceFlow(selectedProjectId, input);
+      if (result.settings) {
+        setSettings(result.settings);
+      }
+      return result;
+    },
+    [selectedProjectId]
+  );
+
+  const handleDisconnectGithub = useCallback(async () => {
+    if (!selectedProjectId) {
+      throw new Error("No project selected.");
+    }
+    const nextSettings = await disconnectGithub(selectedProjectId);
+    setSettings(nextSettings);
+    await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId);
+    return nextSettings;
+  }, [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]);
+
+  const handleRunPlanning = useCallback(
+    async (prompt: string) => {
+      if (!selectedProjectId) {
+        return;
+      }
+      setAgentBusy(true);
+      setError(null);
+      try {
+        await runPlanningAgent({
+          projectId: selectedProjectId,
+          prompt,
+          scopeNodeId: selectedDetail?.node.id ?? canvas?.scopeNodeId ?? null
+        });
+        await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedDetail?.node.id ?? selectedNodeId);
+      } catch (agentError) {
+        setError(agentError instanceof Error ? agentError.message : "Planning agent failed.");
+      } finally {
+        setAgentBusy(false);
+      }
+    },
+    [canvas?.scopeNodeId, loadProject, selectedDetail?.node.id, selectedNodeId, selectedProjectId]
+  );
+
+  const handleStartCode = useCallback(
+    async (nodeId: string) => {
+      if (!selectedProjectId) {
+        return;
+      }
+      setAgentBusy(true);
+      setError(null);
+      try {
+        await runCodingAgent({
+          projectId: selectedProjectId,
+          nodeId,
+          prompt: selectedDetail?.node.code.context
+        });
+        await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, nodeId);
+      } catch (agentError) {
+        setError(agentError instanceof Error ? agentError.message : "Coding agent failed.");
+      } finally {
+        setAgentBusy(false);
+      }
+    },
+    [canvas?.scopeNodeId, loadProject, selectedDetail?.node.code.context, selectedProjectId]
+  );
+
+  const handleRunReview = useCallback(
+    async (runId: string) => {
+      if (!selectedProjectId) {
+        return;
+      }
+      setAgentBusy(true);
+      try {
+        await runReviewAgent({ projectId: selectedProjectId, runId });
+        await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId);
+      } catch (agentError) {
+        setError(agentError instanceof Error ? agentError.message : "Review agent failed.");
+      } finally {
+        setAgentBusy(false);
+      }
+    },
+    [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]
+  );
+
+  const handleRunScanning = useCallback(async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    setAgentBusy(true);
+    try {
+      await runScanningAgent({ projectId: selectedProjectId });
+      await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId);
+    } catch (agentError) {
+      setError(agentError instanceof Error ? agentError.message : "Scanning agent failed.");
+    } finally {
+      setAgentBusy(false);
+    }
+  }, [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]);
+
+  useEffect(() => {
+    void refreshAgentState();
+  }, [refreshAgentState]);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = settings?.general.theme ?? "system";
+  }, [settings?.general.theme]);
+
   return (
     <>
       <AppShell
@@ -1082,6 +1264,7 @@ export default function App() {
         selectedProject={selectedProject}
         hierarchy={hierarchy}
         canvas={canvas}
+        theme={settings?.general.theme ?? "system"}
         selectedDetail={selectedDetail}
         selectedNodeId={selectedNodeId}
         selectedEdgeId={selectedEdgeId}
@@ -1093,6 +1276,9 @@ export default function App() {
         canUndo={undoStack.length > 0}
         loading={loading}
         error={error}
+        agentRuns={agentRuns}
+        agentBusy={agentBusy}
+        gitStatus={gitStatus}
         onSelectNode={handleInspectNode}
         onOpenNode={handleOpenNode}
         onHierarchyBoundarySelect={handleHierarchyBoundarySelect}
@@ -1126,7 +1312,25 @@ export default function App() {
         onResetSelfWorkspace={handleResetSelfWorkspace}
         onRefresh={handleRefresh}
         onUndo={() => void handleUndo()}
+        onOpenSettings={() => setSettingsOpen(true)}
+        onRunPlanning={handleRunPlanning}
+        onStartCode={handleStartCode}
+        onRunReview={handleRunReview}
+        onRunScanning={handleRunScanning}
       />
+      {settingsOpen && selectedProject && settings ? (
+        <SettingsPage
+          project={selectedProject}
+          settings={settings}
+          validation={settingsValidation}
+          saving={agentBusy}
+          onClose={() => setSettingsOpen(false)}
+          onSave={(input) => void handleSaveSettings(input)}
+          onStartGithubDeviceFlow={handleStartGithubDeviceFlow}
+          onPollGithubDeviceFlow={handlePollGithubDeviceFlow}
+          onDisconnectGithub={handleDisconnectGithub}
+        />
+      ) : null}
       <WorkspaceDialog
         open={workspaceDialogOpen}
         loading={loading}

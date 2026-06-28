@@ -23,6 +23,7 @@ import {
   Terminal,
   Workflow
 } from "lucide-react";
+import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { nodePalette } from "../graphStyles";
 
 export type GraphNodeCardData = {
@@ -61,6 +62,13 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
       </div>
       <div className="node-card-name">{node.name}</div>
       <p>{node.summary}</p>
+      {node.agentStatus !== "none" || node.gitStatus ? (
+        <div className="node-status-row">
+          {node.agentStatus !== "none" ? <span className={`status-chip ${node.agentStatus}`}>{agentStatusLabel(node.agentStatus)}</span> : null}
+          {node.gitStatus ? <span className={`git-chip worktree-${node.gitStatus.worktree}`}>{gitWorktreeLabel(node.gitStatus.worktree)}</span> : null}
+          {node.gitStatus?.change ? <span className={`git-chip change-${node.gitStatus.change}`}>{gitChangeLabel(node.gitStatus.change)}</span> : null}
+        </div>
+      ) : null}
       {cardData.reuse || tags.length > 0 ? (
         <div className="node-card-tags">
           {cardData.reuse ? <span className="reuse-chip">{cardData.reuse.label || "Reused"}</span> : null}

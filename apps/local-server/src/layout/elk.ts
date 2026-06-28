@@ -103,10 +103,12 @@ export async function layoutCanvasWithBoundaryGroups(nodes: GraphNode[], edges: 
     const internalLayout = groupedNodeLayouts.get(boundaryId)?.get(node.id);
     const internalBounds = layoutBounds(groupedNodeLayouts.get(boundaryId) ?? new Map());
     if (boundaryOuterLayout && internalLayout) {
+      const boundary = boundaries.find((item) => item.id === boundaryId);
+      const topPadding = boundary ? boundaryTopPadding(boundary, boundaryOuterLayout.size.width) : BOUNDARY_MIN_TOP_PADDING;
       nodeLayouts.set(node.id, {
         position: {
           x: boundaryOuterLayout.position.x + BOUNDARY_PADDING_X + internalLayout.position.x - internalBounds.minX,
-          y: boundaryOuterLayout.position.y + BOUNDARY_PADDING_Y + internalLayout.position.y - internalBounds.minY
+          y: boundaryOuterLayout.position.y + topPadding + internalLayout.position.y - internalBounds.minY
         },
         size: internalLayout.size
       });
@@ -152,20 +154,23 @@ function measureNodeForLayout(node: GraphNode): { width: number; height: number 
   const longestWord = Math.max(0, ...`${node.name} ${node.summary}`.split(/\s+/).map((part) => part.length));
   const summaryLength = node.summary.trim().length;
   const nameLength = node.name.trim().length;
-  const widthFromWord = Math.min(380, Math.max(baseWidth, 150 + longestWord * 7));
+  const widthFromWord = Math.min(420, Math.max(baseWidth, 150 + longestWord * 7));
   const widthFromSummary = summaryLength > 58 ? Math.max(widthFromWord, 292) : widthFromWord;
-  const maxMeasuredWidth = node.kind === "format" ? 260 : 380;
+  const maxMeasuredWidth = node.kind === "format" ? 280 : 420;
   const width = Math.max(baseWidth, Math.min(maxMeasuredWidth, widthFromSummary));
-  const nameLines = Math.max(1, Math.ceil(nameLength / Math.max(14, Math.floor((width - 48) / 8.5))));
-  const summaryLines = summaryLength === 0 ? 1 : Math.ceil(summaryLength / Math.max(18, Math.floor((width - 34) / 6.8)));
-  const contentHeight = 66 + nameLines * 19 + summaryLines * 18;
-  const minHeight = node.kind === "format" ? 82 : node.kind === "ui_component" ? 124 : 116;
+  const nameLines = Math.min(2, Math.max(1, Math.ceil(nameLength / Math.max(14, Math.floor((width - 48) / 8.5)))));
+  const summaryLines = summaryLength === 0 ? 1 : Math.min(3, Math.ceil(summaryLength / Math.max(18, Math.floor((width - 34) / 6.8))));
+  const statusRows = node.agentStatus !== "none" || node.gitStatus ? 1 : 0;
+  const tagRows = node.tags.length > 0 ? 1 : 0;
+  const contentHeight = 66 + nameLines * 19 + summaryLines * 18 + statusRows * 27 + tagRows * 24;
+  const minHeight = node.kind === "format" ? 96 : node.kind === "ui_component" ? 136 : 128;
   const height = Math.max(baseHeight, Math.min(260, Math.max(minHeight, contentHeight)));
   return { width: Math.round(width), height: Math.round(height) };
 }
 
 const BOUNDARY_PADDING_X = 48;
-const BOUNDARY_PADDING_Y = 56;
+const BOUNDARY_PADDING_BOTTOM = 44;
+const BOUNDARY_MIN_TOP_PADDING = 88;
 
 function primaryBoundaryMembership(boundaries: GraphBoundary[], visibleIds: Set<string>): Map<string, string> {
   const result = new Map<string, string>();
@@ -182,6 +187,8 @@ function primaryBoundaryMembership(boundaries: GraphBoundary[], visibleIds: Set<
 
 function boundaryAsLayoutNode(boundary: GraphBoundary, memberLayouts: LayoutResult): GraphNode {
   const bounds = layoutBounds(memberLayouts);
+  const width = Math.max(boundary.size.width, bounds.width + BOUNDARY_PADDING_X * 2, measureBoundaryHeaderWidth(boundary));
+  const topPadding = boundaryTopPadding(boundary, width);
   return {
     id: boundary.id,
     projectId: boundary.projectId,
@@ -205,15 +212,31 @@ function boundaryAsLayoutNode(boundary: GraphBoundary, memberLayouts: LayoutResu
     },
     position: boundary.position,
     size: {
-      width: Math.max(boundary.size.width, bounds.width + BOUNDARY_PADDING_X * 2),
-      height: Math.max(boundary.size.height, bounds.height + BOUNDARY_PADDING_Y * 2)
+      width,
+      height: Math.max(boundary.size.height, bounds.height + topPadding + BOUNDARY_PADDING_BOTTOM)
     },
     childCount: 0,
     hasChildren: false,
+    agentStatus: "none",
+    gitStatus: null,
     tags: [],
     createdAt: boundary.createdAt,
     updatedAt: boundary.updatedAt
   };
+}
+
+function measureBoundaryHeaderWidth(boundary: GraphBoundary): number {
+  const longestWord = Math.max(0, ...`${boundary.name} ${boundary.summary}`.split(/\s+/).map((part) => part.length));
+  const summaryLength = boundary.summary.trim().length;
+  return Math.min(640, Math.max(180, 28 + longestWord * 7.5, summaryLength > 72 ? 360 : 0));
+}
+
+function boundaryTopPadding(boundary: GraphBoundary, width: number): number {
+  const contentWidth = Math.max(120, width - 24);
+  const summaryLength = boundary.summary.trim().length;
+  const summaryLines = summaryLength === 0 ? 0 : Math.min(2, Math.ceil(summaryLength / Math.max(18, Math.floor(contentWidth / 6.8))));
+  const headerHeight = 18 + (summaryLines > 0 ? 5 + summaryLines * 17 : 0);
+  return Math.max(BOUNDARY_MIN_TOP_PADDING, headerHeight + 28);
 }
 
 function layoutBounds(layouts: LayoutResult): { minX: number; minY: number; width: number; height: number } {

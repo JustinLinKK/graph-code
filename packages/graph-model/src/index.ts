@@ -60,6 +60,16 @@ export const LANGUAGE_TYPES = [
   "css",
   "other"
 ] as const;
+export const AGENT_STATUSES = ["none", "planning", "coded", "reviewed", "implemented", "bugged"] as const;
+export const GIT_WORKTREE_STATUSES = ["untracked", "pending", "staged", "committed"] as const;
+export const GIT_CHANGE_STATUSES = ["new", "modified", "deleted"] as const;
+export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const;
+export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed"] as const;
+export const AGENT_PROVIDERS = ["fake", "claudecode", "openai", "gemini", "openrouter"] as const;
+export const SETTINGS_THEME_MODES = ["light", "dark", "system"] as const;
+export const SECRET_SOURCE_TYPES = ["manual", "file", "env"] as const;
+export const PROMPT_SOURCE_TYPES = ["manual", "file"] as const;
+export const GRAPH_PATCH_ENTITY_TYPES = ["node", "edge", "boundary"] as const;
 
 export const graphNodeKindSchema = z.enum(GRAPH_NODE_KINDS);
 export const domainNodeKindSchema = z.enum(DOMAIN_NODE_KINDS);
@@ -72,6 +82,16 @@ export const processKindSchema = z.enum(PROCESS_KINDS);
 export const formatKindSchema = z.enum(FORMAT_KINDS);
 export const basicDetailNodeKindSchema = z.enum(BASIC_DETAIL_NODE_KINDS);
 export const languageTypeSchema = z.enum(LANGUAGE_TYPES);
+export const agentStatusSchema = z.enum(AGENT_STATUSES);
+export const gitWorktreeStatusSchema = z.enum(GIT_WORKTREE_STATUSES);
+export const gitChangeStatusSchema = z.enum(GIT_CHANGE_STATUSES);
+export const agentKindSchema = z.enum(AGENT_KINDS);
+export const agentRunStatusSchema = z.enum(AGENT_RUN_STATUSES);
+export const agentProviderSchema = z.enum(AGENT_PROVIDERS);
+export const settingsThemeModeSchema = z.enum(SETTINGS_THEME_MODES);
+export const secretSourceTypeSchema = z.enum(SECRET_SOURCE_TYPES);
+export const promptSourceTypeSchema = z.enum(PROMPT_SOURCE_TYPES);
+export const graphPatchEntityTypeSchema = z.enum(GRAPH_PATCH_ENTITY_TYPES);
 
 export type GraphNodeKind = z.infer<typeof graphNodeKindSchema>;
 export type DomainNodeKind = z.infer<typeof domainNodeKindSchema>;
@@ -84,6 +104,16 @@ export type ProcessKind = z.infer<typeof processKindSchema>;
 export type FormatKind = z.infer<typeof formatKindSchema>;
 export type BasicDetailNodeKind = z.infer<typeof basicDetailNodeKindSchema>;
 export type LanguageType = z.infer<typeof languageTypeSchema>;
+export type AgentStatus = z.infer<typeof agentStatusSchema>;
+export type GitWorktreeStatus = z.infer<typeof gitWorktreeStatusSchema>;
+export type GitChangeStatus = z.infer<typeof gitChangeStatusSchema>;
+export type AgentKind = z.infer<typeof agentKindSchema>;
+export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
+export type AgentProvider = z.infer<typeof agentProviderSchema>;
+export type SettingsThemeMode = z.infer<typeof settingsThemeModeSchema>;
+export type SecretSourceType = z.infer<typeof secretSourceTypeSchema>;
+export type PromptSourceType = z.infer<typeof promptSourceTypeSchema>;
+export type GraphPatchEntityType = z.infer<typeof graphPatchEntityTypeSchema>;
 
 export const positionSchema = z.object({
   x: z.number(),
@@ -155,6 +185,11 @@ export const projectSchema = z.object({
   updatedAt: z.string()
 });
 
+export const gitStatusInfoSchema = z.object({
+  worktree: gitWorktreeStatusSchema,
+  change: gitChangeStatusSchema.nullable()
+});
+
 export const graphNodeSchema = z.object({
   id: z.string(),
   projectId: z.string(),
@@ -170,6 +205,8 @@ export const graphNodeSchema = z.object({
   size: sizeSchema,
   childCount: z.number().int().nonnegative(),
   hasChildren: z.boolean(),
+  agentStatus: agentStatusSchema.default("none"),
+  gitStatus: gitStatusInfoSchema.nullable().default(null),
   tags: z.array(graphTagSchema).default([]),
   createdAt: z.string(),
   updatedAt: z.string()
@@ -185,6 +222,8 @@ export const graphEdgeSchema = z.object({
   codeContext: z.string(),
   color: styleColorSchema,
   animated: z.boolean(),
+  agentStatus: agentStatusSchema.default("none"),
+  gitStatus: gitStatusInfoSchema.nullable().default(null),
   tags: z.array(graphTagSchema).default([]),
   createdAt: z.string()
 });
@@ -340,6 +379,179 @@ export const edgeUpdateSchema = edgeMutationSchema.partial().extend({
   kind: graphEdgeKindSchema.optional()
 });
 
+export const graphStatusPatchSchema = z.object({
+  entityType: graphPatchEntityTypeSchema,
+  entityId: z.string().min(1),
+  status: agentStatusSchema,
+  note: z.string().optional(),
+  agentRunId: z.string().nullable().optional()
+});
+
+export const secretSourceSchema = z.object({
+  type: secretSourceTypeSchema,
+  value: z.string().optional()
+});
+
+export const promptSourceSchema = z.object({
+  type: promptSourceTypeSchema,
+  value: z.string().optional()
+});
+
+export const agentConfigSchema = z.object({
+  agentKind: agentKindSchema,
+  provider: agentProviderSchema,
+  model: z.string(),
+  parallelLimit: z.number().int().min(1).max(64),
+  apiKeySource: secretSourceSchema,
+  systemPromptSource: promptSourceSchema
+});
+
+export const agentConfigViewSchema = agentConfigSchema.extend({
+  apiKeyConfigured: z.boolean(),
+  systemPromptConfigured: z.boolean()
+});
+
+export const generalSettingsSchema = z.object({
+  theme: settingsThemeModeSchema
+});
+
+export const githubAuthStateSchema = z.object({
+  connected: z.boolean(),
+  username: z.string().nullable(),
+  tokenConfigured: z.boolean(),
+  scopes: z.array(z.string()).default([]),
+  connectedAt: z.string().nullable(),
+  lastValidatedAt: z.string().nullable()
+});
+
+export const githubIntegrationSettingsMutationSchema = z.object({
+  enabled: z.boolean(),
+  repository: z.string(),
+  clientId: z.string()
+});
+
+export const githubIntegrationSettingsSchema = githubIntegrationSettingsMutationSchema.extend({
+  auth: githubAuthStateSchema
+});
+
+export const agentAutomationSettingsSchema = z.object({
+  autoReviewAfterCoding: z.boolean()
+});
+
+export const workspaceSettingsSchema = z.object({
+  general: generalSettingsSchema,
+  github: githubIntegrationSettingsSchema,
+  automation: agentAutomationSettingsSchema,
+  agents: z.array(agentConfigViewSchema)
+});
+
+export const workspaceSettingsMutationSchema = z.object({
+  general: generalSettingsSchema,
+  github: githubIntegrationSettingsMutationSchema,
+  automation: agentAutomationSettingsSchema,
+  agents: z.array(agentConfigSchema)
+});
+
+export const githubDeviceStartRequestSchema = z.object({
+  clientId: z.string().optional(),
+  repository: z.string().optional()
+});
+
+export const githubDeviceStartResponseSchema = z.object({
+  deviceCode: z.string(),
+  userCode: z.string(),
+  verificationUri: z.string(),
+  expiresIn: z.number().int().positive(),
+  interval: z.number().int().positive(),
+  message: z.string()
+});
+
+export const githubDevicePollRequestSchema = z.object({
+  deviceCode: z.string().min(1),
+  clientId: z.string().optional(),
+  repository: z.string().optional()
+});
+
+export const githubDevicePollResponseSchema = z.object({
+  status: z.enum(["pending", "connected", "expired", "failed"]),
+  message: z.string(),
+  settings: workspaceSettingsSchema.optional()
+});
+
+export const settingsValidationResultSchema = z.object({
+  ok: z.boolean(),
+  testedAt: z.string(),
+  fieldErrors: z.record(z.string())
+});
+
+export const planningChatRequestSchema = z.object({
+  projectId: z.string().min(1),
+  prompt: z.string().min(1),
+  scopeNodeId: z.string().nullable().optional()
+});
+
+export const codingAgentRequestSchema = z.object({
+  projectId: z.string().min(1),
+  nodeId: z.string().min(1),
+  prompt: z.string().optional()
+});
+
+export const reviewAgentRequestSchema = z.object({
+  projectId: z.string().min(1),
+  runId: z.string().min(1)
+});
+
+export const scanningAgentRequestSchema = z.object({
+  projectId: z.string().min(1),
+  rootPath: z.string().optional()
+});
+
+export const graphPatchOperationSchema = z.object({
+  entityType: graphPatchEntityTypeSchema,
+  entityId: z.string().min(1),
+  action: z.enum(["create", "update"]),
+  fields: z.record(z.unknown()).default({})
+});
+
+export const graphPatchSchema = z.object({
+  summary: z.string(),
+  operations: z.array(graphPatchOperationSchema).default([])
+});
+
+export const agentRunSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  agentKind: agentKindSchema,
+  status: agentRunStatusSchema,
+  targetNodeId: z.string().nullable(),
+  prompt: z.string(),
+  response: z.string(),
+  diff: z.string(),
+  graphPatch: graphPatchSchema.nullable(),
+  error: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+
+export const agentMessageSchema = z.object({
+  id: z.string(),
+  runId: z.string(),
+  role: z.enum(["user", "assistant", "tool", "system"]),
+  content: z.string(),
+  createdAt: z.string()
+});
+
+export const graphStatusHistorySchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  entityType: graphPatchEntityTypeSchema,
+  entityId: z.string(),
+  status: agentStatusSchema,
+  note: z.string(),
+  agentRunId: z.string().nullable(),
+  createdAt: z.string()
+});
+
 export const boundaryMutationSchema = z.object({
   scopeNodeId: z.string().min(1),
   name: z.string().min(1),
@@ -373,6 +585,7 @@ export type OpenWorkspaceResult =
     };
 
 export type Project = z.infer<typeof projectSchema>;
+export type GitStatusInfo = z.infer<typeof gitStatusInfoSchema>;
 export type GraphNode = z.infer<typeof graphNodeSchema>;
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
 export type GraphBoundary = z.infer<typeof graphBoundarySchema>;
@@ -400,6 +613,32 @@ export type EdgeMutation = z.infer<typeof edgeMutationSchema>;
 export type EdgeUpdate = z.infer<typeof edgeUpdateSchema>;
 export type BoundaryMutation = z.infer<typeof boundaryMutationSchema>;
 export type BoundaryUpdate = z.infer<typeof boundaryUpdateSchema>;
+export type GraphStatusPatch = z.infer<typeof graphStatusPatchSchema>;
+export type SecretSource = z.infer<typeof secretSourceSchema>;
+export type PromptSource = z.infer<typeof promptSourceSchema>;
+export type AgentConfig = z.infer<typeof agentConfigSchema>;
+export type AgentConfigView = z.infer<typeof agentConfigViewSchema>;
+export type GeneralSettings = z.infer<typeof generalSettingsSchema>;
+export type GithubAuthState = z.infer<typeof githubAuthStateSchema>;
+export type GithubIntegrationSettingsMutation = z.infer<typeof githubIntegrationSettingsMutationSchema>;
+export type GithubIntegrationSettings = z.infer<typeof githubIntegrationSettingsSchema>;
+export type AgentAutomationSettings = z.infer<typeof agentAutomationSettingsSchema>;
+export type WorkspaceSettings = z.infer<typeof workspaceSettingsSchema>;
+export type WorkspaceSettingsMutation = z.infer<typeof workspaceSettingsMutationSchema>;
+export type SettingsValidationResult = z.infer<typeof settingsValidationResultSchema>;
+export type PlanningChatRequest = z.infer<typeof planningChatRequestSchema>;
+export type CodingAgentRequest = z.infer<typeof codingAgentRequestSchema>;
+export type ReviewAgentRequest = z.infer<typeof reviewAgentRequestSchema>;
+export type ScanningAgentRequest = z.infer<typeof scanningAgentRequestSchema>;
+export type GraphPatchOperation = z.infer<typeof graphPatchOperationSchema>;
+export type GraphPatch = z.infer<typeof graphPatchSchema>;
+export type AgentRun = z.infer<typeof agentRunSchema>;
+export type AgentMessage = z.infer<typeof agentMessageSchema>;
+export type GraphStatusHistory = z.infer<typeof graphStatusHistorySchema>;
+export type GithubDeviceStartRequest = z.infer<typeof githubDeviceStartRequestSchema>;
+export type GithubDeviceStartResponse = z.infer<typeof githubDeviceStartResponseSchema>;
+export type GithubDevicePollRequest = z.infer<typeof githubDevicePollRequestSchema>;
+export type GithubDevicePollResponse = z.infer<typeof githubDevicePollResponseSchema>;
 
 export type HierarchyNode = GraphNode & {
   children: HierarchyNode[];

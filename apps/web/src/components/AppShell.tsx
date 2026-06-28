@@ -1,8 +1,26 @@
-import type { CanvasGraph, GraphBoundary, GraphEdge, GraphNodeKind, HierarchyNode, NodeDetail, Project, TagAssignment } from "@graphcode/graph-model";
+import type { AgentRun, CanvasGraph, GraphBoundary, GraphEdge, GraphNodeKind, HierarchyNode, NodeDetail, Project, TagAssignment, WorkspaceSettings } from "@graphcode/graph-model";
 import { Button, Spinner } from "@heroui/react";
-import { Boxes, ChevronDown, FolderOpen, FolderTree, GitBranch, Maximize2, Plus, RefreshCw, RotateCcw, Search, Sparkles, Square, Undo2 } from "lucide-react";
+import {
+  Boxes,
+  ChevronDown,
+  Code2,
+  FolderOpen,
+  FolderTree,
+  GitBranch,
+  Maximize2,
+  MessageSquare,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings,
+  Sparkles,
+  Square,
+  Undo2
+} from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
+import { agentKindLabel } from "../displayLabels";
 import { HierarchyTree } from "./HierarchyTree";
 import { Inspector } from "./Inspector";
 import { WorkspaceCanvas, type MemberLayout } from "./WorkspaceCanvas";
@@ -12,6 +30,7 @@ type AppShellProps = {
   selectedProject: Project | null;
   hierarchy: HierarchyNode[];
   canvas: CanvasGraph | null;
+  theme: WorkspaceSettings["general"]["theme"];
   selectedDetail: NodeDetail | null;
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
@@ -23,6 +42,9 @@ type AppShellProps = {
   canUndo: boolean;
   loading: boolean;
   error: string | null;
+  agentRuns: AgentRun[];
+  agentBusy: boolean;
+  gitStatus: string;
   onSelectNode: (nodeId: string) => void;
   onOpenNode: (nodeId: string) => void;
   onHierarchyBoundarySelect: (scopeNodeId: string, boundaryId: string) => void;
@@ -58,6 +80,11 @@ type AppShellProps = {
   onResetSelfWorkspace: () => void;
   onRefresh: () => void;
   onUndo: () => void;
+  onOpenSettings: () => void;
+  onRunPlanning: (prompt: string) => void;
+  onStartCode: (nodeId: string) => void;
+  onRunReview: (runId: string) => void;
+  onRunScanning: () => void;
 };
 
 export function AppShell({
@@ -65,6 +92,7 @@ export function AppShell({
   selectedProject,
   hierarchy,
   canvas,
+  theme,
   selectedDetail,
   selectedNodeId,
   selectedEdgeId,
@@ -76,6 +104,9 @@ export function AppShell({
   canUndo,
   loading,
   error,
+  agentRuns,
+  agentBusy,
+  gitStatus,
   onSelectNode,
   onOpenNode,
   onHierarchyBoundarySelect,
@@ -105,13 +136,22 @@ export function AppShell({
   onAutoLayout,
   onResetSelfWorkspace,
   onRefresh,
-  onUndo
+  onUndo,
+  onOpenSettings,
+  onRunPlanning,
+  onStartCode,
+  onRunReview,
+  onRunScanning
 }: AppShellProps) {
   const [query, setQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const [leftPanelWidth, setLeftPanelWidth] = useState(DEFAULT_LEFT_PANEL_WIDTH);
+  const [rightPanelWidth, setRightPanelWidth] = useState(DEFAULT_RIGHT_PANEL_WIDTH);
   const [resizingLeftPanel, setResizingLeftPanel] = useState(false);
+  const [resizingRightPanel, setResizingRightPanel] = useState(false);
+  const [rightPanelMode, setRightPanelMode] = useState<"details" | "planning">("details");
   const resizeStartRef = useRef({ x: 0, width: DEFAULT_LEFT_PANEL_WIDTH });
+  const rightResizeStartRef = useRef({ x: 0, width: DEFAULT_RIGHT_PANEL_WIDTH });
   const title = selectedProject?.name ?? "GraphCode";
   const nodeCount = canvas?.nodes.length ?? 0;
   const edgeCount = canvas?.edges.length ?? 0;
@@ -130,6 +170,22 @@ export function AppShell({
 
   const adjustLeftPanelWidth = useCallback((delta: number) => {
     setLeftPanelWidth((width) => clamp(width + delta, MIN_LEFT_PANEL_WIDTH, MAX_LEFT_PANEL_WIDTH));
+  }, []);
+
+  const handleRightResizeStart = useCallback(
+    (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (event.button !== 0) {
+        return;
+      }
+      event.preventDefault();
+      rightResizeStartRef.current = { x: event.clientX, width: rightPanelWidth };
+      setResizingRightPanel(true);
+    },
+    [rightPanelWidth]
+  );
+
+  const adjustRightPanelWidth = useCallback((delta: number) => {
+    setRightPanelWidth((width) => clamp(width + delta, MIN_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH));
   }, []);
 
   useEffect(() => {
@@ -151,8 +207,30 @@ export function AppShell({
     };
   }, [resizingLeftPanel]);
 
+  useEffect(() => {
+    if (!resizingRightPanel) {
+      return;
+    }
+
+    const handlePointerMove = (event: PointerEvent) => {
+      const nextWidth = rightResizeStartRef.current.width + rightResizeStartRef.current.x - event.clientX;
+      setRightPanelWidth(clamp(nextWidth, MIN_RIGHT_PANEL_WIDTH, MAX_RIGHT_PANEL_WIDTH));
+    };
+    const handlePointerUp = () => setResizingRightPanel(false);
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp, { once: true });
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, [resizingRightPanel]);
+
   return (
-    <div className={`app-shell ${resizingLeftPanel ? "resizing-left-panel" : ""}`} style={{ "--left-panel-width": `${leftPanelWidth}px` } as CSSProperties}>
+    <div
+      className={`app-shell ${resizingLeftPanel ? "resizing-left-panel" : ""} ${resizingRightPanel ? "resizing-right-panel" : ""}`}
+      style={{ "--left-panel-width": `${leftPanelWidth}px`, "--right-panel-width": `${rightPanelWidth}px` } as CSSProperties}
+    >
       <header className="top-bar">
         <div className="brand-lockup">
           <div className="brand-mark">
@@ -226,6 +304,12 @@ export function AppShell({
               Auto layout
             </Button>
           </span>
+          <span title="Scan repository into graph blocks">
+            <Button size="sm" variant="secondary" isDisabled={!selectedProject || agentBusy} onPress={onRunScanning}>
+              <Search size={16} />
+              Scan
+            </Button>
+          </span>
           <span title="Fetch current hierarchy and canvas data">
             <Button isIconOnly size="sm" variant="ghost" aria-label="Refresh" onPress={onRefresh}>
               <RefreshCw size={16} />
@@ -239,6 +323,11 @@ export function AppShell({
           <span title="Rebuild the self-repo workspace database">
             <Button isIconOnly size="sm" variant="primary" aria-label="Reset self workspace" onPress={onResetSelfWorkspace}>
               <RotateCcw size={16} />
+            </Button>
+          </span>
+          <span title="Open settings">
+            <Button isIconOnly size="sm" variant="ghost" aria-label="Settings" isDisabled={!selectedProject} onPress={onOpenSettings}>
+              <Settings size={16} />
             </Button>
           </span>
         </div>
@@ -314,6 +403,7 @@ export function AppShell({
         ) : (
           <WorkspaceCanvas
             canvas={canvas}
+            theme={theme}
             selectedNodeId={selectedNodeId}
             selectedEdgeId={selectedEdgeId}
             selectedBoundaryId={selectedBoundaryId}
@@ -331,25 +421,78 @@ export function AppShell({
         )}
       </main>
 
+      <div
+        className="right-panel-resizer"
+        role="separator"
+        aria-label="Resize details panel"
+        aria-orientation="vertical"
+        aria-valuemin={MIN_RIGHT_PANEL_WIDTH}
+        aria-valuemax={MAX_RIGHT_PANEL_WIDTH}
+        aria-valuenow={rightPanelWidth}
+        tabIndex={0}
+        onPointerDown={handleRightResizeStart}
+        onKeyDown={(event) => {
+          if (event.key === "ArrowLeft") {
+            event.preventDefault();
+            adjustRightPanelWidth(event.shiftKey ? 40 : 16);
+          }
+          if (event.key === "ArrowRight") {
+            event.preventDefault();
+            adjustRightPanelWidth(event.shiftKey ? -40 : -16);
+          }
+          if (event.key === "Home") {
+            event.preventDefault();
+            setRightPanelWidth(MIN_RIGHT_PANEL_WIDTH);
+          }
+          if (event.key === "End") {
+            event.preventDefault();
+            setRightPanelWidth(MAX_RIGHT_PANEL_WIDTH);
+          }
+        }}
+      />
+
       <aside className="right-panel" aria-label="Node inspector">
-        <Inspector
-          detail={selectedDetail}
-          selectedEdge={selectedEdge}
-          selectedBoundary={selectedBoundary}
-          canvasNodes={canvas?.nodes ?? []}
-          customTypes={canvas?.customTypes ?? []}
-          nodeTypeStyles={canvas?.nodeTypeStyles ?? []}
-          onEditNode={onEditNode}
-          onEditEdge={onEditEdge}
-          onEditBoundary={onEditBoundary}
-          onUpdateNodeTypeStyle={onUpdateNodeTypeStyle}
-          onUpdateCustomTypeStyle={onUpdateCustomTypeStyle}
-          onUpdateBoundaryStyle={onUpdateBoundaryStyle}
-          onUpdateEdgeStyle={onUpdateEdgeStyle}
-          onUpdateNodeTags={onUpdateNodeTags}
-          onUpdateEdgeTags={onUpdateEdgeTags}
-          onUpdateBoundaryTags={onUpdateBoundaryTags}
-        />
+        <div className="right-panel-tabs" role="tablist" aria-label="Details panel mode">
+          <button type="button" className={rightPanelMode === "details" ? "active" : ""} onClick={() => setRightPanelMode("details")}>
+            <Code2 size={15} />
+            Details
+          </button>
+          <button type="button" className={rightPanelMode === "planning" ? "active" : ""} onClick={() => setRightPanelMode("planning")}>
+            <MessageSquare size={15} />
+            Planning
+          </button>
+        </div>
+        {rightPanelMode === "details" ? (
+          <Inspector
+            detail={selectedDetail}
+            selectedEdge={selectedEdge}
+            selectedBoundary={selectedBoundary}
+            canvasNodes={canvas?.nodes ?? []}
+            customTypes={canvas?.customTypes ?? []}
+            nodeTypeStyles={canvas?.nodeTypeStyles ?? []}
+            agentBusy={agentBusy}
+            onStartCode={onStartCode}
+            onEditNode={onEditNode}
+            onEditEdge={onEditEdge}
+            onEditBoundary={onEditBoundary}
+            onUpdateNodeTypeStyle={onUpdateNodeTypeStyle}
+            onUpdateCustomTypeStyle={onUpdateCustomTypeStyle}
+            onUpdateBoundaryStyle={onUpdateBoundaryStyle}
+            onUpdateEdgeStyle={onUpdateEdgeStyle}
+            onUpdateNodeTags={onUpdateNodeTags}
+            onUpdateEdgeTags={onUpdateEdgeTags}
+            onUpdateBoundaryTags={onUpdateBoundaryTags}
+          />
+        ) : (
+          <PlanningPanel
+            selectedNodeName={selectedDetail?.node.name ?? null}
+            agentRuns={agentRuns}
+            agentBusy={agentBusy}
+            gitStatus={gitStatus}
+            onRunPlanning={onRunPlanning}
+            onRunReview={onRunReview}
+          />
+        )}
       </aside>
     </div>
   );
@@ -358,6 +501,9 @@ export function AppShell({
 const DEFAULT_LEFT_PANEL_WIDTH = 318;
 const MIN_LEFT_PANEL_WIDTH = 248;
 const MAX_LEFT_PANEL_WIDTH = 560;
+const DEFAULT_RIGHT_PANEL_WIDTH = 366;
+const MIN_RIGHT_PANEL_WIDTH = 280;
+const MAX_RIGHT_PANEL_WIDTH = 640;
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)));
@@ -386,4 +532,77 @@ function filterHierarchy(nodes: HierarchyNode[], query: string): HierarchyNode[]
         : null;
     })
     .filter(Boolean) as HierarchyNode[];
+}
+
+function PlanningPanel({
+  selectedNodeName,
+  agentRuns,
+  agentBusy,
+  gitStatus,
+  onRunPlanning,
+  onRunReview
+}: {
+  selectedNodeName: string | null;
+  agentRuns: AgentRun[];
+  agentBusy: boolean;
+  gitStatus: string;
+  onRunPlanning: (prompt: string) => void;
+  onRunReview: (runId: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const latestCodingRun = agentRuns.find((run) => run.agentKind === "coding" && run.status === "succeeded");
+
+  return (
+    <div className="planning-panel">
+      <div className="planning-header">
+        <span>Planning Agent</span>
+        <small>{selectedNodeName ? `Scope: ${selectedNodeName}` : "Workspace scope"}</small>
+      </div>
+      <div className="planning-run-list">
+        {agentRuns.length === 0 ? <p className="muted">No agent runs yet.</p> : null}
+        {agentRuns.slice(0, 8).map((run) => (
+          <div className={`agent-run-card ${run.status}`} key={run.id}>
+            <div>
+              <strong>{agentKindLabel(run.agentKind)}</strong>
+              <span>{run.status}</span>
+            </div>
+            <p>{run.response || run.error || run.prompt || "Run queued."}</p>
+            {run.agentKind === "coding" && run.status === "succeeded" ? (
+              <Button size="sm" variant="secondary" isDisabled={agentBusy} onPress={() => onRunReview(run.id)}>
+                Review
+              </Button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      <label className="planning-input">
+        <span>Prompt</span>
+        <textarea value={draft} rows={5} placeholder="Ask the planning agent to modify the graph" onChange={(event) => setDraft(event.target.value)} />
+      </label>
+      <div className="planning-actions">
+        <Button
+          variant="primary"
+          isDisabled={agentBusy || draft.trim().length === 0}
+          onPress={() => {
+            onRunPlanning(draft.trim());
+            setDraft("");
+          }}
+        >
+          <MessageSquare size={16} />
+          Send
+        </Button>
+        <Button variant="secondary" isDisabled={agentBusy || !latestCodingRun} onPress={() => latestCodingRun && onRunReview(latestCodingRun.id)}>
+          <GitBranch size={16} />
+          Review latest
+        </Button>
+      </div>
+      <section className="inspector-section">
+        <h3>
+          <GitBranch size={15} />
+          Git
+        </h3>
+        {gitStatus ? <pre className="git-status-box">{gitStatus}</pre> : <p className="muted">No pending Git changes detected.</p>}
+      </section>
+    </div>
+  );
 }

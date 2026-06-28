@@ -1,4 +1,4 @@
-import type { CanvasGraph, GraphBoundary, GraphNode } from "@graphcode/graph-model";
+import type { CanvasGraph, GraphBoundary, GraphNode, WorkspaceSettings } from "@graphcode/graph-model";
 import {
   applyNodeChanges,
   Background,
@@ -16,12 +16,14 @@ import {
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
+import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { nodePalette } from "../graphStyles";
 import { BoundaryNodeCard } from "./BoundaryNodeCard";
 import { GraphNodeCard } from "./GraphNodeCard";
 
 type WorkspaceCanvasProps = {
   canvas: CanvasGraph | null;
+  theme: WorkspaceSettings["general"]["theme"];
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
   selectedBoundaryId: string | null;
@@ -57,6 +59,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps) {
 
 function WorkspaceCanvasInner({
   canvas,
+  theme,
   selectedNodeId,
   selectedEdgeId,
   selectedBoundaryId,
@@ -72,6 +75,8 @@ function WorkspaceCanvasInner({
   onEdgeDraft
 }: WorkspaceCanvasProps) {
   const { fitView, screenToFlowPosition, setCenter } = useReactFlow();
+  const resolvedTheme = useResolvedCanvasTheme(theme);
+  const canvasColors = canvasThemeColors(resolvedTheme);
   const nodesRef = useRef<Node[]>([]);
   const draftRectRef = useRef<BoundaryDraftRect | null>(null);
   const boundaryDragRef = useRef<BoundaryDragState | null>(null);
@@ -90,7 +95,7 @@ function WorkspaceCanvasInner({
   );
   const [nodes, setNodes] = useState<Node[]>(initialNodes);
   const [draftRect, setDraftRect] = useState<BoundaryDraftRect | null>(null);
-  const edges = useMemo(() => toFlowEdges(canvas, selectedEdgeId), [canvas, selectedEdgeId]);
+  const edges = useMemo(() => toFlowEdges(canvas, selectedEdgeId, resolvedTheme), [canvas, resolvedTheme, selectedEdgeId]);
   const flowNodes = useMemo(() => (draftRect ? [...nodes, toDraftBoundaryNode(draftRect)] : nodes), [draftRect, nodes]);
 
   const persistLayout = useCallback(
@@ -372,6 +377,8 @@ function WorkspaceCanvasInner({
 
   return (
     <ReactFlow
+      className={`workspace-flow workspace-flow-${resolvedTheme}`}
+      colorMode={resolvedTheme}
       nodes={flowNodes}
       edges={edges}
       nodeTypes={nodeTypes}
@@ -393,12 +400,15 @@ function WorkspaceCanvasInner({
       onMouseUp={finishBoundaryDraft}
       proOptions={{ hideAttribution: false }}
     >
-      <Background color="#d4d7dd" gap={28} size={1} />
+      <Background color={canvasColors.backgroundDots} gap={28} size={1} />
       <Controls position="bottom-left" />
       <MiniMap
         position="bottom-right"
         pannable
         zoomable
+        bgColor={canvasColors.minimapBg}
+        maskColor={canvasColors.minimapMask}
+        maskStrokeColor={canvasColors.minimapStroke}
         nodeColor={(node) => {
           return (node.data as { accentColor?: string; boundary?: GraphBoundary }).accentColor ?? (node.data as { boundary?: GraphBoundary }).boundary?.color ?? nodePalette.module.accent;
         }}
@@ -455,57 +465,81 @@ function toFlowNodes(
     return [];
   }
 
-  const boundaryNodes: Node[] = canvas.boundaries.map((boundary) => ({
-    id: boundary.id,
-    type: "boundaryNode",
-    position: boundary.position,
-    selected: boundary.id === selectedBoundaryId,
-    draggable: true,
-    zIndex: boundary.id === selectedBoundaryId ? 4 : 1,
-    style: {
-      width: boundary.size.width,
-      height: boundary.size.height
-    },
-    data: {
-      boundary,
+  const measuredNodeById = new Map(canvas.nodes.map((node) => [node.id, { ...node, size: measureNodeCardSize(node) }]));
+  const boundaryNodes: Node[] = canvas.boundaries.map((boundary) => {
+    const displaySize = measureBoundaryBoxSize(boundary, measuredNodeById);
+    return {
+      id: boundary.id,
+      type: "boundaryNode",
+      position: boundary.position,
       selected: boundary.id === selectedBoundaryId,
-      onResizeEnd: onBoundaryResizeEnd
-    }
-  }));
+      draggable: true,
+      zIndex: boundary.id === selectedBoundaryId ? 4 : 1,
+      style: {
+        width: displaySize.width,
+        height: displaySize.height
+      },
+      data: {
+        boundary: {
+          ...boundary,
+          size: displaySize
+        },
+        selected: boundary.id === selectedBoundaryId,
+        onResizeEnd: onBoundaryResizeEnd
+      }
+    };
+  });
 
   const reuseByNodeId = new Map((canvas.reuses ?? []).map((reuse) => [reuse.nodeId, reuse]));
   const graphNodes: Node[] = canvas.nodes.map((node) => ({
+    ...toFlowGraphNode(node, canvas, selectedNodeId, reuseByNodeId, onResizeEnd)
+  }));
+
+  return [...boundaryNodes, ...graphNodes];
+}
+
+function toFlowGraphNode(
+  node: GraphNode,
+  canvas: CanvasGraph,
+  selectedNodeId: string | null,
+  reuseByNodeId: Map<string, CanvasGraph["reuses"][number]>,
+  onResizeEnd: (nodeId: string, size: { width: number; height: number }) => void
+): Node {
+  const displaySize = measureNodeCardSize(node);
+  return {
     id: node.id,
     type: "graphNode",
     position: node.position,
     selected: node.id === selectedNodeId,
     zIndex: node.id === selectedNodeId ? 20 : 10,
     style: {
-      width: node.size.width,
-      height: node.size.height
+      width: displaySize.width,
+      height: displaySize.height
     },
     data: {
-      node,
+      node: {
+        ...node,
+        size: displaySize
+      },
       accentColor: colorForNode(node, canvas),
       reuse: reuseByNodeId.get(node.id),
       selected: node.id === selectedNodeId,
       onResizeEnd
     }
-  }));
-
-  return [...boundaryNodes, ...graphNodes];
+  };
 }
 
-function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null): Edge[] {
+function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, theme: "light" | "dark"): Edge[] {
   if (!canvas) {
     return [];
   }
+  const labelColor = theme === "dark" ? "#cbd5e1" : "#4b5563";
 
   const semanticEdges: Edge[] = canvas.edges.map((edge) => ({
     id: edge.id,
     source: edge.sourceNodeId,
     target: edge.targetNodeId,
-    label: edge.label ?? edge.kind,
+    label: formatEdgeLabel(edge),
     type: "smoothstep",
     selected: edge.id === selectedEdgeId,
     animated: edge.animated,
@@ -518,7 +552,7 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null):
       strokeWidth: edge.id === selectedEdgeId ? 2.4 : 1.7
     },
     labelStyle: {
-      fill: "#4b5563",
+      fill: labelColor,
       fontSize: 11,
       fontWeight: 600
     }
@@ -553,6 +587,116 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null):
     });
 
   return [...semanticEdges, ...attachmentEdges];
+}
+
+function measureNodeCardSize(node: GraphNode): { width: number; height: number } {
+  const longestWord = Math.max(0, ...`${node.name} ${node.summary}`.split(/\s+/).map((part) => part.length));
+  const summaryLength = node.summary.trim().length;
+  const nameLength = node.name.trim().length;
+  const baseWidth = node.size.width;
+  const widthFromWord = Math.min(420, Math.max(baseWidth, 150 + longestWord * 7));
+  const widthFromSummary = summaryLength > 58 ? Math.max(widthFromWord, 292) : widthFromWord;
+  const maxMeasuredWidth = node.kind === "format" ? 280 : 420;
+  const width = Math.max(baseWidth, Math.min(maxMeasuredWidth, widthFromSummary));
+  const nameLines = Math.min(2, Math.max(1, Math.ceil(nameLength / Math.max(14, Math.floor((width - 48) / 8.5)))));
+  const summaryLines = summaryLength === 0 ? 1 : Math.min(3, Math.ceil(summaryLength / Math.max(18, Math.floor((width - 34) / 6.8))));
+  const statusRows = node.agentStatus !== "none" || node.gitStatus ? 1 : 0;
+  const tagRows = node.tags.length > 0 ? 1 : 0;
+  const contentHeight = 66 + nameLines * 19 + summaryLines * 18 + statusRows * 27 + tagRows * 24;
+  const minHeight = node.kind === "format" ? 96 : node.kind === "ui_component" ? 136 : 128;
+  const height = Math.max(node.size.height, Math.min(260, Math.max(minHeight, contentHeight)));
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+function measureBoundaryBoxSize(boundary: GraphBoundary, nodeById: Map<string, GraphNode>): { width: number; height: number } {
+  const memberNodes = boundary.memberNodeIds.map((nodeId) => nodeById.get(nodeId)).filter(Boolean) as GraphNode[];
+  const headerWidth = measureBoundaryHeaderWidth(boundary);
+  let width = Math.max(boundary.size.width, headerWidth);
+  let memberMaxRight = 0;
+  let memberMaxBottom = 0;
+
+  for (const node of memberNodes) {
+    memberMaxRight = Math.max(memberMaxRight, node.position.x + node.size.width - boundary.position.x);
+    memberMaxBottom = Math.max(memberMaxBottom, node.position.y + node.size.height - boundary.position.y);
+  }
+
+  if (memberNodes.length > 0) {
+    width = Math.max(width, memberMaxRight + BOUNDARY_SIDE_PADDING);
+  }
+  const topPadding = boundaryTopPadding(boundary, width);
+  const height = Math.max(boundary.size.height, memberMaxBottom + BOUNDARY_BOTTOM_PADDING, topPadding + BOUNDARY_BOTTOM_PADDING);
+  return { width: Math.round(width), height: Math.round(height) };
+}
+
+function measureBoundaryHeaderWidth(boundary: GraphBoundary): number {
+  const longestWord = Math.max(0, ...`${boundary.name} ${boundary.summary}`.split(/\s+/).map((part) => part.length));
+  const summaryLength = boundary.summary.trim().length;
+  return Math.min(640, Math.max(180, 28 + longestWord * 7.5, summaryLength > 72 ? 360 : 0));
+}
+
+function boundaryTopPadding(boundary: GraphBoundary, width: number): number {
+  const contentWidth = Math.max(120, width - 24);
+  const summaryLength = boundary.summary.trim().length;
+  const summaryLines = summaryLength === 0 ? 0 : Math.min(2, Math.ceil(summaryLength / Math.max(18, Math.floor(contentWidth / 6.8))));
+  const headerHeight = 18 + (summaryLines > 0 ? 5 + summaryLines * 17 : 0);
+  return Math.max(88, headerHeight + 28);
+}
+
+function useResolvedCanvasTheme(theme: WorkspaceSettings["general"]["theme"]): "light" | "dark" {
+  const [prefersDark, setPrefersDark] = useState(() =>
+    typeof window === "undefined" || typeof window.matchMedia !== "function" ? false : window.matchMedia("(prefers-color-scheme: dark)").matches
+  );
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => setPrefersDark(media.matches);
+    onChange();
+    if (typeof media.addEventListener === "function") {
+      media.addEventListener("change", onChange);
+      return () => media.removeEventListener("change", onChange);
+    }
+    media.addListener(onChange);
+    return () => media.removeListener(onChange);
+  }, []);
+
+  return theme === "system" ? (prefersDark ? "dark" : "light") : theme;
+}
+
+const BOUNDARY_SIDE_PADDING = 48;
+const BOUNDARY_BOTTOM_PADDING = 44;
+
+function canvasThemeColors(theme: "light" | "dark") {
+  if (theme === "dark") {
+    return {
+      backgroundDots: "#334155",
+      minimapBg: "#1d212b",
+      minimapMask: "rgba(15, 23, 42, 0.44)",
+      minimapStroke: "#475569"
+    };
+  }
+  return {
+    backgroundDots: "#d4d7dd",
+    minimapBg: "#ffffff",
+    minimapMask: "rgba(240, 244, 248, 0.7)",
+    minimapStroke: "#cbd5e1"
+  };
+}
+
+function formatEdgeLabel(edge: CanvasGraph["edges"][number]): string {
+  const pieces = [edge.label ?? edge.kind];
+  if (edge.agentStatus !== "none") {
+    pieces.push(agentStatusLabel(edge.agentStatus));
+  }
+  if (edge.gitStatus) {
+    pieces.push(gitWorktreeLabel(edge.gitStatus.worktree));
+    if (edge.gitStatus.change) {
+      pieces.push(gitChangeLabel(edge.gitStatus.change));
+    }
+  }
+  return pieces.join(" · ");
 }
 
 function normalizeDraftRect(rect: BoundaryDraftRect): { position: { x: number; y: number }; size: { width: number; height: number } } {
