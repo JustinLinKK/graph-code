@@ -4,23 +4,76 @@ GraphCode is a working title for a graph-native, human-in-the-loop architecture 
 
 The launch name is still open. The research notes in [docs/research/graphcode-assessment.md](docs/research/graphcode-assessment.md) identify existing public uses of Graph-Code or GraphCode, so naming should be revisited before any public release.
 
+## Installation
+
+GraphCode is a local pnpm workspace. The root `package.json` pins `pnpm@10.33.0`; use Node.js with Corepack available so the pinned package manager can be activated consistently.
+
+1. Clone the repository:
+
+   ```bash
+   git clone <repository-url>
+   ```
+
+2. Enter the repository:
+
+   ```bash
+   cd graph-code
+   ```
+
+3. Enable Corepack:
+
+   ```bash
+   corepack enable
+   ```
+
+4. Activate the pinned pnpm version:
+
+   ```bash
+   corepack prepare pnpm@10.33.0 --activate
+   pnpm --version
+   ```
+
+5. Install dependencies:
+
+   ```bash
+   pnpm install
+   ```
+
+6. Build the local self-repo workspace fixture:
+
+   ```bash
+   pnpm seed
+   ```
+
+   This creates `.graphcode/graphcode.sqlite`, which is intentionally ignored by git.
+
+7. Start the local server and web app:
+
+   ```bash
+   pnpm dev
+   ```
+
+8. Open the workspace in a browser:
+
+   ```text
+   http://127.0.0.1:5173
+   ```
+
+The web app runs through Vite on port `5173`. The local Fastify API runs on `127.0.0.1:3010`, and the Vite dev server proxies `/api` requests to it.
+
+Optional verification commands:
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
 ## Status
 
 This repository now contains a narrow local prototype: a Fastify local server, a React/React Flow web workspace, shared graph-model DTOs, and a deterministic self-repo seed. The generated workspace lives in `.graphcode/graphcode.sqlite` and is intentionally ignored by git.
 
-The current development fixture is this repository itself. Rebuild it with:
-
-```bash
-pnpm seed
-```
-
-Then run the local workspace with:
-
-```bash
-pnpm dev
-```
-
-Normal server startup preserves existing graph data. Use the toolbar reset action or `pnpm seed` when you want to rebuild the curated self-repo graph from source.
+The current development fixture is this repository itself. Follow the [installation steps](#installation) to install dependencies, rebuild the curated self-repo graph, and run the local workspace. Normal server startup preserves existing graph data. Use the toolbar reset action or `pnpm seed` when you want to rebuild the fixture from source.
 
 The first development milestone is a narrow prototype that can:
 
