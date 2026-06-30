@@ -8,7 +8,10 @@ import {
   type AgentConfig,
   type AgentKind,
   type AgentStatus,
+  type BlockExecutionMetadata,
+  type CanvasGraph,
   type CodingAgentRequest,
+  type CodeProposalArtifactManifest,
   type GraphEdge,
   type GraphNode,
   type GraphPatch,
@@ -17,7 +20,10 @@ import {
   type PlanningChatRequest,
   type ReviewAgentRequest,
   type ScanningAgentRequest,
-  graphPatchSchema
+  codeProposalArtifactManifestSchema,
+  graphPatchSchema,
+  isAttachmentNodeKind,
+  isDomainNodeKind
 } from "@graphcode/graph-model";
 import { z } from "zod";
 
@@ -26,10 +32,12 @@ const execFileAsync = promisify(execFile);
 export type GraphCodeToolbox = {
   readGraph: (projectId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
   getNodeDetail: (nodeId: string) => Promise<NodeDetail>;
+  getCanvasGraph: (projectId: string, rootNodeId: string, includeAttachments?: boolean) => Promise<CanvasGraph>;
+  resolveExecutionMetadata: (nodeId: string) => Promise<BlockExecutionMetadata>;
   setStatuses: (projectId: string, patches: GraphStatusPatch[]) => Promise<void>;
   applyGraphPatch: (projectId: string, patch: GraphPatch, runId?: string) => Promise<void>;
   readSourceFile: (relativePath: string) => Promise<string>;
-  writeCodeProposal: (projectId: string, runId: string | null, targetNodeId: string | null, diff: string) => Promise<void>;
+  writeCodeProposal: (projectId: string, runId: string | null, targetNodeId: string | null, diff: string, artifactManifest?: CodeProposalArtifactManifest | null) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
   refreshCodeGraph: (
     projectId: string,
@@ -152,27 +160,37 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
     prompt: input.prompt ?? "",
     execute: async () => {
       const provider = createProvider(options.config);
+      const mode = input.mode ?? "medium";
       const detail = await options.toolbox.getNodeDetail(input.nodeId);
-      const allowedPath = detail.node.source.path ?? detail.node.code.directory;
-      const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
-      const gitStatus = await options.toolbox.readGitStatus(input.projectId);
-      const response = await provider.invoke([
-        { role: "system", content: resolveSystemPrompt(options.config, "Return a unified diff scoped only to the selected GraphCode block.") },
-        {
-          role: "user",
-          content: [
-            `Node: ${detail.node.name} (${detail.node.id})`,
-            `Allowed path: ${allowedPath ?? "none"}`,
-            `Code context: ${detail.node.code.context}`,
-            `User prompt: ${input.prompt ?? "Implement the scoped graph change."}`,
-            `Git status:\n${gitStatus}`,
-            source ? `Source:\n${source.slice(0, 12000)}` : "Source unavailable; produce a proposal note."
-          ].join("\n\n")
-        }
-      ]);
-      const diff = normalizeDiff(response, allowedPath);
-      assertDiffInScope(diff, allowedPath);
-      await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff);
+      const graph = await options.toolbox.readGraph(input.projectId);
+      const organizationScope = resolveCodingOrganizationScope(detail.node, graph.nodes);
+      const scopeCanvas =
+        organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
+	      const allowedPath = detail.node.source.path ?? detail.node.code.directory;
+	      const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
+	      const gitStatus = await options.toolbox.readGitStatus(input.projectId);
+	      const execution = await options.toolbox.resolveExecutionMetadata(input.nodeId);
+	      const context = buildCodingContextBundle({
+	        mode,
+	        detail,
+	        graph,
+	        organizationScope,
+	        scopeCanvas,
+	        allowedPath,
+	        source,
+	        gitStatus,
+	        execution,
+	        recommendedModeReason: input.recommendedModeReason,
+	        prompt: input.prompt
+	      });
+	      const response = await provider.invoke([
+	        { role: "system", content: resolveSystemPrompt(options.config, "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest.") },
+	        { role: "user", content: context }
+	      ]);
+	      const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(response);
+	      const diff = normalizeDiff(responseWithoutArtifacts, allowedPath);
+	      assertDiffInScope(diff, allowedPath);
+	      await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
       const touched: GraphStatusPatch[] = [
         {
           entityType: "node",
@@ -249,14 +267,175 @@ function scanningPrompt(input: ScanningAgentRequest): string {
   );
 }
 
+type CodingContextInput = {
+  mode: CodingAgentRequest["mode"];
+  detail: NodeDetail;
+  graph: PlanningGraph;
+  organizationScope: GraphNode | null;
+  scopeCanvas: CanvasGraph | null;
+  allowedPath: string | null | undefined;
+  source: string;
+  gitStatus: string;
+  execution: BlockExecutionMetadata;
+  recommendedModeReason?: string;
+  prompt?: string;
+};
+
+function buildCodingContextBundle(input: CodingContextInput): string {
+  const directWorkflowNodes = [
+    ...input.detail.inputs.map((row) => row.node),
+    ...input.detail.processes.map((row) => row.node),
+    ...input.detail.outputs.map((row) => row.node),
+    ...input.detail.formats.map((row) => row.node),
+    ...input.detail.basicDetails.map((row) => row.node),
+    ...input.detail.dependencies.map((row) => row.node)
+  ];
+  const canvasWorkflowNodes =
+    input.scopeCanvas?.nodes.filter((node) => isAttachmentNodeKind(node.kind) && (node.kind === "input" || node.kind === "process" || node.kind === "output" || node.kind === "format")) ?? [];
+  const workflowNodes = uniqueNodes(input.mode === "small" ? directWorkflowNodes : [...directWorkflowNodes, ...canvasWorkflowNodes]);
+  const directEdges = [...input.detail.incomingEdges, ...input.detail.outgoingEdges];
+  const workflowEdges = input.scopeCanvas?.edges.filter((edge) => edge.kind === "flows" || edge.kind === "describes_format") ?? [];
+  const scopedEdges = uniqueEdges(input.mode === "small" ? directEdges : [...workflowEdges, ...directEdges]);
+  const largeGraph = input.mode === "large" ? buildLargeGraphContext(input.graph, input.organizationScope ?? input.detail.node) : { nodes: [], edges: [] };
+  const sourceLimit = input.mode === "large" ? 20000 : input.mode === "medium" ? 12000 : 4000;
+
+  return [
+    `Coding mode: ${input.mode}`,
+    input.recommendedModeReason ? `Recommended mode reason: ${input.recommendedModeReason}` : "",
+    `Target node: ${formatNode(input.detail.node)}`,
+    `Organization scope: ${input.organizationScope ? formatNode(input.organizationScope) : "none"}`,
+    `Allowed edit path: ${input.allowedPath ?? "none"}`,
+    `Allowed source lines: ${input.detail.node.source.startLine ?? input.detail.node.code.startLine ?? "unknown"}-${input.detail.node.source.endLine ?? input.detail.node.code.endLine ?? "unknown"}`,
+    `Execution metadata:\n${formatExecutionMetadata(input.execution)}`,
+    "Environment rule: use only the resolved virtual environment/setup metadata above. Do not activate unrelated conda, venv, pyenv, nvm, or system environments by guessing.",
+    "Test artifact rule: if a new test script is useful, include it only in GRAPHCODE_TEST_ARTIFACTS_JSON; do not assume it has been written into the source tree.",
+    `Workflow blocks:\n${formatNodeList(workflowNodes, 28)}`,
+    `Workflow flow edges:\n${formatEdgeList(scopedEdges, 36)}`,
+    `Related nodes:\n${formatNodeList(input.detail.relatedNodes, 18)}`,
+    input.mode === "large" ? `Large-scope nodes:\n${formatNodeList(largeGraph.nodes, 50)}` : "",
+    input.mode === "large" ? `Large-scope edges:\n${formatEdgeList(largeGraph.edges, 80)}` : "",
+    `Code context:\n${input.detail.node.code.context || "(none)"}`,
+    `User prompt:\n${input.prompt ?? "Implement the scoped graph change."}`,
+    `Git status:\n${input.gitStatus || "(clean or unavailable)"}`,
+    input.source ? `Source (${input.allowedPath ?? "unknown"}):\n${input.source.slice(0, sourceLimit)}` : "Source unavailable; produce a proposal note."
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function resolveCodingOrganizationScope(target: GraphNode, nodes: GraphNode[]): GraphNode | null {
+  const nodeById = new Map(nodes.map((node) => [node.id, node]));
+  if (target.kind === "function" || target.kind === "object") {
+    return target;
+  }
+
+  let current: GraphNode | undefined = target;
+  const seen = new Set<string>();
+  while (current?.attachedToId && !seen.has(current.attachedToId)) {
+    seen.add(current.attachedToId);
+    const attachedTo = nodeById.get(current.attachedToId);
+    if (!attachedTo) {
+      break;
+    }
+    if (isDomainNodeKind(attachedTo.kind)) {
+      return attachedTo;
+    }
+    current = attachedTo;
+  }
+
+  if (isDomainNodeKind(target.kind)) {
+    return target;
+  }
+  if (target.parentId) {
+    const parent = nodeById.get(target.parentId);
+    if (parent && isDomainNodeKind(parent.kind)) {
+      return parent;
+    }
+  }
+  return null;
+}
+
+function buildLargeGraphContext(graph: PlanningGraph, scope: GraphNode): PlanningGraph {
+  const descendantIds = new Set<string>([scope.id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of graph.nodes) {
+      if (node.parentId && descendantIds.has(node.parentId) && !descendantIds.has(node.id)) {
+        descendantIds.add(node.id);
+        changed = true;
+      }
+    }
+  }
+  const edgeIds = new Set<string>();
+  for (const edge of graph.edges) {
+    if (descendantIds.has(edge.sourceNodeId) || descendantIds.has(edge.targetNodeId)) {
+      edgeIds.add(edge.id);
+      descendantIds.add(edge.sourceNodeId);
+      descendantIds.add(edge.targetNodeId);
+    }
+  }
+  return {
+    nodes: graph.nodes.filter((node) => descendantIds.has(node.id)),
+    edges: graph.edges.filter((edge) => edgeIds.has(edge.id))
+  };
+}
+
+function uniqueNodes(nodes: GraphNode[]): GraphNode[] {
+  return [...new Map(nodes.map((node) => [node.id, node])).values()];
+}
+
+function uniqueEdges(edges: GraphEdge[]): GraphEdge[] {
+  return [...new Map(edges.map((edge) => [edge.id, edge])).values()];
+}
+
+function formatNodeList(nodes: GraphNode[], limit: number): string {
+  if (nodes.length === 0) {
+    return "(none)";
+  }
+  const formatted = nodes.slice(0, limit).map(formatNode);
+  return nodes.length > limit ? [...formatted, `... ${nodes.length - limit} more`].join("\n") : formatted.join("\n");
+}
+
+function formatEdgeList(edges: GraphEdge[], limit: number): string {
+  if (edges.length === 0) {
+    return "(none)";
+  }
+  const formatted = edges
+    .slice(0, limit)
+    .map((edge) => `${edge.id}: ${edge.sourceNodeId} -> ${edge.targetNodeId} (${edge.kind}${edge.label ? `, ${edge.label}` : ""}) ${edge.codeContext}`.trim());
+  return edges.length > limit ? [...formatted, `... ${edges.length - limit} more`].join("\n") : formatted.join("\n");
+}
+
+function formatExecutionMetadata(execution: BlockExecutionMetadata): string {
+  return [
+    `testScriptDirectory=${execution.testScriptDirectory ?? "(none)"}`,
+    `virtualEnvironment=${execution.virtualEnvironment ?? "(none)"}`,
+    `workingDirectory=${execution.workingDirectory ?? "(none)"}`,
+    `setupCommand=${execution.setupCommand ?? "(none)"}`,
+    `testCommand=${execution.testCommand ?? "(none)"}`
+  ].join("\n");
+}
+
+function formatNode(node: GraphNode): string {
+  return `${node.id}: ${node.name} (${node.kind}, status=${node.agentStatus}) ${node.summary}`.trim();
+}
+
 export const graphDatabaseToolSchemas = {
   "graphcode.db.read_graph": z.object({ projectId: z.string() }),
   "graphcode.db.get_node_detail": z.object({ nodeId: z.string() }),
+  "graphcode.db.get_canvas_graph": z.object({ projectId: z.string(), rootNodeId: z.string(), includeAttachments: z.boolean().optional() }),
   "graphcode.db.apply_graph_patch": z.object({ projectId: z.string(), patch: graphPatchSchema }),
   "graphcode.db.set_statuses": z.object({ projectId: z.string(), patches: z.array(z.unknown()) }),
   "graphcode.repo.read_git_status": z.object({ projectId: z.string() }),
   "graphcode.repo.read_source_file": z.object({ path: z.string() }),
-  "graphcode.repo.write_code_proposal": z.object({ projectId: z.string(), runId: z.string().nullable(), targetNodeId: z.string().nullable(), diff: z.string() })
+  "graphcode.repo.write_code_proposal": z.object({
+    projectId: z.string(),
+    runId: z.string().nullable(),
+    targetNodeId: z.string().nullable(),
+    diff: z.string(),
+    artifactManifest: codeProposalArtifactManifestSchema.nullable().optional()
+  })
 };
 
 async function runLangGraphTask(task: AgentTask): Promise<AgentResult> {
@@ -270,11 +449,11 @@ async function runLangGraphTask(task: AgentTask): Promise<AgentResult> {
 }
 
 function createProvider(config: AgentConfig): { invoke: (messages: PromptMessage[]) => Promise<string> } {
-  if (config.provider === "fake") {
-    return {
-      invoke: async (messages) => `Fake ${config.agentKind} response: ${messages.at(-1)?.content.slice(0, 600) ?? ""}`
-    };
-  }
+	  if (config.provider === "fake") {
+	    return {
+	      invoke: async (messages) => `Fake ${config.agentKind} response: ${messages.at(-1)?.content.slice(0, 4000) ?? ""}`
+	    };
+	  }
   if (config.provider === "openai" || config.provider === "openrouter") {
     const apiKey = resolveApiKey(config);
     const model = new ChatOpenAI({
@@ -353,6 +532,26 @@ function resolveSystemPrompt(config: AgentConfig, fallback: string): string {
     return config.systemPromptSource.value;
   }
   return fallback;
+}
+
+function extractCodeProposalArtifactManifest(response: string): { content: string; artifactManifest: CodeProposalArtifactManifest | null } {
+  const marker = "GRAPHCODE_TEST_ARTIFACTS_JSON";
+  const markerIndex = response.indexOf(marker);
+  if (markerIndex < 0) {
+    return { content: response, artifactManifest: null };
+  }
+  const content = response.slice(0, markerIndex).trimEnd();
+  const raw = response
+    .slice(markerIndex + marker.length)
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  try {
+    return { content, artifactManifest: codeProposalArtifactManifestSchema.parse(JSON.parse(raw)) };
+  } catch {
+    return { content: response, artifactManifest: null };
+  }
 }
 
 function normalizeDiff(response: string, allowedPath: string | null | undefined): string {

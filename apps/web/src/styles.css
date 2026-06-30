@@ -1128,6 +1128,9 @@ select {
 }
 
 .canvas-draw-status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   padding: 7px 10px;
   color: #854d0e;
   background: rgba(255, 251, 235, 0.96);
@@ -1136,6 +1139,23 @@ select {
   box-shadow: 0 8px 20px rgba(17, 24, 39, 0.08);
   font-size: 12px;
   font-weight: 700;
+}
+
+.canvas-draw-cancel {
+  padding: 0;
+  color: #92400e;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.canvas-draw-cancel:hover {
+  color: #713f12;
 }
 
 .inspector {
@@ -1233,8 +1253,46 @@ select {
 
 .inspector-action-row {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
   justify-content: flex-start;
   margin-top: 10px;
+}
+
+.mode-control-label {
+  color: #475467;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mode-segmented-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(58px, 1fr));
+  width: min(100%, 196px);
+  padding: 3px;
+  background: #f3f4f6;
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+}
+
+.mode-segmented-control button {
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  color: #526071;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.mode-segmented-control button.active {
+  color: #0f172a;
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.14);
 }
 
 .source-box span {
@@ -1410,6 +1468,28 @@ select {
 .workspace-flow-draw-edge .react-flow__pane,
 .workspace-flow-draw-edge .graph-node-card {
   cursor: pointer;
+}
+
+.graph-edge-label {
+  position: absolute;
+  max-width: 260px;
+  padding: 4px 8px;
+  overflow-wrap: anywhere;
+  color: var(--edge-label-color);
+  background: var(--edge-label-bg);
+  border: 1px solid var(--edge-label-border);
+  border-radius: 7px;
+  box-shadow: 0 5px 14px rgba(15, 23, 42, 0.12);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.25;
+  pointer-events: none;
+  text-align: center;
+  white-space: normal;
+}
+
+.graph-edge-label.selected {
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.16), 0 7px 16px rgba(37, 99, 235, 0.14);
 }
 
 .react-flow__controls {
@@ -1631,12 +1711,7 @@ select {
   font-size: 12px;
 }
 
-.planning-run-list {
-  display: grid;
-  gap: 8px;
-}
-
-.agent-run-card {
+.planning-composer {
   display: grid;
   gap: 8px;
   padding: 10px;
@@ -1645,25 +1720,97 @@ select {
   border-radius: 8px;
 }
 
-.agent-run-card > div {
+.planning-ticket-list,
+.agent-activity-section {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-ticket-card,
+.agent-activity-row {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-left: 3px solid #94a3b8;
+  border-radius: 8px;
+}
+
+.agent-ticket-card.running,
+.agent-activity-row.running {
+  border-left-color: #2563eb;
+}
+
+.agent-ticket-card.succeeded,
+.agent-ticket-card.applied,
+.agent-activity-row.succeeded {
+  border-left-color: #059669;
+}
+
+.agent-ticket-card.failed,
+.agent-ticket-card.conflicted,
+.agent-activity-row.failed,
+.agent-activity-row.conflicted {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.agent-ticket-topline,
+.agent-activity-row > div {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
 }
 
-.agent-run-card strong {
+.agent-ticket-topline strong,
+.agent-activity-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #111827;
   font-size: 12px;
-  text-transform: uppercase;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.agent-run-card span {
-  color: #64748b;
+.run-status-badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  color: #475569;
+  background: #f1f5f9;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 800;
 }
 
-.agent-run-card p {
+.run-status-badge.running {
+  color: #1d4ed8;
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+
+.run-status-badge.succeeded,
+.run-status-badge.applied {
+  color: #047857;
+  background: #ecfdf5;
+  border-color: #a7f3d0;
+}
+
+.run-status-badge.failed,
+.run-status-badge.conflicted {
+  color: #b91c1c;
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.agent-ticket-card p,
+.agent-activity-row p {
   display: -webkit-box;
   margin: 0;
   overflow: hidden;
@@ -1674,9 +1821,29 @@ select {
   -webkit-box-orient: vertical;
 }
 
-.agent-run-card.failed {
-  background: #fef2f2;
-  border-color: #fecaca;
+.agent-ticket-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.agent-ticket-meta span {
+  color: #64748b;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  padding: 3px 6px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.agent-ticket-conflict {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: #991b1b;
+  font-size: 12px;
+  line-height: 1.35;
 }
 
 .planning-input {
@@ -1706,11 +1873,6 @@ select {
 .planning-input textarea {
   padding: 10px;
   resize: vertical;
-}
-
-.planning-actions {
-  display: flex;
-  gap: 8px;
 }
 
 .git-status-box {
@@ -1893,6 +2055,73 @@ select {
 
 .settings-error {
   color: #b91c1c;
+}
+
+.coding-workflow-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-bottom: 1px solid #e5e7eb;
+  background: #f8fafc;
+}
+
+.coding-workflow-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.coding-workflow-header > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.coding-workflow-header strong,
+.coding-workflow-item strong {
+  color: #111827;
+  font-size: 13px;
+}
+
+.coding-workflow-header span,
+.coding-workflow-item span,
+.coding-workflow-item small,
+.coding-workflow-panel p {
+  color: #667085;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.coding-workflow-items {
+  display: grid;
+  gap: 8px;
+}
+
+.coding-workflow-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 96px;
+  gap: 8px;
+  align-items: start;
+  padding: 8px;
+  background: #fff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+}
+
+.coding-workflow-item > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.coding-workflow-item select {
+  min-width: 0;
+}
+
+.coding-workflow-actions {
+  display: flex;
+  justify-content: flex-end;
 }
 
 @media (max-width: 980px) {

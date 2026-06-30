@@ -6,6 +6,7 @@ import { scanRepositoryCodeGraph } from "@graphcode/parser";
 import { openDatabase, type GraphDatabase } from "./connection";
 import { GraphRepository } from "./repository";
 import { migrate } from "./schema";
+import { buildElkEdgesForLayout } from "../layout/elk";
 
 let db: GraphDatabase;
 let repo: GraphRepository;
@@ -48,15 +49,19 @@ describe("SQLite graph repository", () => {
         "graph_node_layouts",
         "graph_node_type_styles",
         "graph_revisions",
+        "graph_entity_versions",
         "workspace_settings",
+        "coding_agent_settings",
         "agent_settings",
-        "agent_runs",
-        "agent_messages",
-        "graph_status_history",
-        "code_proposals"
-      ])
-    );
-  });
+	        "agent_runs",
+	        "agent_messages",
+	        "graph_status_history",
+	        "code_proposals",
+	        "coding_workflows",
+	        "coding_workflow_items"
+	      ])
+	    );
+	  });
 
   it("saves settings with masked views and records agent status history", () => {
     const project = repo.seedSelfGraph(selfRootPath);
@@ -93,11 +98,262 @@ describe("SQLite graph repository", () => {
     expect(settings.github.clientId).toBe("github-client");
     expect(settings.github.auth.tokenConfigured).toBe(false);
     expect(settings.automation.autoReviewAfterCoding).toBe(false);
-    expect(settings.agents.find((agent) => agent.agentKind === "coding")?.apiKeySource.value).toBe("");
-    expect(settings.agents.find((agent) => agent.agentKind === "coding")?.apiKeyConfigured).toBe(true);
+    expect(settings.agents.some((agent) => agent.agentKind === "coding")).toBe(false);
+    expect(settings.codingAgents).toHaveLength(3);
+    expect(settings.codingAgents.find((agent) => agent.mode === "medium")?.apiKeySource.value).toBe("");
+    expect(settings.codingAgents.find((agent) => agent.mode === "medium")?.apiKeyConfigured).toBe(true);
     expect(raw.apiKeySource.value).toBe("secret-value");
+    expect(repo.getCodingAgentConfig(project.id, "large").apiKeySource.value).toBe("secret-value");
+    expect(run.codingMode).toBe("medium");
     expect(history[0].status).toBe("coded");
-    expect(repo.getNode("module-web").agentStatus).toBe("coded");
+	    expect(repo.getNode("module-web").agentStatus).toBe("coded");
+	  });
+
+	  it("plans layered coding workflows, resolves execution metadata, and stores test artifacts", () => {
+	    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-workflow-"));
+	    const project = repo.createProject({ id: "workflow-project", name: "Workflow Project", rootPath });
+	    repo.createNode({ id: "framework-root", projectId: project.id, kind: "framework", name: "Root", agentStatus: "implemented" });
+	    repo.createNode({
+	      id: "module-root",
+	      projectId: project.id,
+	      kind: "module",
+	      name: "Module",
+	      parentId: "framework-root",
+	      sourcePath: "src/module.ts",
+	      agentStatus: "planning",
+	      execution: { testCommand: "pnpm test", testScriptDirectory: "tests/generated" }
+	    });
+	    repo.createNode({
+	      id: "function-leaf",
+	      projectId: project.id,
+	      kind: "function",
+	      name: "leaf",
+	      parentId: "module-root",
+	      sourcePath: "src/module.ts",
+	      agentStatus: "planning",
+	      execution: { virtualEnvironment: ".venv" }
+	    });
+	    repo.createNode({
+	      id: "process-leaf",
+	      projectId: project.id,
+	      kind: "process",
+	      name: "Validate",
+	      attachedToId: "function-leaf",
+	      sourcePath: "src/module.ts",
+	      agentStatus: "planning"
+	    });
+	    repo.createNode({
+	      id: "function-parent",
+	      projectId: project.id,
+	      kind: "function",
+	      name: "parent",
+	      parentId: "module-root",
+	      sourcePath: "src/module.ts",
+	      agentStatus: "planning"
+	    });
+	    repo.createNode({
+	      id: "function-child",
+	      projectId: project.id,
+	      kind: "function",
+	      name: "child",
+	      parentId: "function-parent",
+	      sourcePath: "src/module.ts",
+	      agentStatus: "planning"
+	    });
+
+	    const preview = repo.previewCodingWorkflow(project.id, "module-root");
+	    const processItem = preview.items.find((item) => item.nodeId === "process-leaf");
+	    const leafItem = preview.items.find((item) => item.nodeId === "function-leaf");
+	    const parentItem = preview.items.find((item) => item.nodeId === "function-parent");
+	    const childItem = preview.items.find((item) => item.nodeId === "function-child");
+	    const moduleItem = preview.items.find((item) => item.nodeId === "module-root");
+	    const resolved = repo.resolveExecutionMetadata("process-leaf");
+	    const run = repo.createAgentRun({ projectId: project.id, agentKind: "coding", targetNodeId: "process-leaf", status: "succeeded" });
+	    const proposalId = repo.storeCodeProposal({
+	      projectId: project.id,
+	      agentRunId: run.id,
+	      targetNodeId: "process-leaf",
+	      diff: "diff --git a/src/module.ts b/src/module.ts",
+	      artifactManifest: {
+	        testScriptDirectory: "ignored-by-storage",
+	        scripts: [{ relativePath: "leaf.test.ts", content: "test('leaf', () => {})" }]
+	      }
+	    });
+	    const proposal = repo.getLatestCodeProposalForRun(run.id);
+	    const workflow = repo.createCodingWorkflow(project.id, "module-root", [], "running");
+	    const layerZeroItems = workflow.items.filter((item) => item.layerIndex === 0);
+	    for (const item of layerZeroItems) {
+	      repo.updateCodingWorkflowItem({
+	        itemId: item.id,
+	        status: item.nodeId === "process-leaf" ? "proposed" : "skipped",
+	        proposalId: item.nodeId === "process-leaf" ? proposalId : null
+	      });
+	    }
+	    repo.applyCodingWorkflowLayer(project.id, workflow.id, 0);
+
+	    expect(processItem?.layerIndex).toBe(0);
+	    expect(processItem?.recommendedMode).toBe("small");
+	    expect(leafItem?.layerIndex).toBeGreaterThan(processItem?.layerIndex ?? -1);
+	    expect(childItem?.recommendedMode).toBe("small");
+	    expect(parentItem?.recommendedMode).toBe("medium");
+	    expect(moduleItem?.layerIndex).toBeGreaterThan(parentItem?.layerIndex ?? -1);
+	    expect(resolved.virtualEnvironment).toBe(".venv");
+	    expect(resolved.testCommand).toBe("pnpm test");
+	    expect(proposal?.id).toBe(proposalId);
+	    expect(proposal?.artifactManifest?.testScriptDirectory).toBe(path.join(".graphcode", "artifacts", "code-proposals", proposalId));
+	    expect(fs.existsSync(path.join(rootPath, ".graphcode", "artifacts", "code-proposals", proposalId, "leaf.test.ts"))).toBe(true);
+	    expect(fs.existsSync(path.join(rootPath, "tests", "generated", "leaf.test.ts"))).toBe(true);
+	  });
+
+	  it("applies planning graph patches transactionally and conflicts overlapping stale edits", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const first = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      prompt: "Retitle web module",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Update web module",
+        operations: [{ entityType: "node", entityId: "module-web", action: "update", fields: { summary: "First planning edit." } }]
+      }
+    });
+    const second = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      prompt: "Retitle same web module",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Update web module again",
+        operations: [{ entityType: "node", entityId: "module-web", action: "update", fields: { summary: "Second planning edit." } }]
+      }
+    });
+
+    expect(first.baseGraphRevision).toBe(second.baseGraphRevision);
+    const applied = repo.applyAgentGraphPatch(project.id, first.id);
+    const conflicted = repo.applyAgentGraphPatch(project.id, second.id);
+
+    expect(applied.status).toBe("succeeded");
+    expect(applied.appliedGraphRevision).toBeGreaterThan(first.baseGraphRevision);
+    expect(repo.getNode("module-web").summary).toBe("First planning edit.");
+    expect(conflicted.status).toBe("conflicted");
+    expect(conflicted.conflictReason).toContain("changed after this ticket started");
+    expect(repo.getNode("module-web").summary).toBe("First planning edit.");
+  });
+
+  it("allows stale planning graph patches when touched entities do not overlap", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const webRun = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      prompt: "Update web",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Update web",
+        operations: [{ entityType: "node", entityId: "module-web", action: "update", fields: { summary: "Web ticket edit." } }]
+      }
+    });
+    const serverRun = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      prompt: "Update server",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Update server",
+        operations: [{ entityType: "node", entityId: "module-local-server", action: "update", fields: { summary: "Server ticket edit." } }]
+      }
+    });
+
+    const appliedWeb = repo.applyAgentGraphPatch(project.id, webRun.id);
+    const appliedServer = repo.applyAgentGraphPatch(project.id, serverRun.id);
+
+    expect(appliedWeb.appliedGraphRevision).not.toBeNull();
+    expect(appliedServer.status).toBe("succeeded");
+    expect(appliedServer.appliedGraphRevision).toBeGreaterThan(appliedWeb.appliedGraphRevision ?? 0);
+    expect(repo.getNode("module-web").summary).toBe("Web ticket edit.");
+    expect(repo.getNode("module-local-server").summary).toBe("Server ticket edit.");
+  });
+
+  it("migrates legacy coding settings into all coding profiles and backfills run modes", () => {
+    const dbPath = path.join(os.tmpdir(), `graphcode-legacy-${crypto.randomUUID()}.sqlite`);
+    const legacyDb = openDatabase(dbPath);
+    legacyDb.exec(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO projects (id, name, root_path) VALUES ('legacy', 'Legacy', '/tmp/legacy');
+      CREATE TABLE agent_settings (
+        project_id TEXT NOT NULL,
+        agent_kind TEXT NOT NULL,
+        provider TEXT NOT NULL DEFAULT 'fake',
+        model TEXT NOT NULL DEFAULT '',
+        parallel_limit INTEGER NOT NULL DEFAULT 4,
+        api_key_source_type TEXT NOT NULL DEFAULT 'env',
+        api_key_source_value TEXT NOT NULL DEFAULT '',
+        system_prompt_source_type TEXT NOT NULL DEFAULT 'manual',
+        system_prompt_source_value TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (project_id, agent_kind)
+      );
+      INSERT INTO agent_settings (
+        project_id, agent_kind, provider, model, parallel_limit,
+        api_key_source_type, api_key_source_value,
+        system_prompt_source_type, system_prompt_source_value
+      )
+      VALUES ('legacy', 'coding', 'openai', 'legacy-coder', 6, 'manual', 'legacy-key', 'manual', 'legacy prompt');
+      CREATE TABLE agent_runs (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL,
+        agent_kind TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued',
+        target_node_id TEXT,
+        prompt TEXT NOT NULL DEFAULT '',
+        response TEXT NOT NULL DEFAULT '',
+        diff TEXT NOT NULL DEFAULT '',
+        graph_patch_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO agent_runs (id, project_id, agent_kind, status, prompt)
+      VALUES ('run-legacy', 'legacy', 'coding', 'succeeded', 'Patch');
+    `);
+    migrate(legacyDb);
+    const legacyRepo = new GraphRepository(legacyDb);
+
+    const settings = legacyRepo.getWorkspaceSettings("legacy");
+    expect(settings.codingAgents.map((agent) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
+    expect(legacyRepo.getCodingAgentConfig("legacy", "small").model).toBe("legacy-coder");
+    expect(legacyRepo.getCodingAgentConfig("legacy", "large").apiKeySource.value).toBe("legacy-key");
+    expect(legacyRepo.getAgentRun("run-legacy").codingMode).toBe("medium");
+
+    legacyDb.close();
+  });
+
+  it("demotes semantic edits while preserving status for layout, style, and tag edits", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+
+    repo.updateNodeLayout("module-web", {
+      scopeNodeId: "framework-graphcode-self",
+      position: { x: 100, y: 120 },
+      size: { width: 260, height: 140 }
+    });
+    repo.setNodeTags("module-web", { tags: [{ name: "frontend" }] });
+    repo.updateNodeTypeStyle(project.id, "module", { color: "#2563eb" });
+    expect(repo.getNode("module-web").agentStatus).toBe("implemented");
+
+    repo.updateNode("module-web", { summary: "Updated semantic module summary." });
+    expect(repo.getNode("module-web").agentStatus).toBe("planning");
+
+    repo.updateEdge("flow-web-input-process", { color: "#2563eb" });
+    expect(repo.getEdge("flow-web-input-process").agentStatus).toBe("implemented");
+
+    repo.updateEdge("flow-web-input-process", { label: "semantic relabel" });
+    expect(repo.getEdge("flow-web-input-process").agentStatus).toBe("planning");
   });
 
   it("seeds a valid self-repo hierarchy and keeps attachments out of the hierarchy tree", () => {
@@ -582,6 +838,24 @@ describe("SQLite graph repository", () => {
     const memberNodes = canvas.nodes.filter((node) => boundary?.memberNodeIds.includes(node.id));
     expect(memberNodes.length).toBeGreaterThan(0);
     expect(memberNodes.every((node) => nodeCenterInside(node, boundary!))).toBe(true);
+  });
+
+  it("passes measured edge labels into auto-layout edges", async () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const canvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: "module-web",
+      includeAttachments: true
+    });
+    const includedIds = new Set(canvas.nodes.map((node) => node.id));
+    const elkEdges = buildElkEdgesForLayout(canvas.nodes, canvas.edges, includedIds);
+    const flowEdge = elkEdges.find((edge) => edge.id === "flow-web-input-process");
+
+    expect(flowEdge?.labels?.[0]).toMatchObject({
+      text: "selection"
+    });
+    expect(flowEdge?.labels?.[0]?.width).toBeGreaterThan(58);
+    expect(flowEdge?.labels?.[0]?.height).toBeGreaterThan(0);
   });
 
   it("auto-layout reserves boundary header space before member blocks", async () => {

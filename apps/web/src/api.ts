@@ -3,7 +3,11 @@ import type {
   BoundaryMutation,
   BoundaryUpdate,
   CanvasGraph,
+  CodingWorkflow,
+  CodingWorkflowApplyLayerRequest,
   CodingAgentRequest,
+  CodingWorkflowPreviewRequest,
+  CodingWorkflowStartRequest,
   CreateCustomBlockType,
   CustomBlockType,
   CustomBlockTypeUpdate,
@@ -122,6 +126,13 @@ export async function listAgentRuns(projectId: string): Promise<AgentRun[]> {
   return request<AgentRun[]>(`/api/projects/${projectId}/agent-runs`);
 }
 
+export async function applyAgentGraphPatch(projectId: string, runId: string): Promise<AgentRun> {
+  return request<AgentRun>(`/api/projects/${projectId}/agent-runs/${runId}/apply-graph-patch`, {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
 export async function getGitStatus(projectId: string): Promise<{ status: string }> {
   return request<{ status: string }>(`/api/projects/${projectId}/git-status`);
 }
@@ -156,6 +167,31 @@ export async function runPlanningAgent(input: PlanningChatRequest): Promise<Agen
 
 export async function runCodingAgent(input: CodingAgentRequest): Promise<AgentRun> {
   return request<AgentRun>("/api/agents/coding", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function previewCodingWorkflow(input: CodingWorkflowPreviewRequest): Promise<CodingWorkflow> {
+  return request<CodingWorkflow>("/api/coding-workflows/preview", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function startCodingWorkflow(input: CodingWorkflowStartRequest): Promise<CodingWorkflow> {
+  return request<CodingWorkflow>("/api/coding-workflows/start", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function getCodingWorkflow(projectId: string, workflowId: string): Promise<CodingWorkflow> {
+  return request<CodingWorkflow>(`/api/projects/${projectId}/coding-workflows/${workflowId}`);
+}
+
+export async function applyCodingWorkflowLayer(input: CodingWorkflowApplyLayerRequest): Promise<CodingWorkflow> {
+  return request<CodingWorkflow>("/api/coding-workflows/apply-layer", {
     method: "POST",
     body: JSON.stringify(input)
   });

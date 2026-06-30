@@ -65,8 +65,11 @@ export const AGENT_STATUSES = ["none", "planning", "coded", "reviewed", "impleme
 export const GIT_WORKTREE_STATUSES = ["untracked", "pending", "staged", "committed"] as const;
 export const GIT_CHANGE_STATUSES = ["new", "modified", "deleted"] as const;
 export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const;
-export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed"] as const;
+export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "conflicted"] as const;
 export const AGENT_PROVIDERS = ["fake", "claudecode", "openai", "gemini", "openrouter"] as const;
+export const CODING_AGENT_MODES = ["small", "medium", "large"] as const;
+export const CODING_WORKFLOW_STATUSES = ["preview", "running", "blocked", "succeeded", "failed"] as const;
+export const CODING_WORKFLOW_ITEM_STATUSES = ["pending", "running", "proposed", "applied", "skipped", "failed", "blocked"] as const;
 export const SETTINGS_THEME_MODES = ["light", "dark", "system"] as const;
 export const SECRET_SOURCE_TYPES = ["manual", "file", "env"] as const;
 export const PROMPT_SOURCE_TYPES = ["manual", "file"] as const;
@@ -91,6 +94,9 @@ export const gitChangeStatusSchema = z.enum(GIT_CHANGE_STATUSES);
 export const agentKindSchema = z.enum(AGENT_KINDS);
 export const agentRunStatusSchema = z.enum(AGENT_RUN_STATUSES);
 export const agentProviderSchema = z.enum(AGENT_PROVIDERS);
+export const codingAgentModeSchema = z.enum(CODING_AGENT_MODES);
+export const codingWorkflowStatusSchema = z.enum(CODING_WORKFLOW_STATUSES);
+export const codingWorkflowItemStatusSchema = z.enum(CODING_WORKFLOW_ITEM_STATUSES);
 export const settingsThemeModeSchema = z.enum(SETTINGS_THEME_MODES);
 export const secretSourceTypeSchema = z.enum(SECRET_SOURCE_TYPES);
 export const promptSourceTypeSchema = z.enum(PROMPT_SOURCE_TYPES);
@@ -115,6 +121,9 @@ export type GitChangeStatus = z.infer<typeof gitChangeStatusSchema>;
 export type AgentKind = z.infer<typeof agentKindSchema>;
 export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
 export type AgentProvider = z.infer<typeof agentProviderSchema>;
+export type CodingAgentMode = z.infer<typeof codingAgentModeSchema>;
+export type CodingWorkflowStatus = z.infer<typeof codingWorkflowStatusSchema>;
+export type CodingWorkflowItemStatus = z.infer<typeof codingWorkflowItemStatusSchema>;
 export type SettingsThemeMode = z.infer<typeof settingsThemeModeSchema>;
 export type SecretSourceType = z.infer<typeof secretSourceTypeSchema>;
 export type PromptSourceType = z.infer<typeof promptSourceTypeSchema>;
@@ -143,6 +152,14 @@ export const codeMetadataSchema = z.object({
   startLine: z.number().int().positive().nullable(),
   endLine: z.number().int().positive().nullable(),
   language: languageTypeSchema
+});
+
+export const blockExecutionMetadataSchema = z.object({
+  testScriptDirectory: z.string().nullable().default(null),
+  virtualEnvironment: z.string().nullable().default(null),
+  workingDirectory: z.string().nullable().default(null),
+  setupCommand: z.string().nullable().default(null),
+  testCommand: z.string().nullable().default(null)
 });
 
 export const styleColorSchema = z.string().min(1);
@@ -209,6 +226,7 @@ export const graphNodeSchema = z.object({
   attachedToId: z.string().nullable(),
   customTypeId: z.string().nullable(),
   source: sourceRangeSchema,
+  execution: blockExecutionMetadataSchema.default({}),
   position: positionSchema,
   size: sizeSchema,
   childCount: z.number().int().nonnegative(),
@@ -367,6 +385,7 @@ export const nodeMutationSchema = z.object({
   parentId: z.string().nullable().optional(),
   attachedToId: z.string().nullable().optional(),
   customTypeId: z.string().nullable().optional(),
+  execution: blockExecutionMetadataSchema.partial().optional(),
   position: positionSchema.optional(),
   size: sizeSchema.optional()
 });
@@ -409,8 +428,7 @@ export const promptSourceSchema = z.object({
   value: z.string().optional()
 });
 
-export const agentConfigSchema = z.object({
-  agentKind: agentKindSchema,
+const agentConfigBaseSchema = z.object({
   provider: agentProviderSchema,
   model: z.string(),
   parallelLimit: z.number().int().min(1).max(64),
@@ -418,7 +436,20 @@ export const agentConfigSchema = z.object({
   systemPromptSource: promptSourceSchema
 });
 
+export const agentConfigSchema = agentConfigBaseSchema.extend({
+  agentKind: agentKindSchema
+});
+
 export const agentConfigViewSchema = agentConfigSchema.extend({
+  apiKeyConfigured: z.boolean(),
+  systemPromptConfigured: z.boolean()
+});
+
+export const codingAgentConfigSchema = agentConfigBaseSchema.extend({
+  mode: codingAgentModeSchema
+});
+
+export const codingAgentConfigViewSchema = codingAgentConfigSchema.extend({
   apiKeyConfigured: z.boolean(),
   systemPromptConfigured: z.boolean()
 });
@@ -454,14 +485,16 @@ export const workspaceSettingsSchema = z.object({
   general: generalSettingsSchema,
   github: githubIntegrationSettingsSchema,
   automation: agentAutomationSettingsSchema,
-  agents: z.array(agentConfigViewSchema)
+  agents: z.array(agentConfigViewSchema),
+  codingAgents: z.array(codingAgentConfigViewSchema).default([])
 });
 
 export const workspaceSettingsMutationSchema = z.object({
   general: generalSettingsSchema,
   github: githubIntegrationSettingsMutationSchema,
   automation: agentAutomationSettingsSchema,
-  agents: z.array(agentConfigSchema)
+  agents: z.array(agentConfigSchema),
+  codingAgents: z.array(codingAgentConfigSchema).default([])
 });
 
 export const githubDeviceStartRequestSchema = z.object({
@@ -499,13 +532,84 @@ export const settingsValidationResultSchema = z.object({
 export const planningChatRequestSchema = z.object({
   projectId: z.string().min(1),
   prompt: z.string().min(1),
-  scopeNodeId: z.string().nullable().optional()
+  scopeNodeId: z.string().nullable().optional(),
+  background: z.boolean().optional().default(false)
 });
 
 export const codingAgentRequestSchema = z.object({
   projectId: z.string().min(1),
   nodeId: z.string().min(1),
+  mode: codingAgentModeSchema.default("medium"),
+  recommendedModeReason: z.string().optional(),
   prompt: z.string().optional()
+});
+
+export const codeProposalTestScriptSchema = z.object({
+  relativePath: z.string().min(1),
+  content: z.string(),
+  command: z.string().optional(),
+  description: z.string().optional()
+});
+
+export const codeProposalArtifactManifestSchema = z.object({
+  testScriptDirectory: z.string().nullable().default(null),
+  scripts: z.array(codeProposalTestScriptSchema).default([]),
+  notes: z.string().optional()
+});
+
+export const codingWorkflowItemSchema = z.object({
+  id: z.string(),
+  workflowId: z.string(),
+  projectId: z.string(),
+  nodeId: z.string(),
+  nodeName: z.string(),
+  nodeKind: graphNodeKindSchema,
+  layerIndex: z.number().int().nonnegative(),
+  recommendedMode: codingAgentModeSchema,
+  selectedMode: codingAgentModeSchema,
+  modeReason: z.string(),
+  status: codingWorkflowItemStatusSchema,
+  conflictGroup: z.string(),
+  agentRunId: z.string().nullable(),
+  proposalId: z.string().nullable(),
+  appliedAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+
+export const codingWorkflowSchema = z.object({
+  id: z.string(),
+  projectId: z.string(),
+  scopeNodeId: z.string(),
+  scopeName: z.string(),
+  status: codingWorkflowStatusSchema,
+  currentLayer: z.number().int().nonnegative(),
+  summary: z.string(),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+  items: z.array(codingWorkflowItemSchema).default([])
+});
+
+export const codingWorkflowModeOverrideSchema = z.object({
+  nodeId: z.string().min(1),
+  mode: codingAgentModeSchema
+});
+
+export const codingWorkflowPreviewRequestSchema = z.object({
+  projectId: z.string().min(1),
+  scopeNodeId: z.string().min(1)
+});
+
+export const codingWorkflowStartRequestSchema = z.object({
+  projectId: z.string().min(1),
+  scopeNodeId: z.string().min(1),
+  modeOverrides: z.array(codingWorkflowModeOverrideSchema).optional().default([])
+});
+
+export const codingWorkflowApplyLayerRequestSchema = z.object({
+  projectId: z.string().min(1),
+  workflowId: z.string().min(1),
+  layerIndex: z.number().int().nonnegative()
 });
 
 export const reviewAgentRequestSchema = z.object({
@@ -547,7 +651,11 @@ export const agentRunSchema = z.object({
   id: z.string(),
   projectId: z.string(),
   agentKind: agentKindSchema,
+  codingMode: codingAgentModeSchema.nullable().default(null),
   status: agentRunStatusSchema,
+  baseGraphRevision: z.number().int().nonnegative().default(0),
+  appliedGraphRevision: z.number().int().nonnegative().nullable().default(null),
+  conflictReason: z.string().nullable().default(null),
   targetNodeId: z.string().nullable(),
   prompt: z.string(),
   response: z.string(),
@@ -616,6 +724,7 @@ export type WorkspaceInitialization = z.infer<typeof workspaceInitializationSche
 export type BlankWorkspaceInitialization = z.infer<typeof blankWorkspaceInitializationSchema>;
 export type OpenWorkspaceRequest = z.infer<typeof openWorkspaceSchema>;
 export type GitStatusInfo = z.infer<typeof gitStatusInfoSchema>;
+export type BlockExecutionMetadata = z.infer<typeof blockExecutionMetadataSchema>;
 export type GraphNode = z.infer<typeof graphNodeSchema>;
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;
 export type GraphBoundary = z.infer<typeof graphBoundarySchema>;
@@ -648,18 +757,28 @@ export type SecretSource = z.infer<typeof secretSourceSchema>;
 export type PromptSource = z.infer<typeof promptSourceSchema>;
 export type AgentConfig = z.infer<typeof agentConfigSchema>;
 export type AgentConfigView = z.infer<typeof agentConfigViewSchema>;
+export type CodingAgentConfig = z.infer<typeof codingAgentConfigSchema>;
+export type CodingAgentConfigView = z.infer<typeof codingAgentConfigViewSchema>;
 export type GeneralSettings = z.infer<typeof generalSettingsSchema>;
 export type GithubAuthState = z.infer<typeof githubAuthStateSchema>;
 export type GithubIntegrationSettingsMutation = z.infer<typeof githubIntegrationSettingsMutationSchema>;
 export type GithubIntegrationSettings = z.infer<typeof githubIntegrationSettingsSchema>;
 export type AgentAutomationSettings = z.infer<typeof agentAutomationSettingsSchema>;
 export type WorkspaceSettings = z.infer<typeof workspaceSettingsSchema>;
-export type WorkspaceSettingsMutation = z.infer<typeof workspaceSettingsMutationSchema>;
+export type WorkspaceSettingsMutation = z.input<typeof workspaceSettingsMutationSchema>;
 export type SettingsValidationResult = z.infer<typeof settingsValidationResultSchema>;
-export type PlanningChatRequest = z.infer<typeof planningChatRequestSchema>;
-export type CodingAgentRequest = z.infer<typeof codingAgentRequestSchema>;
-export type ReviewAgentRequest = z.infer<typeof reviewAgentRequestSchema>;
-export type ScanningAgentRequest = z.infer<typeof scanningAgentRequestSchema>;
+export type PlanningChatRequest = z.input<typeof planningChatRequestSchema>;
+export type CodingAgentRequest = z.input<typeof codingAgentRequestSchema>;
+export type CodeProposalTestScript = z.infer<typeof codeProposalTestScriptSchema>;
+export type CodeProposalArtifactManifest = z.infer<typeof codeProposalArtifactManifestSchema>;
+export type CodingWorkflowItem = z.infer<typeof codingWorkflowItemSchema>;
+export type CodingWorkflow = z.infer<typeof codingWorkflowSchema>;
+export type CodingWorkflowModeOverride = z.infer<typeof codingWorkflowModeOverrideSchema>;
+export type CodingWorkflowPreviewRequest = z.input<typeof codingWorkflowPreviewRequestSchema>;
+export type CodingWorkflowStartRequest = z.input<typeof codingWorkflowStartRequestSchema>;
+export type CodingWorkflowApplyLayerRequest = z.input<typeof codingWorkflowApplyLayerRequestSchema>;
+export type ReviewAgentRequest = z.input<typeof reviewAgentRequestSchema>;
+export type ScanningAgentRequest = z.input<typeof scanningAgentRequestSchema>;
 export type GraphPatchOperation = z.infer<typeof graphPatchOperationSchema>;
 export type GraphPatch = z.infer<typeof graphPatchSchema>;
 export type AgentRun = z.infer<typeof agentRunSchema>;

@@ -1,18 +1,21 @@
-import type {
-  AgentConfig,
-  AgentKind,
-  AgentProvider,
-  GithubDevicePollResponse,
-  GithubDeviceStartResponse,
-  Project,
-  SettingsValidationResult,
-  WorkspaceSettings,
-  WorkspaceSettingsMutation
+import {
+  CODING_AGENT_MODES,
+  type AgentConfig,
+  type AgentKind,
+  type AgentProvider,
+  type CodingAgentConfig,
+  type CodingAgentMode,
+  type GithubDevicePollResponse,
+  type GithubDeviceStartResponse,
+  type Project,
+  type SettingsValidationResult,
+  type WorkspaceSettings,
+  type WorkspaceSettingsMutation
 } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
 import { Bot, CheckCircle2, ExternalLink, Github, Monitor, Save, Unplug, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { agentKindLabel, providerLabel } from "../displayLabels";
+import { agentKindLabel, codingAgentModeLabel, providerLabel } from "../displayLabels";
 
 type SettingsPageProps = {
   project: Project;
@@ -26,7 +29,7 @@ type SettingsPageProps = {
   onDisconnectGithub: () => Promise<WorkspaceSettings>;
 };
 
-const agentKinds: AgentKind[] = ["planning", "coding", "review", "scanning"];
+const agentKinds: AgentKind[] = ["planning", "review", "scanning"];
 const providers: AgentProvider[] = ["fake", "claudecode", "openai", "gemini", "openrouter"];
 
 export function SettingsPage({
@@ -48,6 +51,8 @@ export function SettingsPage({
   const [githubMessage, setGithubMessage] = useState("");
   const errors = validation?.fieldErrors ?? {};
   const agentByKind = useMemo(() => new Map(draft.agents.map((agent) => [agent.agentKind, agent])), [draft.agents]);
+  const codingAgentDrafts = useMemo(() => draft.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent), [draft.codingAgents]);
+  const codingAgentByMode = useMemo(() => new Map(codingAgentDrafts.map((agent) => [agent.mode, agent])), [codingAgentDrafts]);
 
   useEffect(() => {
     setDraft(toMutation(settings));
@@ -60,6 +65,13 @@ export function SettingsPage({
     }));
   };
 
+  const updateCodingAgent = (mode: CodingAgentMode, patch: Partial<CodingAgentConfig>) => {
+    setDraft((current) => ({
+      ...current,
+      codingAgents: (current.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
+    }));
+  };
+
   const setApiKeySourceType = (agent: AgentConfig, type: AgentConfig["apiKeySource"]["type"]) => {
     updateAgent(agent.agentKind, {
       apiKeySource: { type, value: "" }
@@ -68,6 +80,18 @@ export function SettingsPage({
 
   const setSystemPromptSourceType = (agent: AgentConfig, type: AgentConfig["systemPromptSource"]["type"]) => {
     updateAgent(agent.agentKind, {
+      systemPromptSource: { type, value: type === "manual" ? agent.systemPromptSource.value ?? "" : "" }
+    });
+  };
+
+  const setCodingApiKeySourceType = (agent: CodingAgentConfig, type: CodingAgentConfig["apiKeySource"]["type"]) => {
+    updateCodingAgent(agent.mode, {
+      apiKeySource: { type, value: "" }
+    });
+  };
+
+  const setCodingSystemPromptSourceType = (agent: CodingAgentConfig, type: CodingAgentConfig["systemPromptSource"]["type"]) => {
+    updateCodingAgent(agent.mode, {
       systemPromptSource: { type, value: type === "manual" ? agent.systemPromptSource.value ?? "" : "" }
     });
   };
@@ -100,6 +124,36 @@ export function SettingsPage({
       systemPromptSource: { type: "file", value }
     });
     setReadSuccessByField((current) => ({ ...current, [`${agent.agentKind}.prompt`]: "System prompt read successfully" }));
+  };
+
+  const handleCodingApiKeyFile = async (agent: CodingAgentConfig, file: File | null) => {
+    if (!file) {
+      return;
+    }
+    const value = parseSecretFile(await readFileText(file));
+    if (!value) {
+      setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.apiKey`]: "" }));
+      return;
+    }
+    updateCodingAgent(agent.mode, {
+      apiKeySource: { type: "file", value }
+    });
+    setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.apiKey`]: "API key read successfully" }));
+  };
+
+  const handleCodingPromptFile = async (agent: CodingAgentConfig, file: File | null) => {
+    if (!file) {
+      return;
+    }
+    const value = (await readFileText(file)).trim();
+    if (!value) {
+      setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.prompt`]: "" }));
+      return;
+    }
+    updateCodingAgent(agent.mode, {
+      systemPromptSource: { type: "file", value }
+    });
+    setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.prompt`]: "System prompt read successfully" }));
   };
 
   const handleStartGithub = async () => {
@@ -300,6 +354,92 @@ export function SettingsPage({
                     </div>
                   );
                 })}
+                {CODING_AGENT_MODES.map((mode) => {
+                  const agent = codingAgentByMode.get(mode)!;
+                  const index = codingAgentDrafts.findIndex((item) => item.mode === mode);
+                  return (
+                    <div className="agent-settings-card" key={`coding-${mode}`}>
+                      <h4>Coding {codingAgentModeLabel(mode)}</h4>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>Provider</span>
+                          <select value={agent.provider} onChange={(event) => updateCodingAgent(mode, { provider: event.target.value as AgentProvider })}>
+                            {providers.map((provider) => (
+                              <option key={provider} value={provider}>
+                                {providerLabel(provider)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="form-field">
+                          <span>Model</span>
+                          <input value={agent.model} onChange={(event) => updateCodingAgent(mode, { model: event.target.value })} />
+                          <FieldError value={errors[`codingAgents.${index}.model`]} />
+                        </label>
+                      </div>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>API Key Source</span>
+                          <select value={agent.apiKeySource.type} onChange={(event) => setCodingApiKeySourceType(agent, event.target.value as CodingAgentConfig["apiKeySource"]["type"])}>
+                            <option value="manual">Manual</option>
+                            <option value="file">Read File</option>
+                            <option value="env">Environment Variable</option>
+                          </select>
+                        </label>
+                        <div className="form-field">
+                          <span>{apiKeyEntryLabel(agent.apiKeySource.type)}</span>
+                          <ApiKeyEntry
+                            agent={agent}
+                            configured={(settings.codingAgents ?? []).find((item) => item.mode === mode)?.apiKeyConfigured ?? false}
+                            onChange={(value) => updateCodingAgent(mode, { apiKeySource: { ...agent.apiKeySource, value } })}
+                            onFile={(file) => void handleCodingApiKeyFile(agent, file)}
+                          />
+                          <ReadSuccess value={readSuccessByField[`coding.${mode}.apiKey`]} />
+                          <FieldError value={errors[`codingAgents.${index}.apiKeySource.value`]} />
+                        </div>
+                      </div>
+                      <label className="form-field">
+                        <span>Parallel Calls</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={64}
+                          value={agent.parallelLimit}
+                          onChange={(event) => updateCodingAgent(mode, { parallelLimit: Number.parseInt(event.target.value, 10) || 1 })}
+                        />
+                      </label>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>System Prompt Source</span>
+                          <select value={agent.systemPromptSource.type} onChange={(event) => setCodingSystemPromptSourceType(agent, event.target.value as CodingAgentConfig["systemPromptSource"]["type"])}>
+                            <option value="manual">Manual</option>
+                            <option value="file">Read File</option>
+                          </select>
+                        </label>
+                        <div className="form-field">
+                          <span>{agent.systemPromptSource.type === "file" ? "System Prompt File" : "System Prompt"}</span>
+                          {agent.systemPromptSource.type === "file" ? (
+                            <>
+                              <FilePicker label="Select Prompt File" accept=".txt,.md,.prompt,*/*" onFile={(file) => void handleCodingPromptFile(agent, file)} />
+                              <ReadSuccess value={readSuccessByField[`coding.${mode}.prompt`]} />
+                            </>
+                          ) : (
+                            <textarea
+                              rows={3}
+                              value={agent.systemPromptSource.value ?? ""}
+                              onChange={(event) =>
+                                updateCodingAgent(mode, {
+                                  systemPromptSource: { ...agent.systemPromptSource, value: event.target.value }
+                                })
+                              }
+                            />
+                          )}
+                          <FieldError value={errors[`codingAgents.${index}.systemPromptSource.value`]} />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </section>
             ) : null}
 
@@ -392,7 +532,7 @@ function ApiKeyEntry({
   onChange,
   onFile
 }: {
-  agent: AgentConfig;
+  agent: Pick<AgentConfig, "apiKeySource"> | Pick<CodingAgentConfig, "apiKeySource">;
   configured: boolean;
   onChange: (value: string) => void;
   onFile: (file: File | null) => void;
@@ -462,7 +602,20 @@ function apiKeyEntryLabel(type: AgentConfig["apiKeySource"]["type"]): string {
   return "API Key Entry";
 }
 
+function defaultCodingAgent(mode: CodingAgentMode): CodingAgentConfig {
+  return {
+    mode,
+    provider: "fake",
+    model: "graphcode-fake-v1",
+    parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
+    apiKeySource: { type: "env", value: "" },
+    systemPromptSource: { type: "manual", value: `Use ${mode} scoped coding context.` }
+  };
+}
+
 function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
+  const settingsCodingAgents = settings.codingAgents ?? [];
+  const codingAgents = settingsCodingAgents.length > 0 ? settingsCodingAgents : CODING_AGENT_MODES.map(defaultCodingAgent);
   return {
     general: settings.general,
     github: {
@@ -473,6 +626,14 @@ function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
     automation: settings.automation,
     agents: settings.agents.map((agent) => ({
       agentKind: agent.agentKind,
+      provider: agent.provider,
+      model: agent.model,
+      parallelLimit: agent.parallelLimit,
+      apiKeySource: { ...agent.apiKeySource, value: "" },
+      systemPromptSource: agent.systemPromptSource
+    })),
+    codingAgents: codingAgents.map((agent) => ({
+      mode: agent.mode,
       provider: agent.provider,
       model: agent.model,
       parallelLimit: agent.parallelLimit,

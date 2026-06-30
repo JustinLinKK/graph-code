@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentConfig, GraphEdge, GraphNode, NodeDetail } from "@graphcode/graph-model";
+import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, NodeDetail } from "@graphcode/graph-model";
 import { runCodingAgent, runPlanningAgent, runReviewAgent, runScanningAgent, type GraphCodeToolbox } from "./index";
 
 const baseConfig: AgentConfig = {
@@ -9,6 +12,14 @@ const baseConfig: AgentConfig = {
   parallelLimit: 2,
   apiKeySource: { type: "env", value: "" },
   systemPromptSource: { type: "manual", value: "Test prompt" }
+};
+
+const execution = {
+  testScriptDirectory: "tests/generated",
+  virtualEnvironment: ".venv",
+  workingDirectory: ".",
+  setupCommand: "pnpm install",
+  testCommand: "pnpm test"
 };
 
 const node: GraphNode = {
@@ -26,9 +37,10 @@ const node: GraphNode = {
   },
   parentId: null,
   attachedToId: null,
-  customTypeId: null,
-  source: { path: "src/module.ts", startLine: 1, endLine: 4 },
-  position: { x: 0, y: 0 },
+	  customTypeId: null,
+	  source: { path: "src/module.ts", startLine: 1, endLine: 4 },
+	  execution,
+	  position: { x: 0, y: 0 },
   size: { width: 224, height: 120 },
   childCount: 0,
   hasChildren: false,
@@ -55,11 +67,41 @@ const detail: NodeDetail = {
   reusedIn: []
 };
 
+function canvas(nodes: GraphNode[] = [node], edges: GraphEdge[] = []): CanvasGraph {
+  return {
+    project: {
+      id: "project",
+      name: "Project",
+      rootPath: "/tmp/project",
+      description: "",
+      scanningInstructions: "",
+      createdAt: "now",
+      updatedAt: "now"
+    },
+    rootNodeId: nodes[0]?.id ?? null,
+    scopeNodeId: nodes[0]?.id ?? null,
+    scopeLabel: nodes[0]?.name ?? "Project",
+    nodes,
+    edges,
+    boundaries: [],
+    dependencies: [],
+    io: [],
+    processes: [],
+    formats: [],
+    basicDetails: [],
+    customTypes: [],
+    nodeTypeStyles: [],
+    reuses: []
+  };
+}
+
 function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
   return {
     readGraph: vi.fn(async () => ({ nodes: [node], edges: [] as GraphEdge[] })),
-    getNodeDetail: vi.fn(async () => detail),
-    setStatuses: vi.fn(async () => {}),
+	    getNodeDetail: vi.fn(async () => detail),
+	    getCanvasGraph: vi.fn(async () => canvas()),
+	    resolveExecutionMetadata: vi.fn(async () => execution),
+	    setStatuses: vi.fn(async () => {}),
     applyGraphPatch: vi.fn(async () => {}),
     readSourceFile: vi.fn(async () => "export const value = 1;\n"),
     writeCodeProposal: vi.fn(async () => {}),
@@ -92,31 +134,146 @@ describe("GraphCode agent runtime", () => {
       {
         projectId: "project",
         nodeId: "node-1",
+        mode: "medium",
         prompt: "Update value"
       },
       { config: { ...baseConfig, agentKind: "coding" }, runId: "run-2", toolbox: tools }
     );
 
-    expect(result.diff).toContain("src/module.ts");
-    expect(tools.writeCodeProposal).toHaveBeenCalled();
-    expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded" })]);
+	    expect(result.diff).toContain("src/module.ts");
+	    expect(result.response).toContain("virtualEnvironment=.venv");
+	    expect(result.response).toContain("testScriptDirectory=tests/generated");
+	    expect(tools.writeCodeProposal).toHaveBeenCalled();
+	    expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded" })]);
+	  });
+
+	  it("stores parsed test artifact manifests with coding proposals", async () => {
+	    const command = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.sh`);
+	    fs.writeFileSync(
+	      command,
+	      [
+	        "#!/bin/sh",
+	        "cat <<'EOF'",
+	        "diff --git a/src/module.ts b/src/module.ts",
+	        "--- a/src/module.ts",
+	        "+++ b/src/module.ts",
+	        "@@",
+	        "+export const value = 2;",
+	        "GRAPHCODE_TEST_ARTIFACTS_JSON",
+	        "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}",
+	        "EOF"
+	      ].join("\n"),
+	      { mode: 0o755 }
+	    );
+	    const tools = toolbox();
+
+	    await runCodingAgent(
+	      {
+	        projectId: "project",
+	        nodeId: "node-1",
+	        mode: "small",
+	        prompt: "Update value and test it"
+	      },
+	      { config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command }, runId: "run-artifact", toolbox: tools }
+	    );
+
+	    expect(tools.writeCodeProposal).toHaveBeenCalledWith(
+	      "project",
+	      "run-artifact",
+	      "node-1",
+	      expect.stringContaining("diff --git a/src/module.ts b/src/module.ts"),
+	      expect.objectContaining({
+	        scripts: [expect.objectContaining({ relativePath: "module.test.ts" })]
+	      })
+	    );
+	  });
+
+  it("includes function workflow canvas context for medium coding runs", async () => {
+    const functionNode: GraphNode = {
+      ...node,
+      id: "function-do-work",
+      kind: "function",
+      name: "doWork",
+      summary: "Function summary"
+    };
+    const processNode: GraphNode = {
+      ...node,
+      id: "process-validate",
+      kind: "process",
+      name: "Validate input",
+      summary: "Checks the input before returning.",
+      parentId: null,
+      attachedToId: functionNode.id,
+      source: { path: "src/module.ts", startLine: 2, endLine: 3 }
+    };
+    const outputNode: GraphNode = {
+      ...node,
+      id: "output-result",
+      kind: "output",
+      name: "Result",
+      summary: "Returned value.",
+      parentId: null,
+      attachedToId: functionNode.id
+    };
+    const flow: GraphEdge = {
+      id: "flow-process-output",
+      projectId: "project",
+      kind: "flows",
+      sourceNodeId: processNode.id,
+      targetNodeId: outputNode.id,
+      label: "return",
+      codeContext: "Validated data flows to the return value.",
+      color: "#059669",
+      animated: true,
+      pointingEnabled: true,
+      pointingDirection: "source_to_target",
+      agentStatus: "implemented",
+      gitStatus: null,
+      tags: [],
+      createdAt: "now"
+    };
+    const tools = toolbox({
+      readGraph: vi.fn(async () => ({ nodes: [functionNode, processNode, outputNode], edges: [flow] })),
+      getNodeDetail: vi.fn(async () => ({ ...detail, node: functionNode })),
+      getCanvasGraph: vi.fn(async () => canvas([functionNode, processNode, outputNode], [flow]))
+    });
+
+    const result = await runCodingAgent(
+      {
+        projectId: "project",
+        nodeId: functionNode.id,
+        mode: "medium",
+        prompt: "Use workflow context"
+      },
+      { config: { ...baseConfig, agentKind: "coding" }, runId: "run-workflow", toolbox: tools }
+    );
+
+    expect(tools.getCanvasGraph).toHaveBeenCalledWith("project", functionNode.id, true);
+    expect(result.response).toContain("Coding mode: medium");
+    expect(result.response).toContain("process-validate");
+    expect(result.response).toContain("flow-process-output");
   });
 
-  it("rejects coding diffs that leave the selected source scope", async () => {
-    await expect(
-      runCodingAgent(
+	  it("rejects coding diffs that leave the selected source scope", async () => {
+	    const command = path.join(os.tmpdir(), `graphcode-agent-bad-${crypto.randomUUID()}.sh`);
+	    fs.writeFileSync(
+	      command,
+	      ["#!/bin/sh", "cat <<'EOF'", "diff --git a/src/other.ts b/src/other.ts", "--- a/src/other.ts", "+++ b/src/other.ts", "@@", "+bad", "EOF"].join("\n"),
+	      { mode: 0o755 }
+	    );
+	    await expect(
+	      runCodingAgent(
         {
           projectId: "project",
-          nodeId: "node-1"
+          nodeId: "node-1",
+          mode: "medium"
         },
-        {
-          config: { ...baseConfig, agentKind: "coding", provider: "fake" },
-          runId: "run-3",
-          toolbox: toolbox({
-            readSourceFile: vi.fn(async () => "diff --git a/src/other.ts b/src/other.ts\n--- a/src/other.ts\n+++ b/src/other.ts\n@@\n+bad")
-          })
-        }
-      )
+	        {
+	          config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command },
+	          runId: "run-3",
+	          toolbox: toolbox()
+	        }
+	      )
     ).rejects.toThrow(/escaped/);
   });
 

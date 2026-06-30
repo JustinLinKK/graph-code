@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import {
   AGENT_KINDS,
   type AgentConfig,
@@ -9,11 +11,21 @@ import {
   type AgentRunStatus,
   type AgentStatus,
   BASIC_DETAIL_NODE_KINDS,
+  type BlockExecutionMetadata,
   type BasicBlockDetails,
   type BasicDetailNodeKind,
   type BoundaryMutation,
   type BoundaryUpdate,
   type CanvasGraph,
+  CODING_AGENT_MODES,
+  type CodingAgentConfig,
+  type CodingAgentConfigView,
+  type CodingAgentMode,
+  type CodingWorkflow,
+  type CodingWorkflowItem,
+  type CodingWorkflowItemStatus,
+  type CodingWorkflowModeOverride,
+  type CodeProposalArtifactManifest,
   type CreateCustomBlockType,
   type CustomBlockType,
   type CustomBlockTypeUpdate,
@@ -24,6 +36,10 @@ import {
   type EdgeMutation,
   type EdgePointingDirection,
   type EdgeUpdate,
+  boundaryMutationSchema,
+  boundaryUpdateSchema,
+  edgeMutationSchema,
+  edgeUpdateSchema,
   FORMAT_KINDS,
   type FormatDetails,
   type FormatKind,
@@ -32,6 +48,7 @@ import {
   type GraphEdge,
   type GraphEdgeKind,
   type GraphPatch,
+  type GraphPatchOperation,
   graphPatchSchema,
   type GraphStatusHistory,
   type GraphStatusPatch,
@@ -54,6 +71,8 @@ import {
   type NodeTypeStyle,
   type NodeTypeStyleUpdate,
   type NodeUpdate,
+  nodeMutationSchema,
+  nodeUpdateSchema,
   PROCESS_KINDS,
   type ProcessDetails,
   type ProcessKind,
@@ -63,12 +82,16 @@ import {
   type TagMutation,
   type WorkspaceSettings,
   type WorkspaceSettingsMutation,
+  blockExecutionMetadataSchema,
+  codeProposalArtifactManifestSchema,
   isAttachmentNodeKind,
   isDomainNodeKind
 } from "@graphcode/graph-model";
 import type { CodeGraphSnapshot, CodeGraphSymbol, CodeGraphWorkflowNode } from "@graphcode/parser";
 import type { GraphDatabase } from "./connection";
 import { layoutCanvasWithBoundaryGroups } from "../layout/elk";
+
+const ROLE_AGENT_KINDS: AgentKind[] = ["planning", "review", "scanning"];
 
 type ProjectRow = {
   id: string;
@@ -97,6 +120,11 @@ type NodeRow = {
   source_path: string | null;
   source_start_line: number | null;
   source_end_line: number | null;
+  test_script_directory: string | null;
+  virtual_environment: string | null;
+  working_directory: string | null;
+  setup_command: string | null;
+  test_command: string | null;
   ui_x: number;
   ui_y: number;
   ui_width: number;
@@ -159,11 +187,27 @@ type AgentSettingsRow = {
   system_prompt_source_value: string;
 };
 
+type CodingAgentSettingsRow = {
+  project_id: string;
+  coding_mode: CodingAgentMode;
+  provider: CodingAgentConfig["provider"];
+  model: string;
+  parallel_limit: number;
+  api_key_source_type: CodingAgentConfig["apiKeySource"]["type"];
+  api_key_source_value: string;
+  system_prompt_source_type: CodingAgentConfig["systemPromptSource"]["type"];
+  system_prompt_source_value: string;
+};
+
 type AgentRunRow = {
   id: string;
   project_id: string;
   agent_kind: AgentKind;
+  coding_mode: CodingAgentMode | null;
   status: AgentRunStatus;
+  base_graph_revision: number;
+  applied_graph_revision: number | null;
+  conflict_reason: string | null;
   target_node_id: string | null;
   prompt: string;
   response: string;
@@ -173,6 +217,73 @@ type AgentRunRow = {
   created_at: string;
   updated_at: string;
 };
+
+type GraphEntityVersionRow = {
+  project_id: string;
+  entity_type: GraphPatchOperation["entityType"];
+  entity_id: string;
+  revision: number;
+  deleted: 0 | 1;
+  updated_at: string;
+};
+
+type GraphEntityVersionInput = {
+  entityType: GraphPatchOperation["entityType"];
+  entityId: string;
+  deleted: boolean;
+};
+
+type CodeProposalRow = {
+  id: string;
+  project_id: string;
+  agent_run_id: string | null;
+  target_node_id: string | null;
+  diff: string;
+  artifact_manifest_json: string | null;
+  created_at: string;
+};
+
+type StoredCodeProposal = {
+  id: string;
+  projectId: string;
+  agentRunId: string | null;
+  targetNodeId: string | null;
+  diff: string;
+  artifactManifest: CodeProposalArtifactManifest | null;
+  createdAt: string;
+};
+
+type CodingWorkflowRow = {
+  id: string;
+  project_id: string;
+  scope_node_id: string;
+  status: CodingWorkflow["status"];
+  current_layer: number;
+  summary: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type CodingWorkflowItemRow = {
+  id: string;
+  workflow_id: string;
+  project_id: string;
+  node_id: string;
+  node_name: string;
+  node_kind: GraphNodeKind;
+  layer_index: number;
+  recommended_mode: CodingAgentMode;
+  selected_mode: CodingAgentMode;
+  mode_reason: string;
+  status: CodingWorkflowItemStatus;
+  conflict_group: string;
+  agent_run_id: string | null;
+  proposal_id: string | null;
+  applied_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 
 type AgentMessageRow = {
   id: string;
@@ -304,6 +415,7 @@ export type NewGraphNode = {
   sourcePath?: string | null;
   sourceStartLine?: number | null;
   sourceEndLine?: number | null;
+  execution?: Partial<BlockExecutionMetadata>;
   position?: { x: number; y: number };
   size?: { width: number; height: number };
   agentStatus?: AgentStatus;
@@ -386,7 +498,17 @@ export type CodeGraphRefreshResult = {
 };
 
 export class GraphRepository {
+  private suppressGraphVersionBumps = false;
+
   constructor(private readonly db: GraphDatabase) {}
+
+  currentGraphRevision(projectId: string): number {
+    this.getProject(projectId);
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(revision), 0) AS revision FROM graph_revisions WHERE project_id = ?")
+      .get(projectId) as { revision: number } | undefined;
+    return row?.revision ?? 0;
+  }
 
   listProjects(): Project[] {
     const rows = this.db.prepare("SELECT * FROM projects ORDER BY created_at ASC").all() as ProjectRow[];
@@ -397,8 +519,11 @@ export class GraphRepository {
     this.ensureDefaultSettings(projectId);
     const row = this.db.prepare("SELECT * FROM workspace_settings WHERE project_id = ?").get(projectId) as WorkspaceSettingsRow;
     const agentRows = this.db
-      .prepare("SELECT * FROM agent_settings WHERE project_id = ? ORDER BY agent_kind ASC")
+      .prepare("SELECT * FROM agent_settings WHERE project_id = ? AND agent_kind != 'coding' ORDER BY agent_kind ASC")
       .all(projectId) as AgentSettingsRow[];
+    const codingAgentRows = this.db
+      .prepare("SELECT * FROM coding_agent_settings WHERE project_id = ? ORDER BY CASE coding_mode WHEN 'small' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END")
+      .all(projectId) as CodingAgentSettingsRow[];
     return {
       general: {
         theme: row.theme
@@ -419,7 +544,8 @@ export class GraphRepository {
       automation: {
         autoReviewAfterCoding: row.auto_review_after_coding !== 0
       },
-      agents: agentRows.map(mapAgentSettingsView)
+      agents: agentRows.map(mapAgentSettingsView),
+      codingAgents: codingAgentRows.map(mapCodingAgentSettingsView)
     };
   }
 
@@ -434,8 +560,20 @@ export class GraphRepository {
     return mapAgentSettings(row);
   }
 
+  getCodingAgentConfig(projectId: string, mode: CodingAgentMode): CodingAgentConfig {
+    this.ensureDefaultSettings(projectId);
+    const row = this.db
+      .prepare("SELECT * FROM coding_agent_settings WHERE project_id = ? AND coding_mode = ?")
+      .get(projectId, mode) as CodingAgentSettingsRow | undefined;
+    if (!row) {
+      return defaultCodingAgentConfig(mode);
+    }
+    return mapCodingAgentSettings(row);
+  }
+
   saveWorkspaceSettings(projectId: string, input: WorkspaceSettingsMutation): WorkspaceSettings {
     this.getProject(projectId);
+    const codingAgents = input.codingAgents ?? [];
     const write = this.db.transaction(() => {
       this.db
         .prepare(
@@ -461,7 +599,34 @@ export class GraphRepository {
           autoReviewAfterCoding: input.automation.autoReviewAfterCoding ? 1 : 0
         });
 
+      let legacyCodingAgent: AgentConfig | null = null;
       for (const agent of input.agents) {
+        if (agent.agentKind === "coding") {
+          const existing = this.getAgentConfig(projectId, agent.agentKind);
+          const apiKeyValue = agent.apiKeySource.value?.trim()
+            ? agent.apiKeySource.value
+            : agent.apiKeySource.type === existing.apiKeySource.type
+              ? existing.apiKeySource.value
+              : "";
+          const systemPromptValue = agent.systemPromptSource.value?.trim()
+            ? agent.systemPromptSource.value
+            : agent.systemPromptSource.type === existing.systemPromptSource.type
+              ? existing.systemPromptSource.value
+              : "";
+          legacyCodingAgent = {
+            ...agent,
+            apiKeySource: {
+              ...agent.apiKeySource,
+              value: apiKeyValue
+            },
+            systemPromptSource: {
+              ...agent.systemPromptSource,
+              value: systemPromptValue
+            }
+          };
+          this.upsertAgentSettings(projectId, legacyCodingAgent);
+          continue;
+        }
         const existing = this.getAgentConfig(projectId, agent.agentKind);
         const apiKeyValue = agent.apiKeySource.value?.trim()
           ? agent.apiKeySource.value
@@ -485,9 +650,51 @@ export class GraphRepository {
           }
         });
       }
-      for (const agentKind of AGENT_KINDS) {
+      for (const agentKind of ROLE_AGENT_KINDS) {
         if (!input.agents.some((agent) => agent.agentKind === agentKind)) {
           this.upsertAgentSettings(projectId, defaultAgentConfig(agentKind));
+        }
+      }
+      if (codingAgents.length > 0) {
+        for (const codingAgent of codingAgents) {
+          const existing = this.getCodingAgentConfig(projectId, codingAgent.mode);
+          const apiKeyValue = codingAgent.apiKeySource.value?.trim()
+            ? codingAgent.apiKeySource.value
+            : codingAgent.apiKeySource.type === existing.apiKeySource.type
+              ? existing.apiKeySource.value
+              : "";
+          const systemPromptValue = codingAgent.systemPromptSource.value?.trim()
+            ? codingAgent.systemPromptSource.value
+            : codingAgent.systemPromptSource.type === existing.systemPromptSource.type
+              ? existing.systemPromptSource.value
+              : "";
+          this.upsertCodingAgentSettings(projectId, {
+            ...codingAgent,
+            apiKeySource: {
+              ...codingAgent.apiKeySource,
+              value: apiKeyValue
+            },
+            systemPromptSource: {
+              ...codingAgent.systemPromptSource,
+              value: systemPromptValue
+            }
+          });
+        }
+      } else if (legacyCodingAgent) {
+        for (const mode of CODING_AGENT_MODES) {
+          this.upsertCodingAgentSettings(projectId, {
+            mode,
+            provider: legacyCodingAgent.provider,
+            model: legacyCodingAgent.model,
+            parallelLimit: legacyCodingAgent.parallelLimit,
+            apiKeySource: legacyCodingAgent.apiKeySource,
+            systemPromptSource: legacyCodingAgent.systemPromptSource
+          });
+        }
+      }
+      for (const mode of CODING_AGENT_MODES) {
+        if (!this.hasCodingAgentSettings(projectId, mode)) {
+          this.upsertCodingAgentSettings(projectId, defaultCodingAgentConfig(mode));
         }
       }
     });
@@ -552,6 +759,7 @@ export class GraphRepository {
     this.getProject(projectId);
     const fieldErrors: Record<string, string> = {};
     const seen = new Set<AgentKind>();
+    const codingAgents = input.codingAgents ?? [];
     if (input.github.enabled) {
       if (!input.github.repository.trim()) {
         fieldErrors["github.repository"] = "Repository is required when GitHub integration is enabled.";
@@ -588,6 +796,35 @@ export class GraphRepository {
         fieldErrors[`agents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
       }
     });
+    const seenCodingModes = new Set<CodingAgentMode>();
+    codingAgents.forEach((agent, index) => {
+      const existing = this.getCodingAgentConfig(projectId, agent.mode);
+      const effectiveApiKeyValue =
+        agent.apiKeySource.value?.trim() || (agent.apiKeySource.type === existing.apiKeySource.type ? (existing.apiKeySource.value ?? "").trim() : "");
+      const effectiveSystemPromptValue =
+        agent.systemPromptSource.value?.trim() ||
+        (agent.systemPromptSource.type === existing.systemPromptSource.type ? (existing.systemPromptSource.value ?? "").trim() : "");
+      if (seenCodingModes.has(agent.mode)) {
+        fieldErrors[`codingAgents.${index}.mode`] = "Each coding mode can only be configured once.";
+      }
+      seenCodingModes.add(agent.mode);
+      if (!agent.model.trim()) {
+        fieldErrors[`codingAgents.${index}.model`] = "Model is required.";
+      }
+      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+        if (!effectiveApiKeyValue) {
+          fieldErrors[`codingAgents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
+        } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
+          fieldErrors[`codingAgents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
+        }
+      }
+      if (agent.provider === "claudecode" && !agent.model.trim()) {
+        fieldErrors[`codingAgents.${index}.model`] = "Claude Code command or model label is required.";
+      }
+      if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
+        fieldErrors[`codingAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
+      }
+    });
 
     return {
       ok: Object.keys(fieldErrors).length === 0,
@@ -615,6 +852,7 @@ export class GraphRepository {
   createAgentRun(input: {
     projectId: string;
     agentKind: AgentKind;
+    codingMode?: CodingAgentMode | null;
     targetNodeId?: string | null;
     prompt?: string;
     status?: AgentRunStatus;
@@ -632,11 +870,13 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO agent_runs (
-          id, project_id, agent_kind, status, target_node_id,
+          id, project_id, agent_kind, coding_mode, status,
+          base_graph_revision, applied_graph_revision, conflict_reason, target_node_id,
           prompt, response, diff, graph_patch_json, error
         )
         VALUES (
-          @id, @projectId, @agentKind, @status, @targetNodeId,
+          @id, @projectId, @agentKind, @codingMode, @status,
+          @baseGraphRevision, @appliedGraphRevision, @conflictReason, @targetNodeId,
           @prompt, @response, @diff, @graphPatchJson, @error
         )
       `
@@ -645,7 +885,11 @@ export class GraphRepository {
         id,
         projectId: input.projectId,
         agentKind: input.agentKind,
+        codingMode: input.agentKind === "coding" ? (input.codingMode ?? "medium") : null,
         status: input.status ?? "queued",
+        baseGraphRevision: this.currentGraphRevision(input.projectId),
+        appliedGraphRevision: null,
+        conflictReason: null,
         targetNodeId: input.targetNodeId ?? null,
         prompt: input.prompt ?? "",
         response: input.response ?? "",
@@ -658,7 +902,7 @@ export class GraphRepository {
 
   updateAgentRun(
     runId: string,
-    input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error">> & { graphPatch?: GraphPatch | null }
+    input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error" | "appliedGraphRevision" | "conflictReason">> & { graphPatch?: GraphPatch | null }
   ): AgentRun {
     const existing = this.getAgentRun(runId);
     this.db
@@ -671,6 +915,8 @@ export class GraphRepository {
           diff = @diff,
           graph_patch_json = @graphPatchJson,
           error = @error,
+          applied_graph_revision = @appliedGraphRevision,
+          conflict_reason = @conflictReason,
           updated_at = datetime('now')
         WHERE id = @id
       `
@@ -681,7 +927,9 @@ export class GraphRepository {
         response: input.response ?? existing.response,
         diff: input.diff ?? existing.diff,
         graphPatchJson: input.graphPatch === undefined ? (existing.graphPatch ? JSON.stringify(existing.graphPatch) : null) : input.graphPatch ? JSON.stringify(input.graphPatch) : null,
-        error: input.error === undefined ? existing.error : input.error
+        error: input.error === undefined ? existing.error : input.error,
+        appliedGraphRevision: input.appliedGraphRevision === undefined ? existing.appliedGraphRevision : input.appliedGraphRevision,
+        conflictReason: input.conflictReason === undefined ? existing.conflictReason : input.conflictReason
       });
     return this.getAgentRun(runId);
   }
@@ -716,41 +964,600 @@ export class GraphRepository {
         } else {
           this.getBoundary(patch.entityId);
         }
-        const id = `status-${crypto.randomUUID()}`;
-        this.db
-          .prepare(
-            `
-            INSERT INTO graph_status_history (id, project_id, entity_type, entity_id, status, note, agent_run_id)
-            VALUES (@id, @projectId, @entityType, @entityId, @status, @note, @agentRunId)
-          `
-          )
-          .run({
-            id,
-            projectId,
-            entityType: patch.entityType,
-            entityId: patch.entityId,
-            status: patch.status,
-            note: patch.note ?? "",
-            agentRunId: patch.agentRunId ?? null
-          });
-        const row = this.db.prepare("SELECT * FROM graph_status_history WHERE id = ?").get(id) as GraphStatusHistoryRow;
-        saved.push(mapGraphStatusHistory(row));
+        saved.push(this.recordGraphStatusHistory(projectId, patch));
       }
     });
     write();
     return saved;
   }
 
-  storeCodeProposal(input: { projectId: string; agentRunId?: string | null; targetNodeId?: string | null; diff: string }): string {
-    this.getProject(input.projectId);
+  private recordGraphStatusHistory(projectId: string, patch: GraphStatusPatch): GraphStatusHistory {
+    const id = `status-${crypto.randomUUID()}`;
+    this.db
+      .prepare(
+        `
+        INSERT INTO graph_status_history (id, project_id, entity_type, entity_id, status, note, agent_run_id)
+        VALUES (@id, @projectId, @entityType, @entityId, @status, @note, @agentRunId)
+      `
+      )
+      .run({
+        id,
+        projectId,
+        entityType: patch.entityType,
+        entityId: patch.entityId,
+        status: patch.status,
+        note: patch.note ?? "",
+        agentRunId: patch.agentRunId ?? null
+      });
+    const row = this.db.prepare("SELECT * FROM graph_status_history WHERE id = ?").get(id) as GraphStatusHistoryRow;
+    return mapGraphStatusHistory(row);
+  }
+
+  private statusAfterSemanticEdit(input: {
+    projectId: string;
+    entityType: GraphStatusPatch["entityType"];
+    entityId: string;
+    currentStatus?: AgentStatus;
+    changed: boolean;
+    note: string;
+  }): AgentStatus | null {
+    if (!input.changed) {
+      return input.currentStatus ?? null;
+    }
+    if (input.currentStatus && input.currentStatus !== "planning") {
+      this.recordGraphStatusHistory(input.projectId, {
+        entityType: input.entityType,
+        entityId: input.entityId,
+        status: "planning",
+        note: `${input.note} Previous status: ${input.currentStatus}.`,
+        agentRunId: null
+      });
+    } else if (!input.currentStatus) {
+      this.recordGraphStatusHistory(input.projectId, {
+        entityType: input.entityType,
+        entityId: input.entityId,
+        status: "planning",
+        note: input.note,
+        agentRunId: null
+      });
+    }
+    return "planning";
+  }
+
+  applyAgentGraphPatch(projectId: string, runId: string): AgentRun {
+    const run = this.getAgentRun(runId);
+    if (run.projectId !== projectId) {
+      throw validationError("Agent run does not belong to the selected project.");
+    }
+    if (run.agentKind !== "planning") {
+      throw validationError("Only planning agent graph patches can be applied.");
+    }
+    if (run.status !== "succeeded") {
+      throw validationError("Only succeeded planning runs can be applied.");
+    }
+    if (run.appliedGraphRevision !== null) {
+      return run;
+    }
+    const operations = run.graphPatch?.operations ?? [];
+    if (operations.length === 0) {
+      return this.updateAgentRun(run.id, {
+        appliedGraphRevision: this.currentGraphRevision(projectId),
+        conflictReason: null
+      });
+    }
+
+    const apply = this.db.transaction(() => {
+      const conflictReason = this.findGraphPatchConflict(projectId, run, operations);
+      if (conflictReason) {
+        return this.updateAgentRun(run.id, {
+          status: "conflicted",
+          conflictReason
+        });
+      }
+
+      const touched: GraphEntityVersionInput[] = [];
+      this.suppressGraphVersionBumps = true;
+      try {
+        for (const operation of operations) {
+          this.applyGraphPatchOperation(projectId, operation);
+          touched.push({
+            entityType: operation.entityType,
+            entityId: operation.entityId,
+            deleted: false
+          });
+        }
+      } finally {
+        this.suppressGraphVersionBumps = false;
+      }
+
+      const revision = this.bumpGraphEntities(projectId, touched, `Applied planning graph patch from ${run.id}.`);
+      return this.updateAgentRun(run.id, {
+        appliedGraphRevision: revision,
+        conflictReason: null
+      });
+    });
+
+    return apply();
+  }
+
+  private findGraphPatchConflict(projectId: string, run: AgentRun, operations: GraphPatchOperation[]): string | null {
+    for (const operation of operations) {
+      const exists = this.graphEntityExists(operation.entityType, operation.entityId);
+      const version = this.getGraphEntityVersion(projectId, operation.entityType, operation.entityId);
+      if (operation.action === "create") {
+        if (exists || (version && version.deleted === 0)) {
+          return `${operation.entityType} ${operation.entityId} already exists.`;
+        }
+        continue;
+      }
+      if (!exists || version?.deleted === 1) {
+        return `${operation.entityType} ${operation.entityId} no longer exists.`;
+      }
+      if ((version?.revision ?? 0) > run.baseGraphRevision) {
+        return `${operation.entityType} ${operation.entityId} changed after this ticket started.`;
+      }
+    }
+    return null;
+  }
+
+  private applyGraphPatchOperation(projectId: string, operation: GraphPatchOperation): void {
+    if (operation.entityType === "node") {
+      if (operation.action === "create") {
+        const input = nodeMutationSchema.parse(operation.fields);
+        this.createNode({
+          id: operation.entityId,
+          projectId,
+          kind: input.kind,
+          name: input.name,
+          summary: input.summary ?? "",
+          codeContext: input.codeContext ?? input.summary ?? "",
+          codeDirectory: input.codeDirectory ?? null,
+          codeStartLine: input.codeStartLine ?? null,
+          codeEndLine: input.codeEndLine ?? null,
+          language: input.language ?? "unknown",
+          parentId: input.parentId ?? null,
+          attachedToId: input.attachedToId ?? null,
+          customTypeId: input.customTypeId ?? null,
+          sourcePath: input.codeDirectory ?? null,
+          sourceStartLine: input.codeStartLine ?? null,
+          sourceEndLine: input.codeEndLine ?? null,
+          execution: input.execution,
+          position: input.position,
+          size: input.size,
+          agentStatus: "implemented"
+        });
+      } else {
+        this.updateNode(operation.entityId, nodeUpdateSchema.parse(operation.fields));
+      }
+      return;
+    }
+
+    if (operation.entityType === "edge") {
+      if (operation.action === "create") {
+        const input = edgeMutationSchema.parse(operation.fields);
+        this.createEdge({
+          id: operation.entityId,
+          projectId,
+          kind: input.kind,
+          sourceNodeId: input.sourceNodeId,
+          targetNodeId: input.targetNodeId,
+          label: input.label ?? null,
+          codeContext: input.codeContext ?? "",
+          color: input.color,
+          animated: input.animated,
+          pointingEnabled: input.pointingEnabled,
+          pointingDirection: input.pointingDirection,
+          agentStatus: "implemented"
+        });
+      } else {
+        this.updateEdge(operation.entityId, edgeUpdateSchema.parse(operation.fields));
+      }
+      return;
+    }
+
+    if (operation.action === "create") {
+      const input = boundaryMutationSchema.parse(operation.fields);
+      this.createBoundaryRow({
+        id: operation.entityId,
+        projectId,
+        scopeNodeId: input.scopeNodeId,
+        name: input.name,
+        summary: input.summary ?? "",
+        codeContext: input.codeContext ?? "",
+        color: input.color,
+        position: input.position,
+        size: input.size
+      });
+    } else {
+      this.updateBoundary(operation.entityId, boundaryUpdateSchema.parse(operation.fields));
+    }
+  }
+
+  private getGraphEntityVersion(
+    projectId: string,
+    entityType: GraphPatchOperation["entityType"],
+    entityId: string
+  ): GraphEntityVersionRow | null {
+    const row = this.db
+      .prepare("SELECT * FROM graph_entity_versions WHERE project_id = ? AND entity_type = ? AND entity_id = ?")
+      .get(projectId, entityType, entityId) as GraphEntityVersionRow | undefined;
+    return row ?? null;
+  }
+
+  private graphEntityExists(entityType: GraphPatchOperation["entityType"], entityId: string): boolean {
+    const tableName = entityType === "node" ? "graph_nodes" : entityType === "edge" ? "graph_edges" : "graph_boundaries";
+    const row = this.db.prepare(`SELECT id FROM ${tableName} WHERE id = ?`).get(entityId) as { id: string } | undefined;
+    return Boolean(row);
+  }
+
+  private bumpGraphEntities(projectId: string, entities: GraphEntityVersionInput[], note: string): number {
+    if (this.suppressGraphVersionBumps || entities.length === 0) {
+      return this.currentGraphRevision(projectId);
+    }
+    const revision = this.recordGraphRevision(projectId, note);
+    const upsert = this.db.prepare(
+      `
+      INSERT INTO graph_entity_versions (project_id, entity_type, entity_id, revision, deleted, updated_at)
+      VALUES (@projectId, @entityType, @entityId, @revision, @deleted, datetime('now'))
+      ON CONFLICT(project_id, entity_type, entity_id)
+      DO UPDATE SET
+        revision = excluded.revision,
+        deleted = excluded.deleted,
+        updated_at = datetime('now')
+    `
+    );
+    const seen = new Set<string>();
+    for (const entity of entities) {
+      const key = `${entity.entityType}:${entity.entityId}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      upsert.run({
+        projectId,
+        entityType: entity.entityType,
+        entityId: entity.entityId,
+        revision,
+        deleted: entity.deleted ? 1 : 0
+      });
+    }
+    return revision;
+  }
+
+  private recordGraphRevision(projectId: string, note: string): number {
+    const revision = this.currentGraphRevision(projectId) + 1;
+    this.db
+      .prepare("INSERT INTO graph_revisions (id, project_id, revision, note) VALUES (?, ?, ?, ?)")
+      .run(`revision-${crypto.randomUUID()}`, projectId, revision, note);
+    return revision;
+  }
+
+  storeCodeProposal(input: { projectId: string; agentRunId?: string | null; targetNodeId?: string | null; diff: string; artifactManifest?: CodeProposalArtifactManifest | null }): string {
+    const project = this.getProject(input.projectId);
     if (input.targetNodeId) {
       this.getNode(input.targetNodeId);
     }
     const id = `proposal-${crypto.randomUUID()}`;
+    const artifactManifest = this.writeProposalArtifacts(project, id, input.artifactManifest ?? null);
     this.db
-      .prepare("INSERT INTO code_proposals (id, project_id, agent_run_id, target_node_id, diff) VALUES (?, ?, ?, ?, ?)")
-      .run(id, input.projectId, input.agentRunId ?? null, input.targetNodeId ?? null, input.diff);
+      .prepare("INSERT INTO code_proposals (id, project_id, agent_run_id, target_node_id, diff, artifact_manifest_json) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(id, input.projectId, input.agentRunId ?? null, input.targetNodeId ?? null, input.diff, artifactManifest ? JSON.stringify(artifactManifest) : null);
     return id;
+  }
+
+  getLatestCodeProposalForRun(runId: string): { id: string; artifactManifest: CodeProposalArtifactManifest | null } | null {
+    this.getAgentRun(runId);
+    const row = this.db
+      .prepare("SELECT * FROM code_proposals WHERE agent_run_id = ? ORDER BY created_at DESC LIMIT 1")
+      .get(runId) as CodeProposalRow | undefined;
+    return row ? { id: row.id, artifactManifest: parseCodeProposalArtifactManifest(row.artifact_manifest_json) } : null;
+  }
+
+  getCodeProposal(proposalId: string): StoredCodeProposal {
+    const row = this.db.prepare("SELECT * FROM code_proposals WHERE id = ?").get(proposalId) as CodeProposalRow | undefined;
+    if (!row) {
+      throw notFound(`Code proposal not found: ${proposalId}`);
+    }
+    return mapCodeProposal(row);
+  }
+
+  previewCodingWorkflow(projectId: string, scopeNodeId: string, modeOverrides: CodingWorkflowModeOverride[] = []): CodingWorkflow {
+    return this.createCodingWorkflow(projectId, scopeNodeId, modeOverrides, "preview");
+  }
+
+  createCodingWorkflow(projectId: string, scopeNodeId: string, modeOverrides: CodingWorkflowModeOverride[] = [], status: CodingWorkflow["status"] = "running"): CodingWorkflow {
+    const project = this.getProject(projectId);
+    const scope = this.getNode(scopeNodeId);
+    const planItems = this.planCodingWorkflowItems(project.id, scope, modeOverrides);
+    const id = `workflow-${crypto.randomUUID()}`;
+    const summary = planItems.length > 0 ? `${planItems.length} coding item${planItems.length === 1 ? "" : "s"} planned under ${scope.name}.` : `No planning blocks found under ${scope.name}.`;
+    const save = this.db.transaction(() => {
+      this.db
+        .prepare("INSERT INTO coding_workflows (id, project_id, scope_node_id, status, current_layer, summary) VALUES (?, ?, ?, ?, 0, ?)")
+        .run(id, project.id, scope.id, status, summary);
+      for (const item of planItems) {
+        this.db
+          .prepare(
+            `
+            INSERT INTO coding_workflow_items (
+              id, workflow_id, project_id, node_id, layer_index,
+              recommended_mode, selected_mode, mode_reason, status, conflict_group
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `
+          )
+          .run(
+            `workflow-item-${crypto.randomUUID()}`,
+            id,
+            project.id,
+            item.nodeId,
+            item.layerIndex,
+            item.recommendedMode,
+            item.selectedMode,
+            item.modeReason,
+            status === "preview" ? "pending" : item.layerIndex === 0 ? "pending" : "blocked",
+            item.conflictGroup
+          );
+      }
+    });
+    save();
+    return this.getCodingWorkflow(id);
+  }
+
+  getCodingWorkflow(workflowId: string): CodingWorkflow {
+    const row = this.db.prepare("SELECT * FROM coding_workflows WHERE id = ?").get(workflowId) as CodingWorkflowRow | undefined;
+    if (!row) {
+      throw notFound(`Coding workflow not found: ${workflowId}`);
+    }
+    return mapCodingWorkflow(row, this.listCodingWorkflowItems(workflowId), this.getNode(row.scope_node_id));
+  }
+
+  getReadyCodingWorkflowItems(workflowId: string): CodingWorkflowItem[] {
+    const workflow = this.getCodingWorkflow(workflowId);
+    return workflow.items.filter((item) => item.layerIndex === workflow.currentLayer && item.status === "pending");
+  }
+
+  updateCodingWorkflowStatus(workflowId: string, status: CodingWorkflow["status"], currentLayer?: number): CodingWorkflow {
+    const workflow = this.getCodingWorkflow(workflowId);
+    this.db
+      .prepare("UPDATE coding_workflows SET status = ?, current_layer = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(status, currentLayer ?? workflow.currentLayer, workflowId);
+    return this.getCodingWorkflow(workflowId);
+  }
+
+  updateCodingWorkflowItem(input: { itemId: string; status?: CodingWorkflowItemStatus; agentRunId?: string | null; proposalId?: string | null; appliedAt?: string | null }): CodingWorkflowItem {
+    this.db
+      .prepare(
+        `
+        UPDATE coding_workflow_items
+        SET
+          status = COALESCE(@status, status),
+          agent_run_id = CASE WHEN @agentRunIdSet = 1 THEN @agentRunId ELSE agent_run_id END,
+          proposal_id = CASE WHEN @proposalIdSet = 1 THEN @proposalId ELSE proposal_id END,
+          applied_at = CASE WHEN @appliedAtSet = 1 THEN @appliedAt ELSE applied_at END,
+          updated_at = datetime('now')
+        WHERE id = @itemId
+      `
+      )
+      .run({
+        itemId: input.itemId,
+        status: input.status ?? null,
+        agentRunIdSet: input.agentRunId === undefined ? 0 : 1,
+        agentRunId: input.agentRunId ?? null,
+        proposalIdSet: input.proposalId === undefined ? 0 : 1,
+        proposalId: input.proposalId ?? null,
+        appliedAtSet: input.appliedAt === undefined ? 0 : 1,
+        appliedAt: input.appliedAt ?? null
+      });
+    const row = this.db
+      .prepare(
+        `
+        SELECT item.*, node.name AS node_name, node.kind AS node_kind
+        FROM coding_workflow_items item
+        JOIN graph_nodes node ON node.id = item.node_id
+        WHERE item.id = ?
+      `
+      )
+      .get(input.itemId) as CodingWorkflowItemRow | undefined;
+    if (!row) {
+      throw notFound(`Coding workflow item not found: ${input.itemId}`);
+    }
+    return mapCodingWorkflowItem(row);
+  }
+
+  applyCodingWorkflowLayer(projectId: string, workflowId: string, layerIndex: number): CodingWorkflow {
+    const workflow = this.getCodingWorkflow(workflowId);
+    if (workflow.projectId !== projectId) {
+      throw validationError("Coding workflow does not belong to this project.");
+    }
+    const layerItems = workflow.items.filter((item) => item.layerIndex === layerIndex);
+    if (layerItems.length === 0) {
+      throw validationError(`Coding workflow layer ${layerIndex} does not exist.`);
+    }
+    const incomplete = layerItems.filter((item) => item.status !== "proposed" && item.status !== "applied" && item.status !== "skipped" && item.status !== "failed");
+    if (incomplete.length > 0) {
+      throw validationError("Coding workflow layer is not ready to apply.");
+    }
+    const nextLayer = Math.min(...workflow.items.filter((item) => item.layerIndex > layerIndex).map((item) => item.layerIndex), Number.POSITIVE_INFINITY);
+    const done = !Number.isFinite(nextLayer);
+    const appliedAt = new Date().toISOString();
+    const apply = this.db.transaction(() => {
+      for (const item of layerItems.filter((candidate) => candidate.status === "proposed")) {
+        if (!item.proposalId) {
+          throw validationError(`Coding workflow item ${item.id} does not have a code proposal.`);
+        }
+        this.applyCodeProposalArtifacts(projectId, item.proposalId, item.nodeId);
+        this.updateCodingWorkflowItem({ itemId: item.id, status: "applied", appliedAt });
+      }
+      if (!done) {
+        this.db
+          .prepare("UPDATE coding_workflow_items SET status = 'pending', updated_at = datetime('now') WHERE workflow_id = ? AND layer_index = ? AND status = 'blocked'")
+          .run(workflow.id, nextLayer);
+      }
+      this.updateCodingWorkflowStatus(workflow.id, done ? "succeeded" : "blocked", done ? workflow.currentLayer : nextLayer);
+    });
+    apply();
+    return this.getCodingWorkflow(workflow.id);
+  }
+
+  private applyCodeProposalArtifacts(projectId: string, proposalId: string, targetNodeId: string): void {
+    const project = this.getProject(projectId);
+    const proposal = this.getCodeProposal(proposalId);
+    if (proposal.projectId !== project.id) {
+      throw validationError("Code proposal does not belong to this project.");
+    }
+    const manifest = proposal.artifactManifest;
+    if (!manifest || manifest.scripts.length === 0) {
+      return;
+    }
+    const metadata = this.resolveExecutionMetadata(targetNodeId);
+    const targetDirectory = blankToNull(metadata.testScriptDirectory);
+    if (!targetDirectory) {
+      throw validationError(`Cannot apply test artifacts for ${targetNodeId}: testScriptDirectory is not configured.`);
+    }
+    if (!manifest.testScriptDirectory) {
+      throw validationError(`Cannot apply test artifacts for ${proposalId}: artifact directory is missing.`);
+    }
+    const artifactDirectory = path.resolve(project.rootPath, manifest.testScriptDirectory);
+    const targetRoot = path.resolve(project.rootPath, sanitizeArtifactPath(targetDirectory));
+    if (!isPathInside(project.rootPath, artifactDirectory) || !isPathInside(project.rootPath, targetRoot)) {
+      throw validationError("Code proposal artifact paths must stay inside the workspace.");
+    }
+    for (const script of manifest.scripts) {
+      const safeRelativePath = sanitizeArtifactPath(script.relativePath);
+      const sourcePath = path.join(artifactDirectory, safeRelativePath);
+      const targetPath = path.join(targetRoot, safeRelativePath);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      if (fs.existsSync(sourcePath)) {
+        fs.copyFileSync(sourcePath, targetPath);
+      } else {
+        fs.writeFileSync(targetPath, script.content, "utf8");
+      }
+    }
+  }
+
+  resolveExecutionMetadata(nodeId: string): BlockExecutionMetadata {
+    const nodes = this.listNodes(this.getNode(nodeId).projectId);
+    const byId = new Map(nodes.map((node) => [node.id, node]));
+    const ordered: GraphNode[] = [];
+    let current = byId.get(nodeId);
+    const seen = new Set<string>();
+    let parentAnchor = current;
+    if (current && !seen.has(current.id)) {
+      ordered.push(current);
+      seen.add(current.id);
+    }
+    current = parentAnchor?.attachedToId ? byId.get(parentAnchor.attachedToId) : undefined;
+    while (current && !seen.has(current.id)) {
+      ordered.push(current);
+      seen.add(current.id);
+      parentAnchor = current;
+      current = current.attachedToId ? byId.get(current.attachedToId) : undefined;
+    }
+    current = parentAnchor?.parentId ? byId.get(parentAnchor.parentId) : undefined;
+    while (current && !seen.has(current.id)) {
+      ordered.push(current);
+      seen.add(current.id);
+      current = current.parentId ? byId.get(current.parentId) : undefined;
+    }
+    const resolved = blockExecutionMetadataSchema.parse({});
+    for (const node of ordered) {
+      resolved.testScriptDirectory ??= blankToNull(node.execution.testScriptDirectory);
+      resolved.virtualEnvironment ??= blankToNull(node.execution.virtualEnvironment);
+      resolved.workingDirectory ??= blankToNull(node.execution.workingDirectory);
+      resolved.setupCommand ??= blankToNull(node.execution.setupCommand);
+      resolved.testCommand ??= blankToNull(node.execution.testCommand);
+    }
+    return resolved;
+  }
+
+  private writeProposalArtifacts(project: Project, proposalId: string, manifest: CodeProposalArtifactManifest | null): CodeProposalArtifactManifest | null {
+    const parsed = manifest ? codeProposalArtifactManifestSchema.parse(manifest) : null;
+    if (!parsed || parsed.scripts.length === 0) {
+      return parsed;
+    }
+    const artifactRelativeDir = path.join(".graphcode", "artifacts", "code-proposals", proposalId);
+    const artifactDir = path.join(project.rootPath, artifactRelativeDir);
+    fs.mkdirSync(artifactDir, { recursive: true });
+    for (const script of parsed.scripts) {
+      const safeRelativePath = sanitizeArtifactPath(script.relativePath);
+      const targetPath = path.join(artifactDir, safeRelativePath);
+      fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      fs.writeFileSync(targetPath, script.content, "utf8");
+    }
+    return {
+      ...parsed,
+      testScriptDirectory: artifactRelativeDir
+    };
+  }
+
+  private listCodingWorkflowItems(workflowId: string): CodingWorkflowItem[] {
+    const rows = this.db
+      .prepare(
+        `
+        SELECT item.*, node.name AS node_name, node.kind AS node_kind
+        FROM coding_workflow_items item
+        JOIN graph_nodes node ON node.id = item.node_id
+        WHERE item.workflow_id = ?
+        ORDER BY item.layer_index ASC, item.conflict_group ASC, node.name ASC
+      `
+      )
+      .all(workflowId) as CodingWorkflowItemRow[];
+    return rows.map(mapCodingWorkflowItem);
+  }
+
+  private planCodingWorkflowItems(projectId: string, scope: GraphNode, modeOverrides: CodingWorkflowModeOverride[]): Array<{
+    nodeId: string;
+    layerIndex: number;
+    recommendedMode: CodingAgentMode;
+    selectedMode: CodingAgentMode;
+    modeReason: string;
+    conflictGroup: string;
+  }> {
+    const nodes = this.listNodes(projectId);
+    const edges = this.listEdges(projectId);
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    const scopeIds = collectCodingScopeNodeIds(scope, nodeById);
+    let candidates = nodes.filter((node) => scopeIds.has(node.id) && node.agentStatus === "planning");
+    if (candidates.length === 0) {
+      candidates = [scope];
+    }
+    const candidateIds = new Set(candidates.map((node) => node.id));
+    const childrenByCandidate = new Map<string, string[]>();
+    for (const node of candidates) {
+      const parentId = nearestCandidateOwner(node, nodeById, candidateIds);
+      if (!parentId) {
+        continue;
+      }
+      const children = childrenByCandidate.get(parentId) ?? [];
+      children.push(node.id);
+      childrenByCandidate.set(parentId, children);
+    }
+    const layerMemo = new Map<string, number>();
+    const layerFor = (nodeId: string): number => {
+      const cached = layerMemo.get(nodeId);
+      if (cached !== undefined) {
+        return cached;
+      }
+      const childLayers = (childrenByCandidate.get(nodeId) ?? []).map(layerFor);
+      const layer = childLayers.length > 0 ? Math.max(...childLayers) + 1 : 0;
+      layerMemo.set(nodeId, layer);
+      return layer;
+    };
+    const overrides = new Map(modeOverrides.map((override) => [override.nodeId, override.mode]));
+    return candidates
+      .map((node) => {
+        const recommendation = recommendCodingMode(node, nodes, edges, scopeIds);
+        return {
+          nodeId: node.id,
+          layerIndex: layerFor(node.id),
+          recommendedMode: recommendation.mode,
+          selectedMode: overrides.get(node.id) ?? recommendation.mode,
+          modeReason: recommendation.reason,
+          conflictGroup: codingConflictGroup(node, nodeById)
+        };
+      })
+      .sort((left, right) => left.layerIndex - right.layerIndex || left.conflictGroup.localeCompare(right.conflictGroup) || left.nodeId.localeCompare(right.nodeId));
   }
 
   clearAllGraphData(): void {
@@ -856,6 +1663,7 @@ export class GraphRepository {
     const node = this.getNode(nodeId);
     const tags = this.upsertTags(node.projectId, input.tags);
     this.replaceTagLinks("node", node.id, tags.map((tag) => tag.id));
+    this.bumpGraphEntities(node.projectId, [{ entityType: "node", entityId: node.id, deleted: false }], "Updated node tags.");
     return this.getNode(node.id);
   }
 
@@ -863,6 +1671,7 @@ export class GraphRepository {
     const edge = this.getEdge(edgeId);
     const tags = this.upsertTags(edge.projectId, input.tags);
     this.replaceTagLinks("edge", edge.id, tags.map((tag) => tag.id));
+    this.bumpGraphEntities(edge.projectId, [{ entityType: "edge", entityId: edge.id, deleted: false }], "Updated edge tags.");
     return this.getEdge(edge.id);
   }
 
@@ -870,6 +1679,7 @@ export class GraphRepository {
     const boundary = this.getBoundary(boundaryId);
     const tags = this.upsertTags(boundary.projectId, input.tags);
     this.replaceTagLinks("boundary", boundary.id, tags.map((tag) => tag.id));
+    this.bumpGraphEntities(boundary.projectId, [{ entityType: "boundary", entityId: boundary.id, deleted: false }], "Updated boundary tags.");
     return this.getBoundary(boundary.id);
   }
 
@@ -908,12 +1718,28 @@ export class GraphRepository {
         label: input.label ?? "",
         context: input.context ?? ""
       });
+    this.bumpGraphEntities(
+      projectId,
+      [
+        { entityType: "node", entityId: scopeNode.id, deleted: false },
+        { entityType: "node", entityId: node.id, deleted: false }
+      ],
+      "Updated reusable graph placement."
+    );
     return this.getNodeReuse(id);
   }
 
   deleteNodeReuse(reuseId: string): void {
-    this.getNodeReuse(reuseId);
+    const reuse = this.getNodeReuse(reuseId);
     this.db.prepare("DELETE FROM graph_node_reuses WHERE id = ?").run(reuseId);
+    this.bumpGraphEntities(
+      reuse.projectId,
+      [
+        { entityType: "node", entityId: reuse.scopeNodeId, deleted: false },
+        { entityType: "node", entityId: reuse.nodeId, deleted: false }
+      ],
+      "Deleted reusable graph placement."
+    );
   }
 
   getNodeReuse(reuseId: string): GraphNodeReuse {
@@ -956,28 +1782,33 @@ export class GraphRepository {
     return mapProject(row);
   }
 
-  createNode(input: NewGraphNode): GraphNode {
-    this.assertValidNode(input);
-    const codeDirectory = input.codeDirectory ?? input.sourcePath ?? null;
-    const codeStartLine = input.codeStartLine ?? input.sourceStartLine ?? null;
-    const codeEndLine = input.codeEndLine ?? input.sourceEndLine ?? null;
-    this.db
-      .prepare(
-        `
-        INSERT INTO graph_nodes (
-          id, project_id, kind, name, summary,
-          code_context, code_directory, code_start_line, code_end_line, language,
-          parent_id, attached_to_id, custom_type_id,
-          source_path, source_start_line, source_end_line, ui_x, ui_y,
-          ui_width, ui_height, agent_status
-        )
-        VALUES (
-          @id, @projectId, @kind, @name, @summary,
-          @codeContext, @codeDirectory, @codeStartLine, @codeEndLine, @language,
-          @parentId, @attachedToId, @customTypeId,
-          @sourcePath, @sourceStartLine, @sourceEndLine, @uiX, @uiY,
-          @uiWidth, @uiHeight, @agentStatus
-        )
+	  createNode(input: NewGraphNode): GraphNode {
+	    this.assertValidNode(input);
+	    const codeDirectory = input.codeDirectory ?? input.sourcePath ?? null;
+	    const codeStartLine = input.codeStartLine ?? input.sourceStartLine ?? null;
+	    const codeEndLine = input.codeEndLine ?? input.sourceEndLine ?? null;
+	    const execution = blockExecutionMetadataSchema.parse(input.execution ?? {});
+	    this.db
+	      .prepare(
+	        `
+	        INSERT INTO graph_nodes (
+	          id, project_id, kind, name, summary,
+	          code_context, code_directory, code_start_line, code_end_line, language,
+	          parent_id, attached_to_id, custom_type_id,
+	          source_path, source_start_line, source_end_line,
+	          test_script_directory, virtual_environment, working_directory, setup_command, test_command,
+	          ui_x, ui_y,
+	          ui_width, ui_height, agent_status
+	        )
+	        VALUES (
+	          @id, @projectId, @kind, @name, @summary,
+	          @codeContext, @codeDirectory, @codeStartLine, @codeEndLine, @language,
+	          @parentId, @attachedToId, @customTypeId,
+	          @sourcePath, @sourceStartLine, @sourceEndLine,
+	          @testScriptDirectory, @virtualEnvironment, @workingDirectory, @setupCommand, @testCommand,
+	          @uiX, @uiY,
+	          @uiWidth, @uiHeight, @agentStatus
+	        )
       `
       )
       .run({
@@ -994,10 +1825,15 @@ export class GraphRepository {
         parentId: input.parentId ?? null,
         attachedToId: input.attachedToId ?? null,
         customTypeId: input.customTypeId ?? null,
-        sourcePath: input.sourcePath ?? codeDirectory,
-        sourceStartLine: input.sourceStartLine ?? codeStartLine,
-        sourceEndLine: input.sourceEndLine ?? codeEndLine,
-        uiX: input.position?.x ?? 0,
+	        sourcePath: input.sourcePath ?? codeDirectory,
+	        sourceStartLine: input.sourceStartLine ?? codeStartLine,
+	        sourceEndLine: input.sourceEndLine ?? codeEndLine,
+	        testScriptDirectory: blankToNull(execution.testScriptDirectory),
+	        virtualEnvironment: blankToNull(execution.virtualEnvironment),
+	        workingDirectory: blankToNull(execution.workingDirectory),
+	        setupCommand: blankToNull(execution.setupCommand),
+	        testCommand: blankToNull(execution.testCommand),
+	        uiX: input.position?.x ?? 0,
         uiY: input.position?.y ?? 0,
         uiWidth: input.size?.width ?? defaultSizeForKind(input.kind).width,
         uiHeight: input.size?.height ?? defaultSizeForKind(input.kind).height,
@@ -1007,7 +1843,7 @@ export class GraphRepository {
   }
 
   createNodeFromMutation(projectId: string, input: NodeMutation): GraphNode {
-    return this.createNode({
+    const node = this.createNode({
       id: `node-${crypto.randomUUID()}`,
       projectId,
       kind: input.kind,
@@ -1021,13 +1857,16 @@ export class GraphRepository {
       parentId: input.parentId ?? null,
       attachedToId: input.attachedToId ?? null,
       customTypeId: input.customTypeId ?? null,
-      sourcePath: input.codeDirectory ?? null,
-      sourceStartLine: input.codeStartLine ?? null,
-      sourceEndLine: input.codeEndLine ?? null,
-      position: input.position,
+	      sourcePath: input.codeDirectory ?? null,
+	      sourceStartLine: input.codeStartLine ?? null,
+	      sourceEndLine: input.codeEndLine ?? null,
+	      execution: input.execution,
+	      position: input.position,
       size: input.size,
       agentStatus: "implemented"
     });
+    this.bumpGraphEntities(projectId, [{ entityType: "node", entityId: node.id, deleted: false }], "Created graph node.");
+    return node;
   }
 
   updateNode(nodeId: string, input: NodeUpdate): GraphNode {
@@ -1044,13 +1883,39 @@ export class GraphRepository {
       codeEndLine: input.codeEndLine === undefined ? existing.code.endLine : input.codeEndLine,
       language: input.language ?? existing.code.language,
       parentId: input.parentId === undefined ? existing.parentId : input.parentId,
-      attachedToId: input.attachedToId === undefined ? existing.attachedToId : input.attachedToId,
-      customTypeId: input.customTypeId === undefined ? existing.customTypeId : input.customTypeId,
-      position: input.position ?? existing.position,
+	      attachedToId: input.attachedToId === undefined ? existing.attachedToId : input.attachedToId,
+	      customTypeId: input.customTypeId === undefined ? existing.customTypeId : input.customTypeId,
+	      execution: {
+	        ...existing.execution,
+	        ...(input.execution ?? {})
+	      },
+	      position: input.position ?? existing.position,
       size: input.size ?? existing.size,
       agentStatus: existing.agentStatus
     };
     this.assertValidNode(next, nodeId);
+    const semanticChanged =
+      next.kind !== existing.kind ||
+      next.name !== existing.name ||
+      (next.summary ?? "") !== existing.summary ||
+      (next.codeContext ?? "") !== existing.code.context ||
+      (next.codeDirectory ?? null) !== existing.code.directory ||
+      (next.codeStartLine ?? null) !== existing.code.startLine ||
+      (next.codeEndLine ?? null) !== existing.code.endLine ||
+	      (next.language ?? "unknown") !== existing.code.language ||
+	      (next.parentId ?? null) !== existing.parentId ||
+	      (next.attachedToId ?? null) !== existing.attachedToId ||
+	      (next.customTypeId ?? null) !== existing.customTypeId ||
+	      !sameExecutionMetadata(blockExecutionMetadataSchema.parse(next.execution ?? {}), existing.execution);
+    const agentStatus =
+      this.statusAfterSemanticEdit({
+        projectId: existing.projectId,
+        entityType: "node",
+        entityId: existing.id,
+        currentStatus: existing.agentStatus,
+        changed: semanticChanged,
+        note: "Semantic node edit moved this block back to planning."
+      }) ?? existing.agentStatus;
 
     this.db
       .prepare(
@@ -1067,11 +1932,16 @@ export class GraphRepository {
           language = @language,
           parent_id = @parentId,
           attached_to_id = @attachedToId,
-          custom_type_id = @customTypeId,
-          source_path = @codeDirectory,
-          source_start_line = @codeStartLine,
-          source_end_line = @codeEndLine,
-          ui_x = @uiX,
+	          custom_type_id = @customTypeId,
+	          source_path = @codeDirectory,
+	          source_start_line = @codeStartLine,
+	          source_end_line = @codeEndLine,
+	          test_script_directory = @testScriptDirectory,
+	          virtual_environment = @virtualEnvironment,
+	          working_directory = @workingDirectory,
+	          setup_command = @setupCommand,
+	          test_command = @testCommand,
+	          ui_x = @uiX,
           ui_y = @uiY,
           ui_width = @uiWidth,
           ui_height = @uiHeight,
@@ -1092,14 +1962,22 @@ export class GraphRepository {
         language: next.language ?? "unknown",
         parentId: next.parentId ?? null,
         attachedToId: next.attachedToId ?? null,
-        customTypeId: next.customTypeId ?? null,
-        uiX: next.position?.x ?? existing.position.x,
+	        customTypeId: next.customTypeId ?? null,
+	        testScriptDirectory: blankToNull(next.execution?.testScriptDirectory ?? null),
+	        virtualEnvironment: blankToNull(next.execution?.virtualEnvironment ?? null),
+	        workingDirectory: blankToNull(next.execution?.workingDirectory ?? null),
+	        setupCommand: blankToNull(next.execution?.setupCommand ?? null),
+	        testCommand: blankToNull(next.execution?.testCommand ?? null),
+	        uiX: next.position?.x ?? existing.position.x,
         uiY: next.position?.y ?? existing.position.y,
         uiWidth: next.size?.width ?? existing.size.width,
         uiHeight: next.size?.height ?? existing.size.height,
-        agentStatus: next.agentStatus ?? existing.agentStatus
+        agentStatus
       });
 
+    if (semanticChanged) {
+      this.bumpGraphEntities(existing.projectId, [{ entityType: "node", entityId: existing.id, deleted: false }], "Updated graph node.");
+    }
     return this.getNode(nodeId);
   }
 
@@ -1135,7 +2013,7 @@ export class GraphRepository {
   }
 
   createEdgeFromMutation(projectId: string, input: EdgeMutation): GraphEdge {
-    return this.createEdge({
+    const edge = this.createEdge({
       id: `edge-${crypto.randomUUID()}`,
       projectId,
       kind: input.kind,
@@ -1149,6 +2027,8 @@ export class GraphRepository {
       pointingDirection: input.pointingDirection,
       agentStatus: "implemented"
     });
+    this.bumpGraphEntities(projectId, [{ entityType: "edge", entityId: edge.id, deleted: false }], "Created graph edge.");
+    return edge;
   }
 
   getEdge(edgeId: string): GraphEdge {
@@ -1183,6 +2063,23 @@ export class GraphRepository {
     if (source.projectId !== next.projectId || target.projectId !== next.projectId) {
       throw validationError("Edges must connect nodes within the same project.");
     }
+    const semanticChanged =
+      next.kind !== existing.kind ||
+      next.sourceNodeId !== existing.sourceNodeId ||
+      next.targetNodeId !== existing.targetNodeId ||
+      (next.label ?? null) !== existing.label ||
+      (next.codeContext ?? "") !== existing.codeContext ||
+      next.pointingEnabled !== existing.pointingEnabled ||
+      next.pointingDirection !== existing.pointingDirection;
+    const agentStatus =
+      this.statusAfterSemanticEdit({
+        projectId: existing.projectId,
+        entityType: "edge",
+        entityId: existing.id,
+        currentStatus: existing.agentStatus,
+        changed: semanticChanged,
+        note: "Semantic edge edit moved this edge back to planning."
+      }) ?? existing.agentStatus;
 
     this.db
       .prepare(
@@ -1197,7 +2094,8 @@ export class GraphRepository {
           color = @color,
           animated = @animated,
           pointing_enabled = @pointingEnabled,
-          pointing_direction = @pointingDirection
+          pointing_direction = @pointingDirection,
+          agent_status = @agentStatus
         WHERE id = @id
       `
       )
@@ -1211,19 +2109,24 @@ export class GraphRepository {
         color: next.color,
         animated: next.animated ? 1 : 0,
         pointingEnabled: next.pointingEnabled ? 1 : 0,
-        pointingDirection: next.pointingDirection
+        pointingDirection: next.pointingDirection,
+        agentStatus
       });
 
+    if (semanticChanged) {
+      this.bumpGraphEntities(existing.projectId, [{ entityType: "edge", entityId: existing.id, deleted: false }], "Updated graph edge.");
+    }
     return this.getEdge(edgeId);
   }
 
   deleteEdge(edgeId: string): void {
-    this.getEdge(edgeId);
+    const edge = this.getEdge(edgeId);
     this.db.prepare("DELETE FROM graph_edges WHERE id = ?").run(edgeId);
+    this.bumpGraphEntities(edge.projectId, [{ entityType: "edge", entityId: edge.id, deleted: true }], "Deleted graph edge.");
   }
 
   createBoundary(projectId: string, input: BoundaryMutation): GraphBoundary {
-    return this.createBoundaryRow({
+    const boundary = this.createBoundaryRow({
       id: `boundary-${crypto.randomUUID()}`,
       projectId,
       scopeNodeId: input.scopeNodeId,
@@ -1234,6 +2137,8 @@ export class GraphRepository {
       position: input.position,
       size: input.size
     });
+    this.bumpGraphEntities(projectId, [{ entityType: "boundary", entityId: boundary.id, deleted: false }], "Created graph boundary.");
+    return boundary;
   }
 
   getBoundary(boundaryId: string): GraphBoundary {
@@ -1258,6 +2163,18 @@ export class GraphRepository {
       size: input.size ?? existing.size
     };
     this.assertValidBoundary(next);
+    const semanticChanged =
+      next.scopeNodeId !== existing.scopeNodeId ||
+      next.name !== existing.name ||
+      next.summary !== existing.summary ||
+      next.codeContext !== existing.codeContext;
+    this.statusAfterSemanticEdit({
+      projectId: existing.projectId,
+      entityType: "boundary",
+      entityId: existing.id,
+      changed: semanticChanged,
+      note: "Semantic boundary edit moved this boundary back to planning."
+    });
 
     this.db
       .prepare(
@@ -1290,12 +2207,16 @@ export class GraphRepository {
         uiHeight: next.size.height
       });
     this.recomputeBoundaryMembership(boundaryId);
+    if (semanticChanged) {
+      this.bumpGraphEntities(existing.projectId, [{ entityType: "boundary", entityId: existing.id, deleted: false }], "Updated graph boundary.");
+    }
     return this.getBoundary(boundaryId);
   }
 
   deleteBoundary(boundaryId: string): void {
-    this.getBoundary(boundaryId);
+    const boundary = this.getBoundary(boundaryId);
     this.db.prepare("DELETE FROM graph_boundaries WHERE id = ?").run(boundaryId);
+    this.bumpGraphEntities(boundary.projectId, [{ entityType: "boundary", entityId: boundary.id, deleted: true }], "Deleted graph boundary.");
   }
 
   private createBoundaryRow(input: NewGraphBoundary): GraphBoundary {
@@ -1530,6 +2451,7 @@ export class GraphRepository {
   replaceScannedCodeGraph(projectId: string, snapshot: CodeGraphSnapshot): CodeGraphRefreshResult {
     const project = this.getProject(projectId);
     const save = this.db.transaction(() => {
+      const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
       this.deleteGeneratedCodeGraph(projectId);
       const frameworkId = this.findOrCreateScanFramework(projectId);
       const directoryIdByPath = new Map(snapshot.directories.map((directory) => [directory.path, directory.id]));
@@ -1642,6 +2564,11 @@ export class GraphRepository {
           100 + snapshot.files.length,
           `Refreshed generated Code Graph from ${snapshot.files.length} files and ${snapshot.symbols.length} symbols`
         );
+      this.bumpGraphEntities(
+        projectId,
+        [...this.listGeneratedGraphEntities(projectId, false), ...previousGeneratedEntities],
+        `Refreshed generated Code Graph from ${snapshot.files.length} files and ${snapshot.symbols.length} symbols.`
+      );
 
       return {
         nodeCount: snapshot.directories.length + snapshot.files.length + snapshot.symbols.length + workflowNodeCount,
@@ -1658,6 +2585,35 @@ export class GraphRepository {
   private deleteGeneratedCodeGraph(projectId: string): void {
     this.db.prepare("DELETE FROM graph_nodes WHERE project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')").run(projectId);
     this.db.prepare("DELETE FROM graph_revisions WHERE project_id = ? AND id LIKE 'code-graph-revision-%'").run(projectId);
+  }
+
+  private listGeneratedGraphEntities(projectId: string, deleted: boolean): GraphEntityVersionInput[] {
+    const nodes = this.db
+      .prepare("SELECT id FROM graph_nodes WHERE project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')")
+      .all(projectId) as Array<{ id: string }>;
+    const edges = this.db
+      .prepare(
+        `
+        SELECT edge.id
+        FROM graph_edges edge
+        LEFT JOIN graph_nodes source ON source.id = edge.source_node_id
+        LEFT JOIN graph_nodes target ON target.id = edge.target_node_id
+        WHERE edge.project_id = ?
+          AND (
+            edge.id LIKE 'scan-%'
+            OR edge.id LIKE 'code-%'
+            OR source.id LIKE 'scan-%'
+            OR source.id LIKE 'code-%'
+            OR target.id LIKE 'scan-%'
+            OR target.id LIKE 'code-%'
+          )
+      `
+      )
+      .all(projectId) as Array<{ id: string }>;
+    return [
+      ...nodes.map((node) => ({ entityType: "node" as const, entityId: node.id, deleted })),
+      ...edges.map((edge) => ({ entityType: "edge" as const, entityId: edge.id, deleted }))
+    ];
   }
 
   private createFunctionWorkflow(projectId: string, symbol: CodeGraphSymbol): number {
@@ -2132,6 +3088,9 @@ export class GraphRepository {
 
   seedSelfGraph(rootPath: string): Project {
     const seed = this.db.transaction(() => {
+      const previousSuppression = this.suppressGraphVersionBumps;
+      this.suppressGraphVersionBumps = true;
+      try {
       this.clearAllGraphData();
 
       const project = this.createProject({
@@ -3296,7 +4255,12 @@ export class GraphRepository {
         )
         .run({ projectId: project.id });
 
+      this.ensureDefaultSettings(project.id);
+
       return project;
+      } finally {
+        this.suppressGraphVersionBumps = previousSuppression;
+      }
     });
 
     return seed();
@@ -3501,6 +4465,22 @@ export class GraphRepository {
         this.upsertAgentSettings(projectId, defaultAgentConfig(agentKind));
       }
     }
+    const legacyCodingRow = this.db
+      .prepare("SELECT * FROM agent_settings WHERE project_id = ? AND agent_kind = 'coding'")
+      .get(projectId) as AgentSettingsRow | undefined;
+    const legacyCodingConfig = legacyCodingRow ? mapAgentSettings(legacyCodingRow) : defaultAgentConfig("coding");
+    for (const mode of CODING_AGENT_MODES) {
+      if (!this.hasCodingAgentSettings(projectId, mode)) {
+        this.upsertCodingAgentSettings(projectId, {
+          mode,
+          provider: legacyCodingConfig.provider,
+          model: legacyCodingConfig.model,
+          parallelLimit: legacyCodingConfig.parallelLimit,
+          apiKeySource: legacyCodingConfig.apiKeySource,
+          systemPromptSource: legacyCodingConfig.systemPromptSource
+        });
+      }
+    }
   }
 
   private upsertAgentSettings(projectId: string, agent: AgentConfig): void {
@@ -3534,6 +4514,55 @@ export class GraphRepository {
       .run({
         projectId,
         agentKind: agent.agentKind,
+        provider: agent.provider,
+        model: agent.model,
+        parallelLimit: agent.parallelLimit,
+        apiKeySourceType: agent.apiKeySource.type,
+        apiKeySourceValue: agent.apiKeySource.value ?? "",
+        systemPromptSourceType: agent.systemPromptSource.type,
+        systemPromptSourceValue: agent.systemPromptSource.value ?? ""
+      });
+  }
+
+  private hasCodingAgentSettings(projectId: string, mode: CodingAgentMode): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT coding_mode FROM coding_agent_settings WHERE project_id = ? AND coding_mode = ?")
+        .get(projectId, mode)
+    );
+  }
+
+  private upsertCodingAgentSettings(projectId: string, agent: CodingAgentConfig): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO coding_agent_settings (
+          project_id, coding_mode, provider, model, parallel_limit,
+          api_key_source_type, api_key_source_value,
+          system_prompt_source_type, system_prompt_source_value,
+          created_at, updated_at
+        )
+        VALUES (
+          @projectId, @codingMode, @provider, @model, @parallelLimit,
+          @apiKeySourceType, @apiKeySourceValue,
+          @systemPromptSourceType, @systemPromptSourceValue,
+          datetime('now'), datetime('now')
+        )
+        ON CONFLICT(project_id, coding_mode)
+        DO UPDATE SET
+          provider = excluded.provider,
+          model = excluded.model,
+          parallel_limit = excluded.parallel_limit,
+          api_key_source_type = excluded.api_key_source_type,
+          api_key_source_value = excluded.api_key_source_value,
+          system_prompt_source_type = excluded.system_prompt_source_type,
+          system_prompt_source_value = excluded.system_prompt_source_value,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        projectId,
+        codingMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
         parallelLimit: agent.parallelLimit,
@@ -4120,6 +5149,23 @@ function defaultAgentConfig(agentKind: AgentKind): AgentConfig {
   };
 }
 
+function defaultCodingAgentConfig(mode: CodingAgentMode): CodingAgentConfig {
+  return {
+    mode,
+    provider: "fake",
+    model: "graphcode-fake-v1",
+    parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
+    apiKeySource: {
+      type: "env",
+      value: "OPENAI_API_KEY"
+    },
+    systemPromptSource: {
+      type: "manual",
+      value: defaultCodingSystemPrompt(mode)
+    }
+  };
+}
+
 function defaultApiKeyEnv(agentKind: AgentKind): string {
   switch (agentKind) {
     case "planning":
@@ -4130,6 +5176,19 @@ function defaultApiKeyEnv(agentKind: AgentKind): string {
       return "OPENAI_API_KEY";
     case "scanning":
       return "OPENAI_API_KEY";
+    default:
+      return "";
+  }
+}
+
+function defaultCodingSystemPrompt(mode: CodingAgentMode): string {
+  switch (mode) {
+    case "small":
+      return "Produce minimal scoped diffs for the selected low-level GraphCode block.";
+    case "medium":
+      return "Produce scoped diffs using the selected block plus its containing function workflow.";
+    case "large":
+      return "Produce scoped diffs using broader graph context while preserving selected-block edit boundaries.";
     default:
       return "";
   }
@@ -4188,12 +5247,54 @@ function mapAgentSettings(row: AgentSettingsRow): AgentConfig {
   };
 }
 
+function mapCodingAgentSettingsView(row: CodingAgentSettingsRow): CodingAgentConfigView {
+  const apiValue = row.api_key_source_value ?? "";
+  const promptValue = row.system_prompt_source_value ?? "";
+  return {
+    mode: row.coding_mode,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: ""
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_type === "manual" ? promptValue : ""
+    },
+    apiKeyConfigured: apiValue.trim().length > 0,
+    systemPromptConfigured: promptValue.trim().length > 0
+  };
+}
+
+function mapCodingAgentSettings(row: CodingAgentSettingsRow): CodingAgentConfig {
+  return {
+    mode: row.coding_mode,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: row.api_key_source_value
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_value
+    }
+  };
+}
+
 function mapAgentRun(row: AgentRunRow): AgentRun {
   return {
     id: row.id,
     projectId: row.project_id,
     agentKind: row.agent_kind,
+    codingMode: row.agent_kind === "coding" ? (row.coding_mode ?? "medium") : null,
     status: row.status,
+    baseGraphRevision: row.base_graph_revision ?? 0,
+    appliedGraphRevision: row.applied_graph_revision ?? null,
+    conflictReason: row.conflict_reason ?? null,
     targetNodeId: row.target_node_id,
     prompt: row.prompt,
     response: row.response,
@@ -4214,6 +5315,66 @@ function parseGraphPatch(value: string | null): GraphPatch | null {
   } catch {
     return null;
   }
+}
+
+function parseCodeProposalArtifactManifest(value: string | null): CodeProposalArtifactManifest | null {
+  if (!value) {
+    return null;
+  }
+  try {
+    return codeProposalArtifactManifestSchema.parse(JSON.parse(value));
+  } catch {
+    return null;
+  }
+}
+
+function mapCodeProposal(row: CodeProposalRow): StoredCodeProposal {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    agentRunId: row.agent_run_id,
+    targetNodeId: row.target_node_id,
+    diff: row.diff,
+    artifactManifest: parseCodeProposalArtifactManifest(row.artifact_manifest_json),
+    createdAt: row.created_at
+  };
+}
+
+function mapCodingWorkflow(row: CodingWorkflowRow, items: CodingWorkflowItem[], scope: GraphNode): CodingWorkflow {
+  return {
+    id: row.id,
+    projectId: row.project_id,
+    scopeNodeId: row.scope_node_id,
+    scopeName: scope.name,
+    status: row.status,
+    currentLayer: row.current_layer,
+    summary: row.summary,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    items
+  };
+}
+
+function mapCodingWorkflowItem(row: CodingWorkflowItemRow): CodingWorkflowItem {
+  return {
+    id: row.id,
+    workflowId: row.workflow_id,
+    projectId: row.project_id,
+    nodeId: row.node_id,
+    nodeName: row.node_name,
+    nodeKind: row.node_kind,
+    layerIndex: row.layer_index,
+    recommendedMode: row.recommended_mode,
+    selectedMode: row.selected_mode,
+    modeReason: row.mode_reason,
+    status: row.status,
+    conflictGroup: row.conflict_group,
+    agentRunId: row.agent_run_id,
+    proposalId: row.proposal_id,
+    appliedAt: row.applied_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
 }
 
 function mapAgentMessage(row: AgentMessageRow): AgentMessage {
@@ -4237,6 +5398,21 @@ function mapGraphStatusHistory(row: GraphStatusHistoryRow): GraphStatusHistory {
     agentRunId: row.agent_run_id,
     createdAt: row.created_at
   };
+}
+
+function blankToNull(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed ? trimmed : null;
+}
+
+function sameExecutionMetadata(left: BlockExecutionMetadata, right: BlockExecutionMetadata): boolean {
+  return (
+    blankToNull(left.testScriptDirectory) === blankToNull(right.testScriptDirectory) &&
+    blankToNull(left.virtualEnvironment) === blankToNull(right.virtualEnvironment) &&
+    blankToNull(left.workingDirectory) === blankToNull(right.workingDirectory) &&
+    blankToNull(left.setupCommand) === blankToNull(right.setupCommand) &&
+    blankToNull(left.testCommand) === blankToNull(right.testCommand)
+  );
 }
 
 function mapCustomBlockType(row: CustomBlockTypeRow): CustomBlockType {
@@ -4303,12 +5479,19 @@ function mapNode(row: NodeRow, childCount: number, tags: GraphTag[] = []): Graph
     parentId: row.parent_id,
     attachedToId: row.attached_to_id,
     customTypeId: row.custom_type_id,
-    source: {
-      path: row.source_path ?? row.code_directory,
-      startLine: row.source_start_line ?? row.code_start_line,
-      endLine: row.source_end_line ?? row.code_end_line
-    },
-    position: {
+	    source: {
+	      path: row.source_path ?? row.code_directory,
+	      startLine: row.source_start_line ?? row.code_start_line,
+	      endLine: row.source_end_line ?? row.code_end_line
+	    },
+	    execution: {
+	      testScriptDirectory: blankToNull(row.test_script_directory),
+	      virtualEnvironment: blankToNull(row.virtual_environment),
+	      workingDirectory: blankToNull(row.working_directory),
+	      setupCommand: blankToNull(row.setup_command),
+	      testCommand: blankToNull(row.test_command)
+	    },
+	    position: {
       x: row.ui_x,
       y: row.ui_y
     },
@@ -4448,6 +5631,96 @@ function defaultSizeForKind(kind: GraphNodeKind): { width: number; height: numbe
     return { width: 224, height: 112 };
   }
   return { width: 260, height: 136 };
+}
+
+function collectCodingScopeNodeIds(scope: GraphNode, nodeById: Map<string, GraphNode>): Set<string> {
+  const included = new Set<string>([scope.id]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const node of nodeById.values()) {
+      if (included.has(node.id)) {
+        continue;
+      }
+      if ((node.parentId && included.has(node.parentId)) || (node.attachedToId && included.has(node.attachedToId))) {
+        included.add(node.id);
+        changed = true;
+      }
+    }
+  }
+  return included;
+}
+
+function nearestCandidateOwner(node: GraphNode, nodeById: Map<string, GraphNode>, candidateIds: Set<string>): string | null {
+  const seen = new Set<string>();
+  let currentId = node.attachedToId ?? node.parentId;
+  while (currentId && !seen.has(currentId)) {
+    if (candidateIds.has(currentId)) {
+      return currentId;
+    }
+    seen.add(currentId);
+    const current = nodeById.get(currentId);
+    currentId = current?.attachedToId ?? current?.parentId ?? null;
+  }
+  return null;
+}
+
+function recommendCodingMode(node: GraphNode, nodes: GraphNode[], edges: GraphEdge[], scopeIds: Set<string>): { mode: CodingAgentMode; reason: string } {
+  const directDomainChildren = nodes.filter((candidate) => candidate.parentId === node.id && isDomainNodeKind(candidate.kind));
+  const owner = node.attachedToId ? nodes.find((candidate) => candidate.id === node.attachedToId) : null;
+  const ownerDomainChildren = owner ? nodes.filter((candidate) => candidate.parentId === owner.id && isDomainNodeKind(candidate.kind)) : [];
+  const isLeafFunctionOrObject = (node.kind === "function" || node.kind === "object") && directDomainChildren.length === 0;
+  const isLeafWorkflowChild = isAttachmentNodeKind(node.kind) && !!owner && (owner.kind === "function" || owner.kind === "object") && ownerDomainChildren.length === 0;
+  const connectedEdges = edges.filter((edge) => edge.sourceNodeId === node.id || edge.targetNodeId === node.id);
+  const crossScopeEdge = connectedEdges.some((edge) => !scopeIds.has(edge.sourceNodeId) || !scopeIds.has(edge.targetNodeId));
+  const sourceById = new Map(nodes.map((candidate) => [candidate.id, candidate.source.path ?? candidate.code.directory ?? null]));
+  const connectedSourcePaths = new Set(connectedEdges.flatMap((edge) => [sourceById.get(edge.sourceNodeId), sourceById.get(edge.targetNodeId)]).filter((value): value is string => Boolean(value)));
+  const ownSourcePath = node.source.path ?? node.code.directory ?? null;
+  const crossFile = ownSourcePath ? [...connectedSourcePaths].some((sourcePath) => sourcePath !== ownSourcePath) : connectedSourcePaths.size > 1;
+  if ((isLeafFunctionOrObject || isLeafWorkflowChild) && !crossScopeEdge && !crossFile) {
+    return { mode: "small", reason: "Leaf-local block with no cross-file or cross-scope graph edges." };
+  }
+  if (crossScopeEdge || crossFile || node.kind === "framework" || node.kind === "website") {
+    return { mode: "large", reason: "Broader graph context is needed because this block crosses scope, file, or top-level boundaries." };
+  }
+  return { mode: "medium", reason: "Module-local or non-leaf work that should include the containing workflow canvas and direct relationships." };
+}
+
+function codingConflictGroup(node: GraphNode, nodeById: Map<string, GraphNode>): string {
+  const owner = resolveConflictOwner(node, nodeById);
+  const sourcePath = node.source.path ?? node.code.directory ?? "no-source";
+  return `${sourcePath}:${owner?.id ?? node.id}`;
+}
+
+function resolveConflictOwner(node: GraphNode, nodeById: Map<string, GraphNode>): GraphNode | null {
+  if (node.kind === "function" || node.kind === "object") {
+    return node;
+  }
+  const seen = new Set<string>();
+  let current = node;
+  while (current.attachedToId && !seen.has(current.attachedToId)) {
+    seen.add(current.attachedToId);
+    const owner = nodeById.get(current.attachedToId);
+    if (!owner) {
+      break;
+    }
+    if (owner.kind === "function" || owner.kind === "object") {
+      return owner;
+    }
+    current = owner;
+  }
+  return null;
+}
+
+function sanitizeArtifactPath(value: string): string {
+  const normalized = value.replace(/\\/g, "/").replace(/^\/+/, "");
+  const parts = normalized.split("/").filter((part) => part && part !== "." && part !== "..");
+  return parts.join("/") || "test-script.txt";
+}
+
+function isPathInside(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 const EDGE_COLORS: Record<GraphEdgeKind, string> = {

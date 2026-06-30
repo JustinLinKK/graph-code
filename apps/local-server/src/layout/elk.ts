@@ -19,7 +19,11 @@ export async function layoutCanvasWithElk(nodes: GraphNode[], edges: GraphEdge[]
       "elk.algorithm": "layered",
       "elk.direction": "RIGHT",
       "elk.spacing.nodeNode": "44",
+      "elk.spacing.edgeEdge": "28",
+      "elk.spacing.edgeNode": "36",
       "elk.layered.spacing.nodeNodeBetweenLayers": "92",
+      "elk.layered.spacing.edgeEdgeBetweenLayers": "30",
+      "elk.layered.spacing.edgeNodeBetweenLayers": "44",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
       "elk.edgeRouting": "ORTHOGONAL"
     },
@@ -31,7 +35,7 @@ export async function layoutCanvasWithElk(nodes: GraphNode[], edges: GraphEdge[]
         height: size.height
       };
     }),
-    edges: buildElkEdges(nodes, edges, includedIds)
+    edges: buildElkEdgesForLayout(nodes, edges, includedIds)
   };
 
   const laidOut = await elk.layout(elkGraph);
@@ -128,24 +132,43 @@ export async function layoutCanvasWithBoundaryGroups(nodes: GraphNode[], edges: 
   return { nodeLayouts, boundaryLayouts };
 }
 
-function buildElkEdges(nodes: GraphNode[], edges: GraphEdge[], includedIds: Set<string>): ElkExtendedEdge[] {
+export function buildElkEdgesForLayout(nodes: GraphNode[], edges: GraphEdge[], includedIds: Set<string>): ElkExtendedEdge[] {
   const semanticEdges = edges
     .filter((edge) => includedIds.has(edge.sourceNodeId) && includedIds.has(edge.targetNodeId))
-    .map((edge) => ({
-      id: edge.id,
-      sources: [edge.sourceNodeId],
-      targets: [edge.targetNodeId]
-    }));
+    .map((edge) => {
+      const label = edge.label?.trim() || edge.kind;
+      return {
+        id: edge.id,
+        sources: [edge.sourceNodeId],
+        targets: [edge.targetNodeId],
+        labels: [{ text: label, ...measureEdgeLabelForLayout(label) }]
+      };
+    });
 
   const attachmentEdges = nodes
     .filter((node) => node.attachedToId && includedIds.has(node.attachedToId))
-    .map((node) => ({
-      id: `layout-attachment-${node.attachedToId}-${node.id}`,
-      sources: [node.attachedToId!],
-      targets: [node.id]
-    }));
+    .map((node) => {
+      const label = node.kind;
+      return {
+        id: `layout-attachment-${node.attachedToId}-${node.id}`,
+        sources: [node.attachedToId!],
+        targets: [node.id],
+        labels: [{ text: label, ...measureEdgeLabelForLayout(label) }]
+      };
+    });
 
   return [...semanticEdges, ...attachmentEdges];
+}
+
+export function measureEdgeLabelForLayout(label: string): { width: number; height: number } {
+  const normalized = label.trim() || "edge";
+  const longestWord = Math.max(0, ...normalized.split(/\s+/).map((part) => part.length));
+  const width = Math.min(260, Math.max(58, 18 + Math.max(normalized.length * 6.4, longestWord * 7.2)));
+  const lineCount = Math.max(1, Math.ceil(normalized.length / Math.max(12, Math.floor(width / 6.4))));
+  return {
+    width: Math.round(width),
+    height: 10 + Math.min(3, lineCount) * 15
+  };
 }
 
 function measureNodeForLayout(node: GraphNode): { width: number; height: number } {
@@ -242,12 +265,19 @@ function boundaryAsLayoutNode(boundary: GraphBoundary, memberLayouts: LayoutResu
     parentId: boundary.scopeNodeId,
     attachedToId: null,
     customTypeId: null,
-    source: {
-      path: null,
-      startLine: null,
-      endLine: null
-    },
-    position: boundary.position,
+	    source: {
+	      path: null,
+	      startLine: null,
+	      endLine: null
+	    },
+	    execution: {
+	      testScriptDirectory: null,
+	      virtualEnvironment: null,
+	      workingDirectory: null,
+	      setupCommand: null,
+	      testCommand: null
+	    },
+	    position: boundary.position,
     size: {
       width,
       height: Math.max(boundary.size.height, bounds.height + topPadding + BOUNDARY_PADDING_BOTTOM)

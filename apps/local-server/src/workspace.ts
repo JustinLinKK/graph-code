@@ -9,6 +9,9 @@ import {
   type AgentRun,
   type CanvasGraph,
   type CodingAgentRequest,
+  type CodingWorkflow,
+  type CodingWorkflowApplyLayerRequest,
+  type CodingWorkflowStartRequest,
   type GithubDevicePollRequest,
   type GithubDevicePollResponse,
   type GithubDeviceStartRequest,
@@ -197,23 +200,25 @@ export class WorkspaceRuntime {
       status: "running"
     });
     this.repository.addAgentMessage({ runId: run.id, role: "user", content: input.prompt });
-    return this.finishAgentRun(run, async () => {
-      const result = await runPlanningAgent(input, {
+    const execute = () =>
+      runPlanningAgent(input, {
         config: this.repository.getAgentConfig(input.projectId, "planning"),
         runId: run.id,
         toolbox: this.createToolbox(input.projectId)
       });
-      if (result.graphPatch) {
-        await this.applyGraphPatch(input.projectId, result.graphPatch, run.id);
-      }
-      return result;
-    });
+    if (input.background) {
+      void this.finishAgentRun(run, execute);
+      return run;
+    }
+    return this.finishAgentRun(run, execute);
   }
 
-  async runCoding(input: CodingAgentRequest): Promise<AgentRun> {
+  async runCoding(input: CodingAgentRequest, options: { autoReview?: boolean } = {}): Promise<AgentRun> {
+    const mode = input.mode ?? "medium";
     const run = this.repository.createAgentRun({
       projectId: input.projectId,
       agentKind: "coding",
+      codingMode: mode,
       targetNodeId: input.nodeId,
       prompt: input.prompt ?? "",
       status: "running"
@@ -221,15 +226,41 @@ export class WorkspaceRuntime {
     this.repository.addAgentMessage({ runId: run.id, role: "user", content: input.prompt ?? "Start code" });
     const codingRun = await this.finishAgentRun(run, () =>
       runCodingAgent(input, {
-        config: this.repository.getAgentConfig(input.projectId, "coding"),
+        config: { ...this.repository.getCodingAgentConfig(input.projectId, mode), agentKind: "coding" },
         runId: run.id,
         toolbox: this.createToolbox(input.projectId)
       })
     );
-    if (codingRun.status === "succeeded" && this.repository.getWorkspaceSettings(input.projectId).automation.autoReviewAfterCoding) {
+    if (codingRun.status === "succeeded" && (options.autoReview ?? true) && this.repository.getWorkspaceSettings(input.projectId).automation.autoReviewAfterCoding) {
       await this.runReview({ projectId: input.projectId, runId: codingRun.id });
     }
     return codingRun;
+  }
+
+  previewCodingWorkflow(input: { projectId: string; scopeNodeId: string }): CodingWorkflow {
+    return this.repository.previewCodingWorkflow(input.projectId, input.scopeNodeId);
+  }
+
+  getCodingWorkflow(projectId: string, workflowId: string): CodingWorkflow {
+    const workflow = this.repository.getCodingWorkflow(workflowId);
+    if (workflow.projectId !== projectId) {
+      throw validationError("Coding workflow does not belong to this project.");
+    }
+    return workflow;
+  }
+
+  async startCodingWorkflow(input: CodingWorkflowStartRequest): Promise<CodingWorkflow> {
+    const workflow = this.repository.createCodingWorkflow(input.projectId, input.scopeNodeId, input.modeOverrides, "running");
+    await this.runCodingWorkflowCurrentLayer(workflow.id);
+    return this.repository.getCodingWorkflow(workflow.id);
+  }
+
+  async applyCodingWorkflowLayer(input: CodingWorkflowApplyLayerRequest): Promise<CodingWorkflow> {
+    const workflow = this.repository.applyCodingWorkflowLayer(input.projectId, input.workflowId, input.layerIndex);
+    if (workflow.status === "blocked") {
+      await this.runCodingWorkflowCurrentLayer(workflow.id);
+    }
+    return this.repository.getCodingWorkflow(workflow.id);
   }
 
   async runReview(input: ReviewAgentRequest): Promise<AgentRun> {
@@ -255,6 +286,10 @@ export class WorkspaceRuntime {
         }
       )
     );
+  }
+
+  applyAgentGraphPatch(projectId: string, runId: string): AgentRun {
+    return this.repository.applyAgentGraphPatch(projectId, runId);
   }
 
   async runScanning(input: ScanningAgentRequest): Promise<AgentRun> {
@@ -415,6 +450,48 @@ export class WorkspaceRuntime {
     }
   }
 
+  private async runCodingWorkflowCurrentLayer(workflowId: string): Promise<void> {
+    let workflow = this.repository.getCodingWorkflow(workflowId);
+    const readyItems = this.repository.getReadyCodingWorkflowItems(workflowId);
+    if (readyItems.length === 0) {
+      const hasPending = workflow.items.some((item) => item.status === "pending" || item.status === "blocked" || item.status === "running");
+      this.repository.updateCodingWorkflowStatus(workflowId, hasPending ? "blocked" : "succeeded");
+      return;
+    }
+    this.repository.updateCodingWorkflowStatus(workflowId, "running");
+    const groups = new Map<string, typeof readyItems>();
+    for (const item of readyItems) {
+      const group = groups.get(item.conflictGroup) ?? [];
+      group.push(item);
+      groups.set(item.conflictGroup, group);
+    }
+    await Promise.all(
+      [...groups.values()].map(async (group) => {
+        for (const item of group) {
+          this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "running" });
+          const run = await this.runCoding({
+            projectId: item.projectId,
+            nodeId: item.nodeId,
+            mode: item.selectedMode,
+            recommendedModeReason: item.modeReason,
+            prompt: `Layered coding workflow ${workflowId}, layer ${item.layerIndex}. Implement the scoped planning block ${item.nodeName}.`
+          }, { autoReview: false });
+          const proposal = run.status === "succeeded" ? this.repository.getLatestCodeProposalForRun(run.id) : null;
+          this.repository.updateCodingWorkflowItem({
+            itemId: item.id,
+            status: run.status === "succeeded" ? "proposed" : "failed",
+            agentRunId: run.id,
+            proposalId: proposal?.id ?? null
+          });
+        }
+      })
+    );
+    workflow = this.repository.getCodingWorkflow(workflowId);
+    const currentLayerItems = workflow.items.filter((item) => item.layerIndex === workflow.currentLayer);
+    const complete = currentLayerItems.every((item) => item.status === "proposed" || item.status === "failed" || item.status === "skipped" || item.status === "applied");
+    this.repository.updateCodingWorkflowStatus(workflowId, complete ? "blocked" : "running");
+  }
+
   private createToolbox(projectId: string): GraphCodeToolbox {
     return {
       readGraph: async (inputProjectId) => ({
@@ -422,6 +499,8 @@ export class WorkspaceRuntime {
         edges: this.repository.listProjectEdges(inputProjectId)
       }),
       getNodeDetail: async (nodeId) => this.repository.getNodeDetail(nodeId),
+      getCanvasGraph: async (inputProjectId, rootNodeId, includeAttachments) =>
+        this.repository.getCanvasGraph({ projectId: inputProjectId, rootNodeId, includeAttachments: includeAttachments ?? true }),
       setStatuses: async (inputProjectId, patches) => {
         this.repository.setGraphStatuses(inputProjectId, patches);
       },
@@ -429,8 +508,9 @@ export class WorkspaceRuntime {
         await this.applyGraphPatch(inputProjectId, patch, runId);
       },
       readSourceFile: async (relativePath) => this.readSourceFile(projectId, relativePath),
-      writeCodeProposal: async (inputProjectId, runId, targetNodeId, diff) => {
-        this.repository.storeCodeProposal({ projectId: inputProjectId, agentRunId: runId, targetNodeId, diff });
+      resolveExecutionMetadata: async (nodeId) => this.repository.resolveExecutionMetadata(nodeId),
+      writeCodeProposal: async (inputProjectId, runId, targetNodeId, diff, artifactManifest) => {
+        this.repository.storeCodeProposal({ projectId: inputProjectId, agentRunId: runId, targetNodeId, diff, artifactManifest });
       },
       readGitStatus: async (inputProjectId) => this.readGitStatus(inputProjectId),
       refreshCodeGraph: async (inputProjectId, rootPath) => this.refreshCodeGraph(inputProjectId, rootPath)

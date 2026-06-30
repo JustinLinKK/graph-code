@@ -1,12 +1,21 @@
-import type { CanvasGraph, GraphBoundary, GraphEdge, GraphNode, HierarchyNode, NodeDetail, Project } from "@graphcode/graph-model";
+import type { AgentRun, CanvasGraph, GraphBoundary, GraphEdge, GraphNode, HierarchyNode, NodeDetail, Project } from "@graphcode/graph-model";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
+const reactFlowMock = vi.hoisted(() => ({
+  fitView: vi.fn(),
+  setCenter: vi.fn(),
+  setViewport: vi.fn()
+}));
+
 vi.mock("@xyflow/react", async () => ({
   applyNodeChanges: (_changes: unknown, nodes: unknown) => nodes,
   Background: ({ color, gap, size }: { color?: string; gap?: number; size?: number }) => <div data-testid="background" data-color={color} data-gap={gap} data-size={size} />,
+  BaseEdge: () => null,
   Controls: () => <div data-testid="controls" />,
+  EdgeLabelRenderer: ({ children }: { children: React.ReactNode }) => <>{children}</>,
+  getSmoothStepPath: () => ["M 0 0", 0, 0, 0, 0],
   Handle: () => null,
   MarkerType: { ArrowClosed: "arrowclosed" },
   MiniMap: () => <div data-testid="minimap" />,
@@ -23,12 +32,12 @@ vi.mock("@xyflow/react", async () => ({
     onNodeDragStop,
     onEdgeClick,
     onConnect,
-    onMouseDown,
+    onPaneClick,
     onMouseMove,
-    onMouseUp,
-    className,
-    colorMode,
-    nodesDraggable,
+      onMoveEnd,
+	    className,
+	    colorMode,
+	    nodesDraggable,
     nodesConnectable,
     elementsSelectable,
     panOnDrag,
@@ -62,11 +71,11 @@ vi.mock("@xyflow/react", async () => ({
       node: { id: string; position: { x: number; y: number }; style?: { width?: number; height?: number }; data: { node?: GraphNode; boundary?: GraphBoundary } }
     ) => void;
     onEdgeClick?: (event: unknown, edge: GraphEdge) => void;
-    onConnect?: (connection: { source: string; target: string }) => void;
-    onMouseDown?: (event: { button: number; clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
+	    onConnect?: (connection: { source: string; target: string }) => void;
+    onPaneClick?: (event: { button: number; clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
     onMouseMove?: (event: { clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
-    onMouseUp?: (event: { clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
-    className?: string;
+      onMoveEnd?: (event: null, viewport: { x: number; y: number; zoom: number }) => void;
+	    className?: string;
     colorMode?: string;
     nodesDraggable?: boolean;
     nodesConnectable?: boolean;
@@ -142,9 +151,36 @@ vi.mock("@xyflow/react", async () => ({
         onClick={() => {
           const preventDefault = vi.fn();
           const stopPropagation = vi.fn();
-          onMouseDown?.({ button: 0, clientX: 10, clientY: 20, preventDefault, stopPropagation });
+          onPaneClick?.({ button: 0, clientX: 10, clientY: 20, preventDefault, stopPropagation });
           onMouseMove?.({ clientX: 210, clientY: 160, preventDefault, stopPropagation });
-          onMouseUp?.({ clientX: 210, clientY: 160, preventDefault, stopPropagation });
+          onPaneClick?.({ button: 0, clientX: 210, clientY: 160, preventDefault, stopPropagation });
+        }}
+      />
+      <button
+        type="button"
+        aria-label="Start boundary"
+        onClick={() => {
+          const preventDefault = vi.fn();
+          const stopPropagation = vi.fn();
+          onPaneClick?.({ button: 0, clientX: 10, clientY: 20, preventDefault, stopPropagation });
+        }}
+      />
+      <button
+        type="button"
+        aria-label="Preview boundary"
+        onClick={() => {
+          const preventDefault = vi.fn();
+          const stopPropagation = vi.fn();
+          onMouseMove?.({ clientX: 210, clientY: 160, preventDefault, stopPropagation });
+        }}
+      />
+      <button
+        type="button"
+        aria-label="Finish boundary"
+        onClick={() => {
+          const preventDefault = vi.fn();
+          const stopPropagation = vi.fn();
+          onPaneClick?.({ button: 0, clientX: 210, clientY: 160, preventDefault, stopPropagation });
         }}
       />
       <button
@@ -152,14 +188,16 @@ vi.mock("@xyflow/react", async () => ({
         aria-label="Draw edge gesture"
         onClick={() => onConnect?.({ source: "input-user-select", target: "process-web" })}
       />
+      <button type="button" aria-label="Move viewport" onClick={() => onMoveEnd?.(null, { x: 12, y: 34, zoom: 0.8 })} />
       {children}
     </div>
   ),
   ReactFlowProvider: ({ children }: { children: React.ReactNode }) => <div>{children}</div>,
   useReactFlow: () => ({
-    fitView: vi.fn(),
+    fitView: reactFlowMock.fitView,
     screenToFlowPosition: ({ x, y }: { x: number; y: number }) => ({ x, y }),
-    setCenter: vi.fn()
+    setCenter: reactFlowMock.setCenter,
+    setViewport: reactFlowMock.setViewport
   })
 }));
 
@@ -552,13 +590,23 @@ const defaultSettings = {
     }
   },
   automation: { autoReviewAfterCoding: true },
-  agents: ["planning", "coding", "review", "scanning"].map((agentKind) => ({
+  agents: ["planning", "review", "scanning"].map((agentKind) => ({
     agentKind,
     provider: "fake",
     model: "fake",
     parallelLimit: agentKind === "scanning" ? 8 : 4,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${agentKind} prompt` },
+    apiKeyConfigured: false,
+    systemPromptConfigured: true
+  })),
+  codingAgents: ["small", "medium", "large"].map((mode) => ({
+    mode,
+    provider: "fake",
+    model: `fake-${mode}`,
+    parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
+    apiKeySource: { type: "env", value: "" },
+    systemPromptSource: { type: "manual", value: `${mode} coding prompt` },
     apiKeyConfigured: false,
     systemPromptConfigured: true
   }))
@@ -582,15 +630,62 @@ function settingsViewFromMutation(input: any) {
         apiKeyConfigured: Boolean(next?.apiKeySource?.value) || agent.apiKeyConfigured,
         systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
       };
+    }),
+    codingAgents: defaultSettings.codingAgents.map((agent) => {
+      const next = input.codingAgents?.find((item: { mode: string }) => item.mode === agent.mode);
+      return {
+        ...agent,
+        ...(next ?? {}),
+        apiKeyConfigured: Boolean(next?.apiKeySource?.value) || agent.apiKeyConfigured,
+        systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
+      };
     })
   };
 }
 
 describe("GraphCode app shell", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-    document.documentElement.dataset.theme = "system";
-    vi.stubGlobal(
+	  beforeEach(() => {
+		    vi.restoreAllMocks();
+        reactFlowMock.fitView.mockClear();
+        reactFlowMock.setCenter.mockClear();
+        reactFlowMock.setViewport.mockClear();
+        window.localStorage.clear();
+		    document.documentElement.dataset.theme = "system";
+	    const agentRuns: AgentRun[] = [];
+	    let planningRunCount = 0;
+	    const workflowResponse = {
+	      id: "workflow-1",
+	      projectId: project.id,
+	      scopeNodeId: "module-web",
+	      scopeName: "Web Workspace",
+	      status: "preview",
+	      currentLayer: 0,
+	      summary: "1 coding item planned under Web Workspace.",
+	      createdAt: "now",
+	      updatedAt: "now",
+	      items: [
+	        {
+	          id: "workflow-item-1",
+	          workflowId: "workflow-1",
+	          projectId: project.id,
+	          nodeId: "function-render-widget",
+	          nodeName: "renderWidget",
+	          nodeKind: "function",
+	          layerIndex: 0,
+	          recommendedMode: "small",
+	          selectedMode: "small",
+	          modeReason: "Leaf-local block.",
+	          status: "pending",
+	          conflictGroup: "apps/web/src/App.tsx:function-render-widget",
+	          agentRunId: null,
+	          proposalId: null,
+	          appliedAt: null,
+	          createdAt: "now",
+	          updatedAt: "now"
+	        }
+	      ]
+	    };
+	    vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -617,7 +712,28 @@ describe("GraphCode app shell", () => {
           return json(defaultSettings);
         }
         if (url === "/api/projects/graphcode-self/agent-runs") {
-          return json([]);
+          return json(agentRuns);
+        }
+        if (url.startsWith("/api/projects/graphcode-self/agent-runs/") && url.endsWith("/apply-graph-patch")) {
+          const runId = url.split("/").at(-2);
+          const index = agentRuns.findIndex((run) => run.id === runId);
+          if (index === -1) {
+            return new Response("not found", { status: 404 });
+          }
+          const existing = agentRuns[index];
+          const updated =
+            existing.id === "run-plan-2"
+              ? {
+                  ...existing,
+                  status: "conflicted" as const,
+                  conflictReason: "node module-web changed after this ticket started."
+                }
+              : {
+                  ...existing,
+                  appliedGraphRevision: 9
+                };
+          agentRuns[index] = updated;
+          return json(updated);
         }
         if (url === "/api/projects/graphcode-self/git-status") {
           return json({ status: "" });
@@ -680,25 +796,67 @@ describe("GraphCode app shell", () => {
             }
           });
         }
-        if (url === "/api/projects/graphcode-self/github/disconnect") {
-          return json(defaultSettings);
-        }
-        if (url === "/api/agents/planning" || url === "/api/agents/coding" || url === "/api/agents/review" || url === "/api/agents/scanning") {
+	        if (url === "/api/projects/graphcode-self/github/disconnect") {
+	          return json(defaultSettings);
+	        }
+	        if (url === "/api/coding-workflows/preview") {
+	          return json(workflowResponse);
+	        }
+	        if (url === "/api/coding-workflows/start") {
+	          const payload = JSON.parse(String(init?.body ?? "{}"));
+	          const overrides = new Map((payload.modeOverrides ?? []).map((item: { nodeId: string; mode: string }) => [item.nodeId, item.mode]));
+	          return json({
+	            ...workflowResponse,
+	            status: "blocked",
+	            items: workflowResponse.items.map((item) => ({
+	              ...item,
+	              selectedMode: overrides.get(item.nodeId) ?? item.selectedMode,
+	              status: "proposed",
+	              agentRunId: "run-coding-workflow",
+	              proposalId: "proposal-coding-workflow"
+	            }))
+	          });
+	        }
+	        if (url === "/api/coding-workflows/apply-layer") {
+	          return json({
+	            ...workflowResponse,
+	            status: "succeeded",
+	            items: workflowResponse.items.map((item) => ({ ...item, status: "applied", appliedAt: "now" }))
+	          });
+	        }
+	        if (url === "/api/projects/graphcode-self/coding-workflows/workflow-1") {
+	          return json(workflowResponse);
+	        }
+	        if (url === "/api/agents/planning" || url === "/api/agents/coding" || url === "/api/agents/review" || url === "/api/agents/scanning") {
           const payload = JSON.parse(String(init?.body ?? "{}"));
-          return json({
-            id: "run-test",
+          const agentKind = url.split("/").at(-1)?.replace("review", "review") ?? "planning";
+          const id = url === "/api/agents/planning" ? `run-plan-${++planningRunCount}` : `run-${agentKind}`;
+          const run: AgentRun = {
+            id,
             projectId: payload.projectId ?? project.id,
-            agentKind: url.split("/").at(-1)?.replace("review", "review") ?? "planning",
+            agentKind: agentKind as AgentRun["agentKind"],
+            codingMode: url === "/api/agents/coding" ? payload.mode ?? "medium" : null,
             status: "succeeded",
+            baseGraphRevision: 7,
+            appliedGraphRevision: null,
+            conflictReason: null,
             targetNodeId: payload.nodeId ?? payload.scopeNodeId ?? null,
             prompt: payload.prompt ?? "",
             response: "Agent completed",
             diff: "diff --git",
-            graphPatch: null,
+            graphPatch:
+              url === "/api/agents/planning"
+                ? {
+                    summary: "Plan graph patch",
+                    operations: [{ entityType: "node", entityId: "module-web", action: "update", fields: { summary: payload.prompt ?? "" } }]
+                  }
+                : null,
             error: null,
             createdAt: "now",
             updatedAt: "now"
-          });
+          };
+          agentRuns.unshift(run);
+          return json(run);
         }
         if (url === "/api/projects/graphcode-self/layout/auto") {
           return json({ ...moduleCanvasGraph, nodes: moduleCanvasGraph.nodes.map((item) => ({ ...item, position: { x: item.position.x + 10, y: item.position.y + 10 } })) });
@@ -941,10 +1099,63 @@ describe("GraphCode app shell", () => {
       expect(fetch).toHaveBeenCalledWith(
         "/api/nodes/module-web/layout",
         expect.objectContaining({
-          method: "PATCH"
+          method: "PATCH",
+          body: JSON.stringify({
+            scopeNodeId: "framework",
+            position: { x: 333, y: 222 },
+            size: { width: 320, height: 180 }
+          })
         })
       );
     });
+  });
+
+  it("reopens the last saved canvas scope during bootstrap", async () => {
+    window.localStorage.setItem(
+      "graphcode.canvasSession.v1",
+      JSON.stringify({
+        lastProjectId: project.id,
+        projects: {
+          [project.id]: {
+            lastScopeNodeId: "module-web",
+            viewports: {}
+          }
+        }
+      })
+    );
+
+    render(<App />);
+
+    expect(await within(await screen.findByTestId("react-flow")).findByText("Render Workspace Scope")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(expect.stringContaining("rootNodeId=module-web"), expect.any(Object));
+  });
+
+  it("restores and saves the per-scope canvas viewport", async () => {
+    window.localStorage.setItem(
+      "graphcode.canvasSession.v1",
+      JSON.stringify({
+        lastProjectId: project.id,
+        projects: {
+          [project.id]: {
+            lastScopeNodeId: "framework",
+            viewports: {
+              framework: { x: 5, y: 6, zoom: 0.7 }
+            }
+          }
+        }
+      })
+    );
+
+    render(<App />);
+
+    await screen.findByTestId("react-flow");
+    await waitFor(() => expect(reactFlowMock.setViewport).toHaveBeenCalledWith({ x: 5, y: 6, zoom: 0.7 }, { duration: 0 }));
+    expect(reactFlowMock.fitView).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByLabelText("Move viewport"));
+    const session = JSON.parse(window.localStorage.getItem("graphcode.canvasSession.v1") ?? "{}");
+
+    expect(session.projects[project.id].viewports.framework).toEqual({ x: 12, y: 34, zoom: 0.8 });
   });
 
   it("expands rendered boundary boxes around labels and member blocks", async () => {
@@ -1252,12 +1463,18 @@ describe("GraphCode app shell", () => {
     fireEvent.doubleClick(await within(await screen.findByTestId("react-flow")).findByText("Web Workspace"));
     fireEvent.click(screen.getByText("Add"));
     fireEvent.click(await screen.findByText("Boundary"));
-    await screen.findByText("Draw boundary");
+    await screen.findByText("Click to start boundary");
     expect(screen.getByTestId("react-flow")).toHaveAttribute("data-pan-on-drag", "false");
     expect(screen.getByTestId("react-flow")).toHaveAttribute("data-nodes-draggable", "false");
     expect(screen.getByTestId("react-flow")).toHaveAttribute("data-elements-selectable", "false");
     expect(screen.getByTestId("react-flow").className).toContain("workspace-flow-draw-boundary");
-    fireEvent.click(screen.getByLabelText("Draw boundary gesture"));
+    fireEvent.click(screen.getByLabelText("Start boundary"));
+    await screen.findByText("Click to finish boundary");
+    fireEvent.click(screen.getByLabelText("Preview boundary"));
+    const draftBoundary = await screen.findByTestId("boundary-boundary-draft");
+    expect(draftBoundary).toHaveAttribute("data-width", "200");
+    expect(draftBoundary).toHaveAttribute("data-height", "140");
+    fireEvent.click(screen.getByLabelText("Finish boundary"));
     fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Frontend Flow" } });
     fireEvent.change(screen.getByLabelText("Short Description"), { target: { value: "Selection modules" } });
     fireEvent.change(screen.getByLabelText("Code Context"), { target: { value: "Boundary context for frontend flow modules." } });
@@ -1273,35 +1490,119 @@ describe("GraphCode app shell", () => {
     });
   });
 
-  it("switches to planning chat and sends a planning prompt", async () => {
+  it("cancels boundary and edge draw modes from the canvas hint", async () => {
     render(<App />);
 
-    fireEvent.click(await screen.findByRole("button", { name: /Planning/i }));
-    fireEvent.change(screen.getByPlaceholderText("Ask the planning agent to modify the graph"), {
+    fireEvent.doubleClick(await within(await screen.findByTestId("react-flow")).findByText("Web Workspace"));
+    fireEvent.click(screen.getByText("Add"));
+    fireEvent.click(await screen.findByText("Edge"));
+    await screen.findByText("Select source block");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByText("Select source block")).not.toBeInTheDocument());
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-pan-on-drag", "true");
+    expect(screen.getByTestId("react-flow").className).not.toContain("workspace-flow-draw-edge");
+
+    fireEvent.click(screen.getByText("Add"));
+    fireEvent.click(await screen.findByText("Boundary"));
+    await screen.findByText("Click to start boundary");
+    fireEvent.click(screen.getByLabelText("Start boundary"));
+    fireEvent.click(screen.getByLabelText("Preview boundary"));
+    await screen.findByTestId("boundary-boundary-draft");
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    await waitFor(() => expect(screen.queryByTestId("boundary-boundary-draft")).not.toBeInTheDocument());
+    expect(screen.queryByText("Click to finish boundary")).not.toBeInTheDocument();
+    expect(screen.getByTestId("react-flow")).toHaveAttribute("data-pan-on-drag", "true");
+    expect(screen.getByTestId("react-flow").className).not.toContain("workspace-flow-draw-boundary");
+  });
+
+  it("submits parallel planning tickets and shows apply and conflict states", async () => {
+    render(<App />);
+
+    const tablist = await screen.findByRole("tablist", { name: /Details panel mode/i });
+    fireEvent.click(within(tablist).getByRole("button", { name: /Planning/i }));
+    fireEvent.change(await screen.findByPlaceholderText("Plan graph changes"), {
       target: { value: "Add cache node" }
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
+    fireEvent.change(screen.getByPlaceholderText("Plan graph changes"), {
+      target: { value: "Add queue node" }
     });
     fireEvent.click(screen.getByRole("button", { name: /^Send$/i }));
 
     await waitFor(() => {
+      const planningCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/agents/planning");
+      expect(planningCalls).toHaveLength(2);
+      expect(planningCalls.every(([, init]) => JSON.parse(String(init?.body ?? "{}")).background === true)).toBe(true);
+    });
+
+    expect(await screen.findByText("Add cache node")).toBeInTheDocument();
+    expect(await screen.findByText("Add queue node")).toBeInTheDocument();
+
+    const applyButtons = await screen.findAllByRole("button", { name: /Apply/i });
+    fireEvent.click(applyButtons[1]);
+    expect(await screen.findByText("Applied")).toBeInTheDocument();
+
+    fireEvent.click((await screen.findAllByRole("button", { name: /Apply/i }))[0]);
+    expect(await screen.findByText("node module-web changed after this ticket started.")).toBeInTheDocument();
+    expect(await screen.findByText("Conflicted")).toBeInTheDocument();
+  });
+
+  it("previews a layered coding workflow for upper-scope code actions", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Web Workspace"));
+    expect((await screen.findAllByText("Client app.")).length).toBeGreaterThan(0);
+    fireEvent.click(await screen.findByRole("button", { name: /Start code/i }));
+
+    await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
-        "/api/agents/planning",
+        "/api/coding-workflows/preview",
         expect.objectContaining({
-          method: "POST"
+          method: "POST",
+          body: expect.stringContaining('"scopeNodeId":"module-web"')
+        })
+      );
+    });
+    expect(await screen.findByText("Layered coding")).toBeInTheDocument();
+    expect((await screen.findAllByText("renderWidget")).length).toBeGreaterThan(0);
+
+    fireEvent.change(screen.getByDisplayValue("Small"), { target: { value: "large" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start workflow/i }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/coding-workflows/start",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"mode":"large"')
+        })
+      );
+    });
+    fireEvent.click(await screen.findByRole("button", { name: /Apply layer/i }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/coding-workflows/apply-layer",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"workflowId":"workflow-1"')
         })
       );
     });
   });
 
-  it("starts a coding agent run from the node detail panel", async () => {
+  it("starts a small direct coding run for leaf function actions", async () => {
     render(<App />);
 
+    fireEvent.click(await screen.findByText("renderWidget"));
     fireEvent.click(await screen.findByRole("button", { name: /Start code/i }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
         "/api/agents/coding",
         expect.objectContaining({
-          method: "POST"
+          method: "POST",
+          body: expect.stringContaining('"mode":"small"')
         })
       );
     });
@@ -1413,14 +1714,21 @@ function node(input: TestNodeInput): GraphNode {
       startLine: input.source?.startLine ?? null,
       endLine: input.source?.endLine ?? null
     },
-    code: input.code ?? {
-      context: input.summary ?? `${input.name} code context.`,
-      directory: input.source?.path ?? input.sourcePath ?? null,
-      startLine: input.source?.startLine ?? null,
-      endLine: input.source?.endLine ?? null,
-      language: "typescript"
-    },
-    position: input.position ?? { x: 0, y: 0 },
+	    code: input.code ?? {
+	      context: input.summary ?? `${input.name} code context.`,
+	      directory: input.source?.path ?? input.sourcePath ?? null,
+	      startLine: input.source?.startLine ?? null,
+	      endLine: input.source?.endLine ?? null,
+	      language: "typescript"
+	    },
+	    execution: input.execution ?? {
+	      testScriptDirectory: null,
+	      virtualEnvironment: null,
+	      workingDirectory: null,
+	      setupCommand: null,
+	      testCommand: null
+	    },
+	    position: input.position ?? { x: 0, y: 0 },
     size: input.size ?? { width: 224, height: 120 },
     customTypeId: input.customTypeId ?? null,
     childCount: input.childCount ?? 0,

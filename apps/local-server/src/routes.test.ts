@@ -84,7 +84,8 @@ describe("graph API routes", () => {
       url: "/api/projects/graphcode-self/settings"
     });
     expect(settingsResponse.statusCode).toBe(200);
-    expect(settingsResponse.json().agents.some((agent: { agentKind: string }) => agent.agentKind === "coding")).toBe(true);
+    expect(settingsResponse.json().agents.some((agent: { agentKind: string }) => agent.agentKind === "coding")).toBe(false);
+    expect(settingsResponse.json().codingAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
 
     const saveResponse = await app.inject({
       method: "PUT",
@@ -197,6 +198,28 @@ describe("graph API routes", () => {
   });
 
   it("runs fake planning, coding, review, scanning, and git-status routes", async () => {
+    const backgroundPlanningResponse = await app.inject({
+      method: "POST",
+      url: "/api/agents/planning",
+      payload: {
+        projectId: "graphcode-self",
+        prompt: "Plan a background ticket",
+        scopeNodeId: "module-web",
+        background: true
+      }
+    });
+    expect(backgroundPlanningResponse.statusCode).toBe(200);
+    expect(backgroundPlanningResponse.json().status).toBe("running");
+    expect(typeof backgroundPlanningResponse.json().baseGraphRevision).toBe("number");
+
+    const completedPlanningTicket = await waitForAgentRun(backgroundPlanningResponse.json().id, "succeeded");
+    const applyPlanningResponse = await app.inject({
+      method: "POST",
+      url: `/api/projects/graphcode-self/agent-runs/${completedPlanningTicket.id}/apply-graph-patch`
+    });
+    expect(applyPlanningResponse.statusCode).toBe(200);
+    expect(applyPlanningResponse.json().appliedGraphRevision).not.toBeNull();
+
     const planningResponse = await app.inject({
       method: "POST",
       url: "/api/agents/planning",
@@ -215,11 +238,13 @@ describe("graph API routes", () => {
       payload: {
         projectId: "graphcode-self",
         nodeId: "module-web",
+        mode: "large",
         prompt: "Add a placeholder"
       }
     });
     expect(codingResponse.statusCode).toBe(200);
     expect(codingResponse.json().status).toBe("succeeded");
+    expect(codingResponse.json().codingMode).toBe("large");
     expect(codingResponse.json().diff).toContain("diff --git");
 
     const runsAfterCodingResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/agent-runs" });
@@ -250,12 +275,68 @@ describe("graph API routes", () => {
     expect(JSON.stringify(hierarchyAfterScan.json())).toContain("Code Graph");
     expect(JSON.stringify(hierarchyAfterScan.json())).toContain("scanned.ts");
 
-    const gitResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/git-status" });
-    expect(gitResponse.statusCode).toBe(200);
-    expect(typeof gitResponse.json().status).toBe("string");
-  });
+	    const gitResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/git-status" });
+	    expect(gitResponse.statusCode).toBe(200);
+	    expect(typeof gitResponse.json().status).toBe("string");
+	  });
 
-  it("updates tags and reusable placements through the API", async () => {
+	  it("previews, starts, and applies layered coding workflows", async () => {
+	    const demoteResponse = await app.inject({
+	      method: "PATCH",
+	      url: "/api/nodes/function-app",
+	      payload: {
+	        summary: "Planning update for layered workflow route coverage."
+	      }
+	    });
+	    expect(demoteResponse.statusCode).toBe(200);
+	    expect(demoteResponse.json().agentStatus).toBe("planning");
+
+	    const previewResponse = await app.inject({
+	      method: "POST",
+	      url: "/api/coding-workflows/preview",
+	      payload: {
+	        projectId: "graphcode-self",
+	        scopeNodeId: "module-web"
+	      }
+	    });
+	    expect(previewResponse.statusCode).toBe(200);
+	    expect(previewResponse.json().status).toBe("preview");
+	    expect(previewResponse.json().items.some((item: { nodeId: string }) => item.nodeId === "function-app")).toBe(true);
+
+	    const startResponse = await app.inject({
+	      method: "POST",
+	      url: "/api/coding-workflows/start",
+	      payload: {
+	        projectId: "graphcode-self",
+	        scopeNodeId: "module-web",
+	        modeOverrides: [{ nodeId: "function-app", mode: "small" }]
+	      }
+	    });
+	    expect(startResponse.statusCode).toBe(200);
+	    const started = startResponse.json();
+	    expect(started.items.some((item: { nodeId: string; status: string; selectedMode: string }) => item.nodeId === "function-app" && item.status === "proposed" && item.selectedMode === "small")).toBe(true);
+
+	    const statusResponse = await app.inject({
+	      method: "GET",
+	      url: `/api/projects/graphcode-self/coding-workflows/${started.id}`
+	    });
+	    expect(statusResponse.statusCode).toBe(200);
+	    expect(statusResponse.json().id).toBe(started.id);
+
+	    const applyResponse = await app.inject({
+	      method: "POST",
+	      url: "/api/coding-workflows/apply-layer",
+	      payload: {
+	        projectId: "graphcode-self",
+	        workflowId: started.id,
+	        layerIndex: started.currentLayer
+	      }
+	    });
+	    expect(applyResponse.statusCode).toBe(200);
+	    expect(applyResponse.json().items.some((item: { nodeId: string; status: string }) => item.nodeId === "function-app" && item.status === "applied")).toBe(true);
+	  });
+
+	  it("updates tags and reusable placements through the API", async () => {
     const nodeTagsResponse = await app.inject({
       method: "PATCH",
       url: "/api/nodes/module-web/tags",
@@ -596,4 +677,16 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" }
   });
+}
+
+async function waitForAgentRun(runId: string, status: string) {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const response = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/agent-runs" });
+    const run = response.json().find((item: { id: string }) => item.id === runId);
+    if (run?.status === status) {
+      return run;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Agent run ${runId} did not reach ${status}.`);
 }

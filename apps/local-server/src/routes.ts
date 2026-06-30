@@ -3,6 +3,9 @@ import { z } from "zod";
 import {
   boundaryMutationSchema,
   boundaryUpdateSchema,
+  codingWorkflowApplyLayerRequestSchema,
+  codingWorkflowPreviewRequestSchema,
+  codingWorkflowStartRequestSchema,
   codingAgentRequestSchema,
   createCustomBlockTypeSchema,
   customBlockTypeUpdateSchema,
@@ -27,6 +30,14 @@ import type { WorkspaceRuntime } from "./workspace";
 
 const projectParamsSchema = z.object({
   projectId: z.string().min(1)
+});
+
+const projectRunParamsSchema = projectParamsSchema.extend({
+  runId: z.string().min(1)
+});
+
+const projectWorkflowParamsSchema = projectParamsSchema.extend({
+  workflowId: z.string().min(1)
 });
 
 const nodeParamsSchema = z.object({
@@ -117,6 +128,11 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
     return runtime.listAgentRuns(projectId);
   });
 
+  app.post("/api/projects/:projectId/agent-runs/:runId/apply-graph-patch", async (request) => {
+    const { projectId, runId } = projectRunParamsSchema.parse(request.params);
+    return runtime.applyAgentGraphPatch(projectId, runId);
+  });
+
   app.get("/api/projects/:projectId/git-status", async (request) => {
     const { projectId } = projectParamsSchema.parse(request.params);
     const status = await runtime.readGitStatus(projectId);
@@ -148,6 +164,26 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
   app.post("/api/agents/coding", async (request) => {
     const body = codingAgentRequestSchema.parse(request.body);
     return runtime.runCoding(body);
+  });
+
+  app.post("/api/coding-workflows/preview", async (request) => {
+    const body = codingWorkflowPreviewRequestSchema.parse(request.body);
+    return runtime.previewCodingWorkflow(body);
+  });
+
+  app.post("/api/coding-workflows/start", async (request) => {
+    const body = codingWorkflowStartRequestSchema.parse(request.body);
+    return runtime.startCodingWorkflow(body);
+  });
+
+  app.get("/api/projects/:projectId/coding-workflows/:workflowId", async (request) => {
+    const { projectId, workflowId } = projectWorkflowParamsSchema.parse(request.params);
+    return runtime.getCodingWorkflow(projectId, workflowId);
+  });
+
+  app.post("/api/coding-workflows/apply-layer", async (request) => {
+    const body = codingWorkflowApplyLayerRequestSchema.parse(request.body);
+    return runtime.applyCodingWorkflowLayer(body);
   });
 
   app.post("/api/agents/review", async (request) => {

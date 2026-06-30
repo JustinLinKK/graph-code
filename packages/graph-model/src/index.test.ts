@@ -2,11 +2,22 @@ import { describe, expect, it } from "vitest";
 import {
   agentConfigSchema,
   agentRunSchema,
-  agentStatusSchema,
-  blankWorkspaceInitializationSchema,
-  boundaryMutationSchema,
-  edgeMutationSchema,
-  graphPatchSchema,
+  agentRunStatusSchema,
+	  agentStatusSchema,
+	  blankWorkspaceInitializationSchema,
+	  blockExecutionMetadataSchema,
+	  boundaryMutationSchema,
+	  codingAgentConfigSchema,
+	  codingAgentModeSchema,
+	  codingAgentRequestSchema,
+	  codingWorkflowApplyLayerRequestSchema,
+	  codingWorkflowItemSchema,
+	  codingWorkflowSchema,
+	  codingWorkflowStartRequestSchema,
+	  codeProposalArtifactManifestSchema,
+	  edgeMutationSchema,
+	  graphNodeSchema,
+	  graphPatchSchema,
   githubDevicePollRequestSchema,
   githubDeviceStartResponseSchema,
   gitStatusInfoSchema,
@@ -25,6 +36,7 @@ import {
   tagAssignmentSchema,
   nodeTypeStyleSchema,
   openWorkspaceSchema,
+  planningChatRequestSchema,
   projectSchema,
   scanningAgentRequestSchema,
   settingsValidationResultSchema,
@@ -176,6 +188,8 @@ describe("graph model enums", () => {
   it("accepts agent settings, statuses, validation, and run payloads", () => {
     expect(agentStatusSchema.parse("coded")).toBe("coded");
     expect(agentStatusSchema.parse("implemented")).toBe("implemented");
+    expect(agentRunStatusSchema.parse("conflicted")).toBe("conflicted");
+    expect(codingAgentModeSchema.parse("small")).toBe("small");
     expect(processKindSchema.parse("condition")).toBe("condition");
     expect(gitStatusInfoSchema.parse({ worktree: "pending", change: "modified" }).change).toBe("modified");
     expect(
@@ -188,6 +202,28 @@ describe("graph model enums", () => {
         systemPromptSource: { type: "manual", value: "Stay scoped." }
       }).provider
     ).toBe("openrouter");
+    expect(
+      codingAgentConfigSchema.parse({
+        mode: "large",
+        provider: "openai",
+        model: "gpt-5",
+        parallelLimit: 2,
+        apiKeySource: { type: "env", value: "OPENAI_API_KEY" },
+        systemPromptSource: { type: "manual", value: "Use full scoped context." }
+      }).mode
+    ).toBe("large");
+    expect(
+      codingAgentRequestSchema.parse({
+        projectId: "project",
+        nodeId: "node-1"
+      }).mode
+    ).toBe("medium");
+    expect(
+      planningChatRequestSchema.parse({
+        projectId: "project",
+        prompt: "Plan changes"
+      }).background
+    ).toBe(false);
     expect(
       workspaceSettingsMutationSchema.parse({
         general: { theme: "dark" },
@@ -202,9 +238,19 @@ describe("graph model enums", () => {
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Plan." }
           }
+        ],
+        codingAgents: [
+          {
+            mode: "small",
+            provider: "fake",
+            model: "fake-small",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Small scoped coding." }
+          }
         ]
-      }).general.theme
-    ).toBe("dark");
+      }).codingAgents[0].mode
+    ).toBe("small");
     expect(
       workspaceSettingsSchema.parse({
         general: { theme: "dark" },
@@ -222,9 +268,21 @@ describe("graph model enums", () => {
           }
         },
         automation: { autoReviewAfterCoding: true },
-        agents: []
-      }).github.auth.username
-    ).toBe("octocat");
+        agents: [],
+        codingAgents: [
+          {
+            mode: "medium",
+            provider: "fake",
+            model: "fake-medium",
+            parallelLimit: 2,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Medium scoped coding." },
+            apiKeyConfigured: false,
+            systemPromptConfigured: true
+          }
+        ]
+      }).codingAgents[0].mode
+    ).toBe("medium");
     expect(
       settingsValidationResultSchema.parse({
         ok: false,
@@ -232,11 +290,11 @@ describe("graph model enums", () => {
         fieldErrors: { "agents.0.model": "Required" }
       }).fieldErrors["agents.0.model"]
     ).toBe("Required");
-    expect(
-      agentRunSchema.parse({
+    const parsedRun = agentRunSchema.parse({
         id: "run-1",
         projectId: "project",
         agentKind: "coding",
+        codingMode: "large",
         status: "succeeded",
         targetNodeId: "node-1",
         prompt: "Do it",
@@ -246,11 +304,103 @@ describe("graph model enums", () => {
         error: null,
         createdAt: "now",
         updatedAt: "now"
-      }).status
-    ).toBe("succeeded");
-  });
+      });
+    expect(parsedRun.status).toBe("succeeded");
+    expect(parsedRun.baseGraphRevision).toBe(0);
+	    expect(parsedRun.appliedGraphRevision).toBeNull();
+	    expect(parsedRun.conflictReason).toBeNull();
+	  });
 
-  it("requires first-run workspace initialization context", () => {
+	  it("accepts block execution metadata and layered coding workflow payloads", () => {
+	    expect(
+	      blockExecutionMetadataSchema.parse({
+	        testScriptDirectory: "tests/generated",
+	        virtualEnvironment: ".venv",
+	        workingDirectory: ".",
+	        setupCommand: "pnpm install",
+	        testCommand: "pnpm test"
+	      }).virtualEnvironment
+	    ).toBe(".venv");
+	    expect(
+	      graphNodeSchema.parse({
+	        id: "function-leaf",
+	        projectId: "project",
+	        kind: "function",
+	        name: "leaf",
+	        summary: "Leaf function",
+	        code: { context: "", directory: "src/a.ts", startLine: 1, endLine: 2, language: "typescript" },
+	        parentId: null,
+	        attachedToId: null,
+	        customTypeId: null,
+	        source: { path: "src/a.ts", startLine: 1, endLine: 2 },
+	        position: { x: 0, y: 0 },
+	        size: { width: 200, height: 120 },
+	        childCount: 0,
+	        hasChildren: false,
+	        agentStatus: "planning",
+	        gitStatus: null,
+	        tags: [],
+	        createdAt: "now",
+	        updatedAt: "now"
+	      }).execution.testCommand
+	    ).toBeNull();
+	    expect(
+	      codeProposalArtifactManifestSchema.parse({
+	        testScriptDirectory: "tests/generated",
+	        scripts: [{ relativePath: "leaf.test.ts", content: "test('leaf', () => {})", command: "pnpm test leaf.test.ts" }]
+	      }).scripts[0].relativePath
+	    ).toBe("leaf.test.ts");
+	    const item = codingWorkflowItemSchema.parse({
+	      id: "item-1",
+	      workflowId: "workflow-1",
+	      projectId: "project",
+	      nodeId: "function-leaf",
+	      nodeName: "leaf",
+	      nodeKind: "function",
+	      layerIndex: 0,
+	      recommendedMode: "small",
+	      selectedMode: "small",
+	      modeReason: "Leaf-local block.",
+	      status: "pending",
+	      conflictGroup: "src/a.ts:function-leaf",
+	      agentRunId: null,
+	      proposalId: null,
+	      appliedAt: null,
+	      createdAt: "now",
+	      updatedAt: "now"
+	    });
+	    expect(item.recommendedMode).toBe("small");
+	    expect(
+	      codingWorkflowSchema.parse({
+	        id: "workflow-1",
+	        projectId: "project",
+	        scopeNodeId: "module-a",
+	        scopeName: "Module A",
+	        status: "preview",
+	        currentLayer: 0,
+	        summary: "One item.",
+	        createdAt: "now",
+	        updatedAt: "now",
+	        items: [item]
+	      }).items
+	    ).toHaveLength(1);
+	    expect(
+	      codingWorkflowStartRequestSchema.parse({
+	        projectId: "project",
+	        scopeNodeId: "module-a",
+	        modeOverrides: [{ nodeId: "function-leaf", mode: "medium" }]
+	      }).modeOverrides[0].mode
+	    ).toBe("medium");
+	    expect(
+	      codingWorkflowApplyLayerRequestSchema.parse({
+	        projectId: "project",
+	        workflowId: "workflow-1",
+	        layerIndex: 0
+	      }).layerIndex
+	    ).toBe(0);
+	  });
+
+	  it("requires first-run workspace initialization context", () => {
     const initialization = workspaceInitializationSchema.parse({
       projectName: "  Compiler Explorer  ",
       projectDescription: "Maps the frontend, API, and execution backends.",

@@ -1,15 +1,21 @@
-import type { AgentRun, CanvasGraph, EdgePointingDirection, GraphBoundary, GraphEdge, GraphNodeKind, HierarchyNode, NodeDetail, Project, TagAssignment, WorkspaceSettings } from "@graphcode/graph-model";
+import { CODING_AGENT_MODES, type AgentRun, type CanvasGraph, type CodingAgentMode, type CodingWorkflow, type EdgePointingDirection, type GraphBoundary, type GraphEdge, type GraphNodeKind, type HierarchyNode, type NodeDetail, type Project, type TagAssignment, type WorkspaceSettings } from "@graphcode/graph-model";
 import { Button, Spinner } from "@heroui/react";
 import {
+  Activity,
+  AlertTriangle,
   Boxes,
   ChevronDown,
+  CheckCircle2,
+  Clock3,
   Code2,
   FolderOpen,
   FolderTree,
   GitBranch,
+  GitPullRequest,
   Maximize2,
   MessageSquare,
   Plus,
+  Play,
   RefreshCw,
   RotateCcw,
   Search,
@@ -20,7 +26,8 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
-import { agentKindLabel } from "../displayLabels";
+import type { CanvasViewport } from "../canvasSession";
+import { agentKindLabel, codingAgentModeLabel } from "../displayLabels";
 import { HierarchyTree } from "./HierarchyTree";
 import { Inspector } from "./Inspector";
 import { WorkspaceCanvas, type MemberLayout } from "./WorkspaceCanvas";
@@ -37,6 +44,7 @@ type AppShellProps = {
   selectedBoundaryId: string | null;
   selectedEdge: GraphEdge | null;
   selectedBoundary: GraphBoundary | null;
+  restoreViewport: CanvasViewport | null | undefined;
   drawBoundaryMode: boolean;
   drawEdgeMode: boolean;
   canUndo: boolean;
@@ -44,6 +52,9 @@ type AppShellProps = {
   error: string | null;
   agentRuns: AgentRun[];
   agentBusy: boolean;
+  applyingRunIds: string[];
+  codingWorkflow: CodingWorkflow | null;
+  workflowModeOverrides: Record<string, CodingAgentMode>;
   gitStatus: string;
   onSelectNode: (nodeId: string) => void;
   onOpenNode: (nodeId: string) => void;
@@ -59,8 +70,10 @@ type AppShellProps = {
     size: { width: number; height: number },
     memberLayouts?: MemberLayout[]
   ) => void;
+  onCanvasViewportChange: (viewport: CanvasViewport) => void;
   onBoundaryDraft: (draft: { position: { x: number; y: number }; size: { width: number; height: number } }) => void;
   onEdgeDraft: (draft: { sourceNodeId: string; targetNodeId: string }) => void;
+  onCancelDraw: () => void;
   onOpenWorkspace: () => void;
   onAddBlock: () => void;
   onDrawEdge: () => void;
@@ -82,7 +95,12 @@ type AppShellProps = {
   onUndo: () => void;
   onOpenSettings: () => void;
   onRunPlanning: (prompt: string) => void;
-  onStartCode: (nodeId: string) => void;
+  onApplyPlanningPatch: (runId: string) => void;
+  onStartCode: (nodeId: string, mode: CodingAgentMode) => void;
+  onWorkflowModeChange: (nodeId: string, mode: CodingAgentMode) => void;
+  onStartCodingWorkflow: () => void;
+  onApplyCodingWorkflowLayer: (workflowId: string, layerIndex: number) => void;
+  onCloseCodingWorkflow: () => void;
   onRunReview: (runId: string) => void;
   onRunScanning: () => void;
 };
@@ -99,6 +117,7 @@ export function AppShell({
   selectedBoundaryId,
   selectedEdge,
   selectedBoundary,
+  restoreViewport,
   drawBoundaryMode,
   drawEdgeMode,
   canUndo,
@@ -106,6 +125,9 @@ export function AppShell({
   error,
   agentRuns,
   agentBusy,
+  applyingRunIds,
+  codingWorkflow,
+  workflowModeOverrides,
   gitStatus,
   onSelectNode,
   onOpenNode,
@@ -116,8 +138,10 @@ export function AppShell({
   onCanvasNodeOpen,
   onPersistLayout,
   onPersistBoundaryLayout,
+  onCanvasViewportChange,
   onBoundaryDraft,
   onEdgeDraft,
+  onCancelDraw,
   onOpenWorkspace,
   onAddBlock,
   onDrawEdge,
@@ -139,7 +163,12 @@ export function AppShell({
   onUndo,
   onOpenSettings,
   onRunPlanning,
+  onApplyPlanningPatch,
   onStartCode,
+  onWorkflowModeChange,
+  onStartCodingWorkflow,
+  onApplyCodingWorkflowLayer,
+  onCloseCodingWorkflow,
   onRunReview,
   onRunScanning
 }: AppShellProps) {
@@ -415,8 +444,11 @@ export function AppShell({
             onOpenNode={onCanvasNodeOpen}
             onPersistLayout={onPersistLayout}
             onPersistBoundaryLayout={onPersistBoundaryLayout}
+            restoreViewport={restoreViewport}
+            onViewportChange={onCanvasViewportChange}
             onBoundaryDraft={onBoundaryDraft}
             onEdgeDraft={onEdgeDraft}
+            onCancelDraw={onCancelDraw}
           />
         )}
       </main>
@@ -463,33 +495,46 @@ export function AppShell({
           </button>
         </div>
         {rightPanelMode === "details" ? (
-          <Inspector
-            detail={selectedDetail}
-            selectedEdge={selectedEdge}
-            selectedBoundary={selectedBoundary}
-            canvasNodes={canvas?.nodes ?? []}
-            customTypes={canvas?.customTypes ?? []}
-            nodeTypeStyles={canvas?.nodeTypeStyles ?? []}
-            agentBusy={agentBusy}
-            onStartCode={onStartCode}
-            onEditNode={onEditNode}
-            onEditEdge={onEditEdge}
-            onEditBoundary={onEditBoundary}
-            onUpdateNodeTypeStyle={onUpdateNodeTypeStyle}
-            onUpdateCustomTypeStyle={onUpdateCustomTypeStyle}
-            onUpdateBoundaryStyle={onUpdateBoundaryStyle}
-            onUpdateEdgeStyle={onUpdateEdgeStyle}
-            onUpdateNodeTags={onUpdateNodeTags}
-            onUpdateEdgeTags={onUpdateEdgeTags}
-            onUpdateBoundaryTags={onUpdateBoundaryTags}
-          />
+          <>
+            <CodingWorkflowPanel
+              workflow={codingWorkflow}
+              modeOverrides={workflowModeOverrides}
+              agentBusy={agentBusy}
+              onModeChange={onWorkflowModeChange}
+              onStart={onStartCodingWorkflow}
+              onApplyLayer={onApplyCodingWorkflowLayer}
+              onClose={onCloseCodingWorkflow}
+            />
+            <Inspector
+              detail={selectedDetail}
+              selectedEdge={selectedEdge}
+              selectedBoundary={selectedBoundary}
+              canvasNodes={canvas?.nodes ?? []}
+              customTypes={canvas?.customTypes ?? []}
+              nodeTypeStyles={canvas?.nodeTypeStyles ?? []}
+              agentBusy={agentBusy}
+              onStartCode={onStartCode}
+              onEditNode={onEditNode}
+              onEditEdge={onEditEdge}
+              onEditBoundary={onEditBoundary}
+              onUpdateNodeTypeStyle={onUpdateNodeTypeStyle}
+              onUpdateCustomTypeStyle={onUpdateCustomTypeStyle}
+              onUpdateBoundaryStyle={onUpdateBoundaryStyle}
+              onUpdateEdgeStyle={onUpdateEdgeStyle}
+              onUpdateNodeTags={onUpdateNodeTags}
+              onUpdateEdgeTags={onUpdateEdgeTags}
+              onUpdateBoundaryTags={onUpdateBoundaryTags}
+            />
+          </>
         ) : (
           <PlanningPanel
             selectedNodeName={selectedDetail?.node.name ?? null}
             agentRuns={agentRuns}
             agentBusy={agentBusy}
+            applyingRunIds={applyingRunIds}
             gitStatus={gitStatus}
             onRunPlanning={onRunPlanning}
+            onApplyPlanningPatch={onApplyPlanningPatch}
             onRunReview={onRunReview}
           />
         )}
@@ -504,6 +549,72 @@ const MAX_LEFT_PANEL_WIDTH = 560;
 const DEFAULT_RIGHT_PANEL_WIDTH = 366;
 const MIN_RIGHT_PANEL_WIDTH = 280;
 const MAX_RIGHT_PANEL_WIDTH = 640;
+
+type CodingWorkflowPanelProps = {
+  workflow: CodingWorkflow | null;
+  modeOverrides: Record<string, CodingAgentMode>;
+  agentBusy: boolean;
+  onModeChange: (nodeId: string, mode: CodingAgentMode) => void;
+  onStart: () => void;
+  onApplyLayer: (workflowId: string, layerIndex: number) => void;
+  onClose: () => void;
+};
+
+function CodingWorkflowPanel({ workflow, modeOverrides, agentBusy, onModeChange, onStart, onApplyLayer, onClose }: CodingWorkflowPanelProps) {
+  if (!workflow) {
+    return null;
+  }
+  const currentLayerItems = workflow.items.filter((item) => item.layerIndex === workflow.currentLayer);
+  const canApplyCurrentLayer =
+    workflow.status === "blocked" &&
+    currentLayerItems.length > 0 &&
+    currentLayerItems.every((item) => item.status === "proposed" || item.status === "failed" || item.status === "skipped" || item.status === "applied");
+  return (
+    <section className="coding-workflow-panel" aria-label="Coding workflow preview">
+      <div className="coding-workflow-header">
+        <div>
+          <strong>Layered coding</strong>
+          <span>{workflow.scopeName} · {workflow.status} · layer {workflow.currentLayer + 1}</span>
+        </div>
+        <Button isIconOnly size="sm" variant="ghost" aria-label="Close coding workflow" onPress={onClose}>
+          <Square size={14} />
+        </Button>
+      </div>
+      <p>{workflow.summary}</p>
+      <div className="coding-workflow-items">
+        {workflow.items.map((item) => (
+          <div className="coding-workflow-item" key={item.id}>
+            <div>
+              <strong>{item.nodeName}</strong>
+              <span>Layer {item.layerIndex + 1} · {item.nodeKind} · {item.status}</span>
+              <small>{item.modeReason}</small>
+            </div>
+            <select value={modeOverrides[item.nodeId] ?? item.selectedMode} disabled={workflow.status !== "preview"} onChange={(event) => onModeChange(item.nodeId, event.target.value as CodingAgentMode)}>
+              {CODING_AGENT_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {codingAgentModeLabel(mode)}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+      <div className="coding-workflow-actions">
+        {workflow.status === "preview" ? (
+          <Button size="sm" variant="primary" isDisabled={agentBusy || workflow.items.length === 0} onPress={onStart}>
+            <Play size={14} />
+            Start workflow
+          </Button>
+        ) : (
+          <Button size="sm" variant="primary" isDisabled={agentBusy || !canApplyCurrentLayer} onPress={() => onApplyLayer(workflow.id, workflow.currentLayer)}>
+            <CheckCircle2 size={14} />
+            Apply layer
+          </Button>
+        )}
+      </div>
+    </section>
+  );
+}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)));
@@ -537,65 +648,129 @@ function filterHierarchy(nodes: HierarchyNode[], query: string): HierarchyNode[]
 function PlanningPanel({
   selectedNodeName,
   agentRuns,
-  agentBusy,
+  applyingRunIds,
   gitStatus,
   onRunPlanning,
+  onApplyPlanningPatch,
   onRunReview
 }: {
   selectedNodeName: string | null;
   agentRuns: AgentRun[];
   agentBusy: boolean;
+  applyingRunIds: string[];
   gitStatus: string;
   onRunPlanning: (prompt: string) => void;
+  onApplyPlanningPatch: (runId: string) => void;
   onRunReview: (runId: string) => void;
 }) {
   const [draft, setDraft] = useState("");
-  const latestCodingRun = agentRuns.find((run) => run.agentKind === "coding" && run.status === "succeeded");
+  const planningRuns = agentRuns.filter((run) => run.agentKind === "planning");
+  const activityRuns = agentRuns.filter((run) => run.agentKind !== "planning");
+  const latestCodingRun = activityRuns.find((run) => run.agentKind === "coding" && run.status === "succeeded");
+  const reviewRunning = activityRuns.some((run) => run.agentKind === "review" && (run.status === "queued" || run.status === "running"));
+  const canSubmit = draft.trim().length > 0;
 
   return (
     <div className="planning-panel">
       <div className="planning-header">
-        <span>Planning Agent</span>
+        <span>Planning Tickets</span>
         <small>{selectedNodeName ? `Scope: ${selectedNodeName}` : "Workspace scope"}</small>
       </div>
-      <div className="planning-run-list">
-        {agentRuns.length === 0 ? <p className="muted">No agent runs yet.</p> : null}
-        {agentRuns.slice(0, 8).map((run) => (
-          <div className={`agent-run-card ${run.status}`} key={run.id}>
+
+      <form
+        className="planning-composer"
+        onSubmit={(event) => {
+          event.preventDefault();
+          const prompt = draft.trim();
+          if (!prompt) {
+            return;
+          }
+          onRunPlanning(prompt);
+          setDraft("");
+        }}
+      >
+        <label className="planning-input">
+          <span>Prompt</span>
+          <textarea value={draft} rows={4} placeholder="Plan graph changes" onChange={(event) => setDraft(event.target.value)} />
+        </label>
+        <Button
+          type="submit"
+          variant="primary"
+          isDisabled={!canSubmit}
+        >
+          <MessageSquare size={16} />
+          Send
+        </Button>
+      </form>
+
+      <div className="planning-ticket-list" aria-live="polite">
+        {planningRuns.length === 0 ? <p className="muted">No planning tickets yet.</p> : null}
+        {planningRuns.slice(0, 10).map((run) => {
+          const operationCount = run.graphPatch?.operations.length ?? 0;
+          const applying = applyingRunIds.includes(run.id);
+          const canApply = run.status === "succeeded" && operationCount > 0 && run.appliedGraphRevision === null;
+          return (
+            <article className={`agent-ticket-card ${run.status} ${run.appliedGraphRevision !== null ? "applied" : ""}`} key={run.id}>
+              <div className="agent-ticket-topline">
+                <strong>{run.prompt || "Planning ticket"}</strong>
+                <span className={`run-status-badge ${ticketStatusClass(run)}`}>
+                  {ticketStatusIcon(run)}
+                  {ticketStatusLabel(run)}
+                </span>
+              </div>
+              <p>{run.response || run.error || "Queued."}</p>
+              <div className="agent-ticket-meta">
+                <span>{operationCount} patch{operationCount === 1 ? "" : "es"}</span>
+                <span>base r{run.baseGraphRevision}</span>
+                {run.appliedGraphRevision !== null ? <span>applied r{run.appliedGraphRevision}</span> : null}
+              </div>
+              {run.conflictReason ? (
+                <div className="agent-ticket-conflict">
+                  <AlertTriangle size={14} />
+                  <span>{run.conflictReason}</span>
+                </div>
+              ) : null}
+              {canApply ? (
+                <Button size="sm" variant="secondary" isDisabled={applying} onPress={() => onApplyPlanningPatch(run.id)}>
+                  <GitPullRequest size={15} />
+                  {applying ? "Applying" : "Apply"}
+                </Button>
+              ) : null}
+            </article>
+          );
+        })}
+      </div>
+
+      <section className="inspector-section agent-activity-section">
+        <h3>
+          <Activity size={15} />
+          Activity
+        </h3>
+        {activityRuns.length === 0 ? <p className="muted">No coding, review, or scanning runs yet.</p> : null}
+        {activityRuns.slice(0, 6).map((run) => (
+          <div className={`agent-activity-row ${run.status}`} key={run.id}>
             <div>
-              <strong>{agentKindLabel(run.agentKind)}</strong>
-              <span>{run.status}</span>
+              <strong>{run.agentKind === "coding" && run.codingMode ? `${agentKindLabel(run.agentKind)} ${codingAgentModeLabel(run.codingMode)}` : agentKindLabel(run.agentKind)}</strong>
+              <span className={`run-status-badge ${ticketStatusClass(run)}`}>
+                {ticketStatusIcon(run)}
+                {ticketStatusLabel(run)}
+              </span>
             </div>
-            <p>{run.response || run.error || run.prompt || "Run queued."}</p>
+            <p>{run.response || run.error || run.prompt || "Queued."}</p>
             {run.agentKind === "coding" && run.status === "succeeded" ? (
-              <Button size="sm" variant="secondary" isDisabled={agentBusy} onPress={() => onRunReview(run.id)}>
+              <Button size="sm" variant="secondary" isDisabled={reviewRunning} onPress={() => onRunReview(run.id)}>
+                <GitBranch size={15} />
                 Review
               </Button>
             ) : null}
           </div>
         ))}
-      </div>
-      <label className="planning-input">
-        <span>Prompt</span>
-        <textarea value={draft} rows={5} placeholder="Ask the planning agent to modify the graph" onChange={(event) => setDraft(event.target.value)} />
-      </label>
-      <div className="planning-actions">
-        <Button
-          variant="primary"
-          isDisabled={agentBusy || draft.trim().length === 0}
-          onPress={() => {
-            onRunPlanning(draft.trim());
-            setDraft("");
-          }}
-        >
-          <MessageSquare size={16} />
-          Send
-        </Button>
-        <Button variant="secondary" isDisabled={agentBusy || !latestCodingRun} onPress={() => latestCodingRun && onRunReview(latestCodingRun.id)}>
+        <Button variant="secondary" isDisabled={reviewRunning || !latestCodingRun} onPress={() => latestCodingRun && onRunReview(latestCodingRun.id)}>
           <GitBranch size={16} />
           Review latest
         </Button>
-      </div>
+      </section>
+
       <section className="inspector-section">
         <h3>
           <GitBranch size={15} />
@@ -605,4 +780,45 @@ function PlanningPanel({
       </section>
     </div>
   );
+}
+
+function ticketStatusLabel(run: AgentRun): string {
+  if (run.status === "conflicted" || run.conflictReason) {
+    return "Conflicted";
+  }
+  if (run.appliedGraphRevision !== null) {
+    return "Applied";
+  }
+  switch (run.status) {
+    case "queued":
+      return "Queued";
+    case "running":
+      return "Running";
+    case "succeeded":
+      return "Ready";
+    case "failed":
+      return "Failed";
+    default:
+      return run.status;
+  }
+}
+
+function ticketStatusClass(run: AgentRun): string {
+  if (run.status === "conflicted" || run.conflictReason) {
+    return "conflicted";
+  }
+  if (run.appliedGraphRevision !== null) {
+    return "applied";
+  }
+  return run.status;
+}
+
+function ticketStatusIcon(run: AgentRun) {
+  if (run.status === "conflicted" || run.conflictReason || run.status === "failed") {
+    return <AlertTriangle size={12} />;
+  }
+  if (run.appliedGraphRevision !== null || run.status === "succeeded") {
+    return <CheckCircle2 size={12} />;
+  }
+  return <Clock3 size={12} />;
 }

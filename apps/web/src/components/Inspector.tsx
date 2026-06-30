@@ -1,21 +1,23 @@
-import type {
-  AgentStatus,
-  CustomBlockType,
-  EdgePointingDirection,
-  GitStatusInfo,
-  GraphBoundary,
-  GraphEdge,
-  GraphNode,
-  GraphNodeKind,
-  GraphTag,
-  NodeDetail,
-  NodeTypeStyle,
-  TagAssignment
+import {
+  CODING_AGENT_MODES,
+  type AgentStatus,
+  type CodingAgentMode,
+  type CustomBlockType,
+  type EdgePointingDirection,
+  type GitStatusInfo,
+  type GraphBoundary,
+  type GraphEdge,
+  type GraphNode,
+  type GraphNodeKind,
+  type GraphTag,
+  type NodeDetail,
+  type NodeTypeStyle,
+  type TagAssignment
 } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
 import { Boxes, Code2, Database, FileInput, FileOutput, FileType, GitBranch, Link2, Package, Palette, Pencil, Play, Route, Tags, Workflow } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
+import { agentStatusLabel, codingAgentModeLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { nodePalette } from "../graphStyles";
 
 type InspectorProps = {
@@ -36,7 +38,7 @@ type InspectorProps = {
   onUpdateEdgeTags: (edgeId: string, input: TagAssignment) => void;
   onUpdateBoundaryTags: (boundaryId: string, input: TagAssignment) => void;
   agentBusy: boolean;
-  onStartCode: (nodeId: string) => void;
+  onStartCode: (nodeId: string, mode: CodingAgentMode) => void;
 };
 
 export function Inspector({
@@ -59,6 +61,16 @@ export function Inspector({
   agentBusy,
   onStartCode
 }: InspectorProps) {
+  const [codingMode, setCodingMode] = useState<CodingAgentMode>("medium");
+  const [codingModeTouched, setCodingModeTouched] = useState(false);
+  const recommendedCodingMode = useMemo(() => recommendInspectorCodingMode(detail, canvasNodes), [canvasNodes, detail]);
+  const selectedCodingMode = codingModeTouched ? codingMode : recommendedCodingMode;
+
+  useEffect(() => {
+    setCodingMode(recommendedCodingMode);
+    setCodingModeTouched(false);
+  }, [recommendedCodingMode, detail?.node.id]);
+
   if (selectedEdge) {
     const source = canvasNodes.find((node) => node.id === selectedEdge.sourceNodeId);
     const target = canvasNodes.find((node) => node.id === selectedEdge.targetNodeId);
@@ -297,7 +309,24 @@ export function Inspector({
         </h3>
         {node.code.context ? <p className="context-box">{node.code.context}</p> : <p className="muted">No code context yet.</p>}
         <div className="inspector-action-row">
-          <Button size="sm" variant="primary" isDisabled={agentBusy} onPress={() => onStartCode(node.id)}>
+          <span className="mode-control-label">Model selection</span>
+          <div className="mode-segmented-control" aria-label="Coding mode">
+            {CODING_AGENT_MODES.map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                className={selectedCodingMode === mode ? "active" : ""}
+                aria-pressed={selectedCodingMode === mode}
+                onClick={() => {
+                  setCodingMode(mode);
+                  setCodingModeTouched(true);
+                }}
+              >
+                {codingAgentModeLabel(mode)}
+              </button>
+            ))}
+          </div>
+          <Button size="sm" variant="primary" isDisabled={agentBusy} onPress={() => onStartCode(node.id, selectedCodingMode)}>
             <Play size={15} />
             Start code
           </Button>
@@ -434,6 +463,24 @@ export function Inspector({
       </section>
     </div>
   );
+}
+
+function recommendInspectorCodingMode(detail: NodeDetail | null, canvasNodes: GraphNode[]): CodingAgentMode {
+  if (!detail) {
+    return "medium";
+  }
+  const node = detail.node;
+  if ((node.kind === "function" || node.kind === "object") && detail.childCount === 0) {
+    return "small";
+  }
+  if (node.attachedToId && (node.kind === "input" || node.kind === "process" || node.kind === "output" || node.kind === "format")) {
+    const owner = canvasNodes.find((candidate) => candidate.id === node.attachedToId);
+    const ownerChildren = owner ? canvasNodes.filter((candidate) => candidate.parentId === owner.id) : [];
+    if (owner && (owner.kind === "function" || owner.kind === "object") && ownerChildren.length === 0) {
+      return "small";
+    }
+  }
+  return "medium";
 }
 
 function StatusSection({ agentStatus, gitStatus }: { agentStatus: AgentStatus; gitStatus: GitStatusInfo | null }) {

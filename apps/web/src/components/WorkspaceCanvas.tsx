@@ -2,7 +2,10 @@ import type { CanvasGraph, GraphBoundary, GraphNode, GraphNodeReuse, WorkspaceSe
 import {
   applyNodeChanges,
   Background,
+  BaseEdge,
   Controls,
+  EdgeLabelRenderer,
+  getSmoothStepPath,
   MarkerType,
   MiniMap,
   Panel,
@@ -11,11 +14,14 @@ import {
   useReactFlow,
   type Connection,
   type Edge,
+  type EdgeProps,
   type Node,
-  type NodeChange
+  type NodeChange,
+  type Viewport
 } from "@xyflow/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { MouseEvent as ReactMouseEvent } from "react";
+import type { CSSProperties, MouseEvent as ReactMouseEvent } from "react";
+import type { CanvasViewport } from "../canvasSession";
 import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { nodePalette } from "../graphStyles";
 import { BoundaryNodeCard } from "./BoundaryNodeCard";
@@ -42,11 +48,18 @@ type WorkspaceCanvasProps = {
   ) => void;
   onBoundaryDraft: (draft: { position: { x: number; y: number }; size: { width: number; height: number } }) => void;
   onEdgeDraft: (draft: { sourceNodeId: string; targetNodeId: string }) => void;
+  onCancelDraw: () => void;
+  restoreViewport: CanvasViewport | null | undefined;
+  onViewportChange: (viewport: CanvasViewport) => void;
 };
 
 const nodeTypes = {
   graphNode: GraphNodeCard,
   boundaryNode: BoundaryNodeCard
+};
+
+const edgeTypes = {
+  graphEdge: ReadableGraphEdge
 };
 
 export function WorkspaceCanvas(props: WorkspaceCanvasProps) {
@@ -72,14 +85,19 @@ function WorkspaceCanvasInner({
   onPersistLayout,
   onPersistBoundaryLayout,
   onBoundaryDraft,
-  onEdgeDraft
+  onEdgeDraft,
+  onCancelDraw,
+  restoreViewport,
+  onViewportChange
 }: WorkspaceCanvasProps) {
-  const { fitView, screenToFlowPosition, setCenter } = useReactFlow();
+  const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow();
   const resolvedTheme = useResolvedCanvasTheme(theme);
   const canvasColors = canvasThemeColors(resolvedTheme);
   const nodesRef = useRef<Node[]>([]);
   const draftRectRef = useRef<BoundaryDraftRect | null>(null);
   const boundaryDragRef = useRef<BoundaryDragState | null>(null);
+  const viewportAppliedScopeRef = useRef<string | null>(null);
+  const skipNextSelectedCenterRef = useRef(false);
   const handleResizeEndRef = useRef((_: string, __: { width: number; height: number }) => {});
   const handleBoundaryResizeEndRef = useRef((_: string, __: { width: number; height: number }) => {});
   const initialNodes = useMemo(
@@ -187,6 +205,18 @@ function WorkspaceCanvasInner({
     setEdgeDraftSourceId(null);
   }, [drawEdgeMode, canvas?.scopeNodeId]);
 
+  useEffect(() => {
+    if (!drawBoundaryMode) {
+      draftRectRef.current = null;
+      setDraftRect(null);
+    }
+  }, [drawBoundaryMode]);
+
+  useEffect(() => {
+    draftRectRef.current = null;
+    setDraftRect(null);
+  }, [canvas?.scopeNodeId]);
+
   const handleNodesChange = useCallback((changes: NodeChange[]) => {
     setNodes((currentNodes) => {
       const nextNodes = applyNodeChanges(changes, currentNodes);
@@ -293,8 +323,39 @@ function WorkspaceCanvasInner({
     [drawEdgeMode, onOpenNode]
   );
 
+  const handleBoundaryDrawClick = useCallback(
+    (event: ReactMouseEvent) => {
+      if (!drawBoundaryMode || !canvas?.scopeNodeId || event.button !== 0) {
+        return false;
+      }
+      event.preventDefault();
+      event.stopPropagation();
+      const point = screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const currentDraft = draftRectRef.current;
+      if (!currentDraft) {
+        const nextDraft = { start: point, current: point };
+        draftRectRef.current = nextDraft;
+        setDraftRect(nextDraft);
+        return true;
+      }
+
+      const rectangle = normalizeDraftRect({ ...currentDraft, current: point });
+      draftRectRef.current = null;
+      setDraftRect(null);
+      if (rectangle.size.width >= 24 && rectangle.size.height >= 24) {
+        onBoundaryDraft(rectangle);
+      }
+      return true;
+    },
+    [canvas?.scopeNodeId, drawBoundaryMode, onBoundaryDraft, screenToFlowPosition]
+  );
+
   const handleNodeClick = useCallback(
-    (_: ReactMouseEvent, node: Node) => {
+    (event: ReactMouseEvent, node: Node) => {
+      if (drawBoundaryMode) {
+        handleBoundaryDrawClick(event);
+        return;
+      }
       const graphNode = (node.data as { node?: GraphNode }).node;
       if (drawEdgeMode && graphNode) {
         if (!edgeDraftSourceId || edgeDraftSourceId === graphNode.id) {
@@ -317,16 +378,20 @@ function WorkspaceCanvasInner({
       }
       onSelectNode(node.id);
     },
-    [drawEdgeMode, edgeDraftSourceId, onEdgeDraft, onSelectBoundary, onSelectNode]
+    [drawBoundaryMode, drawEdgeMode, edgeDraftSourceId, handleBoundaryDrawClick, onEdgeDraft, onSelectBoundary, onSelectNode]
   );
 
   const handleEdgeClick = useCallback(
-    (_: ReactMouseEvent, edge: Edge) => {
+    (event: ReactMouseEvent, edge: Edge) => {
+      if (drawBoundaryMode) {
+        handleBoundaryDrawClick(event);
+        return;
+      }
       if (canvas?.edges.some((item) => item.id === edge.id)) {
         onSelectEdge(edge.id);
       }
     },
-    [canvas?.edges, onSelectEdge]
+    [canvas?.edges, drawBoundaryMode, handleBoundaryDrawClick, onSelectEdge]
   );
 
   const handleConnect = useCallback(
@@ -340,21 +405,6 @@ function WorkspaceCanvasInner({
       });
     },
     [drawEdgeMode, onEdgeDraft]
-  );
-
-  const startBoundaryDraft = useCallback(
-    (event: ReactMouseEvent) => {
-      if (!drawBoundaryMode || !canvas?.scopeNodeId || event.button !== 0) {
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      const point = screenToFlowPosition({ x: event.clientX, y: event.clientY });
-      const nextDraft = { start: point, current: point };
-      draftRectRef.current = nextDraft;
-      setDraftRect(nextDraft);
-    },
-    [canvas?.scopeNodeId, drawBoundaryMode, screenToFlowPosition]
   );
 
   const updateBoundaryDraft = useCallback(
@@ -371,34 +421,44 @@ function WorkspaceCanvasInner({
     [drawBoundaryMode, screenToFlowPosition]
   );
 
-  const finishBoundaryDraft = useCallback(
-    (event: ReactMouseEvent) => {
-      if (!drawBoundaryMode || !draftRectRef.current) {
-        return;
-      }
+  const handleCancelDrawClick = useCallback(
+    (event: ReactMouseEvent<HTMLButtonElement>) => {
       event.preventDefault();
       event.stopPropagation();
-      const rectangle = normalizeDraftRect({
-        ...draftRectRef.current,
-        current: screenToFlowPosition({ x: event.clientX, y: event.clientY })
-      });
       draftRectRef.current = null;
       setDraftRect(null);
-      if (rectangle.size.width >= 24 && rectangle.size.height >= 24) {
-        onBoundaryDraft(rectangle);
-      }
+      setEdgeDraftSourceId(null);
+      onCancelDraw();
     },
-    [drawBoundaryMode, onBoundaryDraft, screenToFlowPosition]
+    [onCancelDraw]
   );
 
   useEffect(() => {
-    if (nodes.length > 0) {
-      window.requestAnimationFrame(() => fitView({ padding: 0.2, duration: 320 }));
+    const scopeKey = canvas?.scopeNodeId ?? canvas?.rootNodeId ?? null;
+    if (nodes.length === 0 || restoreViewport === undefined || viewportAppliedScopeRef.current === scopeKey) {
+      return;
     }
-  }, [fitView, nodes.length, canvas?.rootNodeId]);
+    viewportAppliedScopeRef.current = scopeKey;
+    let frameId = 0;
+    if (restoreViewport) {
+      skipNextSelectedCenterRef.current = true;
+      frameId = window.requestAnimationFrame(() => {
+        void setViewport(restoreViewport, { duration: 0 });
+      });
+      return () => window.cancelAnimationFrame(frameId);
+    }
+    frameId = window.requestAnimationFrame(() => {
+      void fitView({ padding: 0.2, duration: 320 });
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [canvas?.rootNodeId, canvas?.scopeNodeId, fitView, nodes.length, restoreViewport, setViewport]);
 
   useEffect(() => {
     if (!selectedNodeId || !canvas) {
+      return;
+    }
+    if (skipNextSelectedCenterRef.current) {
+      skipNextSelectedCenterRef.current = false;
       return;
     }
     const node = canvas.nodes.find((item) => item.id === selectedNodeId);
@@ -406,6 +466,13 @@ function WorkspaceCanvasInner({
       setCenter(node.position.x + 120, node.position.y + 70, { zoom: 1.08, duration: 280 });
     }
   }, [canvas, selectedNodeId, setCenter]);
+
+  const handleMoveEnd = useCallback(
+    (_: MouseEvent | TouchEvent | null, viewport: Viewport) => {
+      onViewportChange(viewport);
+    },
+    [onViewportChange]
+  );
 
   if (!canvas) {
     return <div className="canvas-empty">Loading workspace...</div>;
@@ -420,7 +487,7 @@ function WorkspaceCanvasInner({
       nodes={flowNodes}
       edges={edges}
       nodeTypes={nodeTypes}
-      fitView
+      edgeTypes={edgeTypes}
       nodesDraggable={!drawMode}
       nodesConnectable={false}
       elementsSelectable={!drawMode}
@@ -440,9 +507,9 @@ function WorkspaceCanvasInner({
       onNodeDragStop={handleNodeDragStop}
       onEdgeClick={handleEdgeClick}
       onConnect={handleConnect}
-      onMouseDown={startBoundaryDraft}
+      onMoveEnd={handleMoveEnd}
+      onPaneClick={handleBoundaryDrawClick}
       onMouseMove={updateBoundaryDraft}
-      onMouseUp={finishBoundaryDraft}
       proOptions={{ hideAttribution: false }}
     >
       <Background color={canvasColors.backgroundDots} gap={28} size={1} />
@@ -470,12 +537,22 @@ function WorkspaceCanvasInner({
       </Panel>
       {drawBoundaryMode ? (
         <Panel position="top-center">
-          <div className="canvas-draw-status">Draw boundary</div>
+          <div className="canvas-draw-status">
+            <span>{draftRect ? "Click to finish boundary" : "Click to start boundary"}</span>
+            <button type="button" className="canvas-draw-cancel" onClick={handleCancelDrawClick}>
+              Cancel
+            </button>
+          </div>
         </Panel>
       ) : null}
       {drawEdgeMode ? (
         <Panel position="top-center">
-          <div className="canvas-draw-status">{edgeDraftSourceId ? "Select target block" : "Select source block"}</div>
+          <div className="canvas-draw-status">
+            <span>{edgeDraftSourceId ? "Select target block" : "Select source block"}</span>
+            <button type="button" className="canvas-draw-cancel" onClick={handleCancelDrawClick}>
+              Cancel
+            </button>
+          </div>
         </Panel>
       ) : null}
     </ReactFlow>
@@ -577,31 +654,63 @@ function toFlowGraphNode(
   };
 }
 
+type EdgeRenderData = {
+  label: string;
+  title: string;
+  color: string;
+  labelColor: string;
+  labelBackground: string;
+  labelBorder: string;
+  offset: number;
+  selected: boolean;
+};
+
+export type EdgeRenderSummary = Pick<EdgeRenderData, "label" | "offset" | "title"> & {
+  id: string;
+};
+
+export function buildEdgeRenderSummaries(canvas: CanvasGraph | null, selectedEdgeId: string | null, theme: "light" | "dark"): EdgeRenderSummary[] {
+  return toFlowEdges(canvas, selectedEdgeId, theme).map((edge) => ({
+    id: edge.id,
+    label: String(edge.label ?? ""),
+    title: String((edge.data as EdgeRenderData | undefined)?.title ?? edge.label ?? ""),
+    offset: Number((edge.data as EdgeRenderData | undefined)?.offset ?? 0)
+  }));
+}
+
 function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, theme: "light" | "dark"): Edge[] {
   if (!canvas) {
     return [];
   }
-  const labelColor = theme === "dark" ? "#cbd5e1" : "#4b5563";
+  const laneOffsets = buildEdgeLaneOffsets([
+    ...canvas.edges.map((edge) => ({ id: edge.id, source: edge.sourceNodeId, target: edge.targetNodeId })),
+    ...canvas.nodes
+      .filter((node) => node.attachedToId)
+      .map((node) => ({ id: `attachment-${node.attachedToId}-${node.id}`, source: node.attachedToId!, target: node.id }))
+  ]);
 
   const semanticEdges: Edge[] = canvas.edges.map((edge) => {
     const edgeColor = edge.id === selectedEdgeId ? "#2563eb" : edge.color;
+    const data = edgeRenderData({
+      label: formatEdgeLabel(edge),
+      color: edgeColor,
+      selected: edge.id === selectedEdgeId,
+      offset: laneOffsets.get(edge.id) ?? 0,
+      theme
+    });
     return {
       id: edge.id,
       source: edge.sourceNodeId,
       target: edge.targetNodeId,
-      label: formatEdgeLabel(edge),
-      type: "smoothstep",
+      label: data.label,
+      type: "graphEdge",
       selected: edge.id === selectedEdgeId,
       animated: edge.animated,
+      data,
       ...edgeMarkerProps(edge, edgeColor),
       style: {
         stroke: edgeColor,
         strokeWidth: edge.id === selectedEdgeId ? 2.4 : 1.7
-      },
-      labelStyle: {
-        fill: labelColor,
-        fontSize: 11,
-        fontWeight: 600
       }
     };
   });
@@ -610,13 +719,22 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
     .filter((node) => node.attachedToId)
     .map((node) => {
       const color = colorForNode(node, canvas);
+      const id = `attachment-${node.attachedToId}-${node.id}`;
+      const data = edgeRenderData({
+        label: node.kind,
+        color,
+        selected: false,
+        offset: laneOffsets.get(id) ?? 0,
+        theme
+      });
       return {
-        id: `attachment-${node.attachedToId}-${node.id}`,
+        id,
         source: node.attachedToId!,
         target: node.id,
-        label: node.kind,
-        type: "smoothstep",
+        label: data.label,
+        type: "graphEdge",
         animated: node.kind === "input" || node.kind === "output",
+        data,
         markerEnd: {
           type: MarkerType.ArrowClosed,
           color
@@ -625,16 +743,103 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
           stroke: color,
           strokeWidth: 1.4,
           strokeDasharray: "5 5"
-        },
-        labelStyle: {
-          fill: color,
-          fontSize: 11,
-          fontWeight: 700
         }
       };
     });
 
   return [...semanticEdges, ...attachmentEdges];
+}
+
+function ReadableGraphEdge({
+  sourceX,
+  sourceY,
+  sourcePosition,
+  targetX,
+  targetY,
+  targetPosition,
+  markerStart,
+  markerEnd,
+  style,
+  data,
+  selected
+}: EdgeProps<Edge<Record<string, unknown>>>) {
+  const renderData = data as EdgeRenderData | undefined;
+  const offset = renderData?.offset ?? 0;
+  const [edgePath, labelX, labelY] = getSmoothStepPath({
+    sourceX,
+    sourceY,
+    sourcePosition,
+    targetX,
+    targetY,
+    targetPosition,
+    borderRadius: 14,
+    offset: 24 + Math.abs(offset)
+  });
+
+  return (
+    <>
+      <BaseEdge path={edgePath} markerStart={markerStart} markerEnd={markerEnd} style={style} interactionWidth={18} />
+      {renderData ? (
+        <EdgeLabelRenderer>
+          <div
+            className={`graph-edge-label ${selected || renderData.selected ? "selected" : ""}`}
+            title={renderData.title}
+            style={{
+              "--edge-label-color": renderData.labelColor,
+              "--edge-label-bg": renderData.labelBackground,
+              "--edge-label-border": renderData.labelBorder,
+              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY + offset}px)`
+            } as CSSProperties}
+          >
+            {renderData.label}
+          </div>
+        </EdgeLabelRenderer>
+      ) : null}
+    </>
+  );
+}
+
+function edgeRenderData({
+  label,
+  color,
+  selected,
+  offset,
+  theme
+}: {
+  label: string;
+  color: string;
+  selected: boolean;
+  offset: number;
+  theme: "light" | "dark";
+}): EdgeRenderData {
+  return {
+    label,
+    title: label,
+    color,
+    labelColor: selected ? "#1d4ed8" : theme === "dark" ? "#e2e8f0" : "#334155",
+    labelBackground: theme === "dark" ? "rgba(15, 23, 42, 0.94)" : "rgba(255, 255, 255, 0.96)",
+    labelBorder: selected ? "#2563eb" : theme === "dark" ? "rgba(148, 163, 184, 0.42)" : "rgba(203, 213, 225, 0.92)",
+    offset,
+    selected
+  };
+}
+
+function buildEdgeLaneOffsets(edges: Array<{ id: string; source: string; target: string }>): Map<string, number> {
+  const groups = new Map<string, Array<{ id: string; source: string; target: string }>>();
+  for (const edge of edges) {
+    const key = edge.source < edge.target ? `${edge.source}\u0000${edge.target}` : `${edge.target}\u0000${edge.source}`;
+    groups.set(key, [...(groups.get(key) ?? []), edge]);
+  }
+
+  const offsets = new Map<string, number>();
+  for (const group of groups.values()) {
+    const ordered = [...group].sort((a, b) => a.source.localeCompare(b.source) || a.target.localeCompare(b.target) || a.id.localeCompare(b.id));
+    const center = (ordered.length - 1) / 2;
+    for (const [index, edge] of ordered.entries()) {
+      offsets.set(edge.id, Math.round((index - center) * EDGE_LANE_STEP));
+    }
+  }
+  return offsets;
 }
 
 function edgeMarkerProps(edge: CanvasGraph["edges"][number], color: string): Pick<Edge, "markerStart" | "markerEnd"> {
@@ -770,6 +975,7 @@ function useResolvedCanvasTheme(theme: WorkspaceSettings["general"]["theme"]): "
 
 const BOUNDARY_SIDE_PADDING = 48;
 const BOUNDARY_BOTTOM_PADDING = 44;
+const EDGE_LANE_STEP = 34;
 
 function canvasThemeColors(theme: "light" | "dark") {
   if (theme === "dark") {

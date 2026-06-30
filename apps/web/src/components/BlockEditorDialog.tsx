@@ -47,6 +47,11 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
   const [codeStartLine, setCodeStartLine] = useState(node?.code.startLine ? String(node.code.startLine) : "");
   const [codeEndLine, setCodeEndLine] = useState(node?.code.endLine ? String(node.code.endLine) : "");
   const [language, setLanguage] = useState<LanguageType>(node?.code.language ?? "unknown");
+  const [testScriptDirectory, setTestScriptDirectory] = useState(node?.execution.testScriptDirectory ?? "");
+  const [virtualEnvironment, setVirtualEnvironment] = useState(node?.execution.virtualEnvironment ?? "");
+  const [workingDirectory, setWorkingDirectory] = useState(node?.execution.workingDirectory ?? "");
+  const [setupCommand, setSetupCommand] = useState(node?.execution.setupCommand ?? "");
+  const [testCommand, setTestCommand] = useState(node?.execution.testCommand ?? "");
   const [parentId, setParentId] = useState(node?.parentId ?? canvas?.scopeNodeId ?? domainOptions[0]?.id ?? "");
   const [attachedToId, setAttachedToId] = useState(node?.attachedToId ?? defaultOwner);
   const [customTypeId, setCustomTypeId] = useState(node?.customTypeId ?? canvas?.customTypes[0]?.id ?? "");
@@ -66,6 +71,11 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
     setCodeStartLine(node?.code.startLine ? String(node.code.startLine) : "");
     setCodeEndLine(node?.code.endLine ? String(node.code.endLine) : "");
     setLanguage(node?.code.language ?? "unknown");
+    setTestScriptDirectory(node?.execution.testScriptDirectory ?? "");
+    setVirtualEnvironment(node?.execution.virtualEnvironment ?? "");
+    setWorkingDirectory(node?.execution.workingDirectory ?? "");
+    setSetupCommand(node?.execution.setupCommand ?? "");
+    setTestCommand(node?.execution.testCommand ?? "");
     setParentId(node?.parentId ?? canvas?.scopeNodeId ?? domainOptions[0]?.id ?? "");
     setAttachedToId(node?.attachedToId ?? defaultOwner);
     setCustomTypeId(node?.customTypeId ?? canvas?.customTypes[0]?.id ?? "");
@@ -95,7 +105,14 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
       language,
       parentId: isDomain && !isFramework ? parentId || null : null,
       attachedToId: isDomain ? null : attachedToId || null,
-      customTypeId: isCustom ? customTypeId || null : null
+      customTypeId: isCustom ? customTypeId || null : null,
+      execution: {
+        testScriptDirectory: testScriptDirectory.trim() || null,
+        virtualEnvironment: virtualEnvironment.trim() || null,
+        workingDirectory: workingDirectory.trim() || null,
+        setupCommand: setupCommand.trim() || null,
+        testCommand: testCommand.trim() || null
+      }
     };
 
     onSave(payload, {
@@ -210,6 +227,33 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
             </div>
           </label>
         </div>
+
+        <div className="form-grid">
+          <label className="form-field">
+            <span>Test Script Directory</span>
+            <input value={testScriptDirectory} placeholder="tests/generated" onChange={(event) => setTestScriptDirectory(event.target.value)} />
+          </label>
+          <label className="form-field">
+            <span>Virtual Environment</span>
+            <input value={virtualEnvironment} placeholder=".venv or pnpm workspace" onChange={(event) => setVirtualEnvironment(event.target.value)} />
+          </label>
+        </div>
+
+        <div className="form-grid">
+          <label className="form-field">
+            <span>Working Directory</span>
+            <input value={workingDirectory} placeholder="." onChange={(event) => setWorkingDirectory(event.target.value)} />
+          </label>
+          <label className="form-field">
+            <span>Setup Command</span>
+            <input value={setupCommand} placeholder="pnpm install" onChange={(event) => setSetupCommand(event.target.value)} />
+          </label>
+        </div>
+
+        <label className="form-field">
+          <span>Test Command</span>
+          <input value={testCommand} placeholder="pnpm test --filter ..." onChange={(event) => setTestCommand(event.target.value)} />
+        </label>
 
         {isCustom ? (
           <div className="custom-type-box">
