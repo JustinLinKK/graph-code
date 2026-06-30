@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { scanRepositoryCodeGraph } from "@graphcode/parser";
+import type { ScanPipelineResult } from "@graphcode/agent-runtime";
 import { openDatabase, type GraphDatabase } from "./connection";
 import { GraphRepository } from "./repository";
 import { migrate } from "./schema";
@@ -47,12 +48,14 @@ describe("SQLite graph repository", () => {
         "process_details",
         "format_details",
         "graph_node_layouts",
-        "graph_node_type_styles",
-        "graph_revisions",
-        "graph_entity_versions",
-        "workspace_settings",
-        "coding_agent_settings",
-        "agent_settings",
+	        "graph_node_type_styles",
+	        "graph_revisions",
+	        "graph_entity_versions",
+	        "workspace_settings",
+	        "coding_agent_settings",
+        "scanning_agent_settings",
+        "scan_file_state",
+	        "agent_settings",
 	        "agent_runs",
 	        "agent_messages",
 	        "graph_status_history",
@@ -78,6 +81,16 @@ describe("SQLite graph repository", () => {
           apiKeySource: { type: "manual", value: "secret-value" },
           systemPromptSource: { type: "manual", value: "Stay scoped." }
         }
+      ],
+      scanningAgents: [
+        {
+          mode: "local",
+          provider: "openai",
+          model: "gpt-4.1-mini",
+          parallelLimit: 6,
+          apiKeySource: { type: "manual", value: "scan-secret" },
+          systemPromptSource: { type: "manual", value: "Scan one file." }
+        }
       ]
     });
     const raw = repo.getAgentConfig(project.id, "coding");
@@ -100,10 +113,14 @@ describe("SQLite graph repository", () => {
     expect(settings.automation.autoReviewAfterCoding).toBe(false);
     expect(settings.agents.some((agent) => agent.agentKind === "coding")).toBe(false);
     expect(settings.codingAgents).toHaveLength(3);
+    expect(settings.scanningAgents).toHaveLength(3);
     expect(settings.codingAgents.find((agent) => agent.mode === "medium")?.apiKeySource.value).toBe("");
     expect(settings.codingAgents.find((agent) => agent.mode === "medium")?.apiKeyConfigured).toBe(true);
+    expect(settings.scanningAgents.find((agent) => agent.mode === "local")?.apiKeySource.value).toBe("");
+    expect(settings.scanningAgents.find((agent) => agent.mode === "local")?.apiKeyConfigured).toBe(true);
     expect(raw.apiKeySource.value).toBe("secret-value");
     expect(repo.getCodingAgentConfig(project.id, "large").apiKeySource.value).toBe("secret-value");
+    expect(repo.getScanningAgentConfig(project.id, "local").apiKeySource.value).toBe("scan-secret");
     expect(run.codingMode).toBe("medium");
     expect(history[0].status).toBe("coded");
 	    expect(repo.getNode("module-web").agentStatus).toBe("coded");
@@ -327,11 +344,90 @@ describe("SQLite graph repository", () => {
 
     const settings = legacyRepo.getWorkspaceSettings("legacy");
     expect(settings.codingAgents.map((agent) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
+    expect(settings.scanningAgents.map((agent) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
     expect(legacyRepo.getCodingAgentConfig("legacy", "small").model).toBe("legacy-coder");
     expect(legacyRepo.getCodingAgentConfig("legacy", "large").apiKeySource.value).toBe("legacy-key");
+    expect(legacyRepo.getScanningAgentConfig("legacy", "global").parallelLimit).toBe(1);
     expect(legacyRepo.getAgentRun("run-legacy").codingMode).toBe("medium");
 
     legacyDb.close();
+  });
+
+  it("persists scan file state and source evidence while cleaning generated rows incrementally", () => {
+    const project = repo.createProject({ id: "scan-project", name: "Scan Project", rootPath: "/tmp/scan-project" });
+    const initialScan: ScanPipelineResult = {
+      initial: true,
+      inventory: [
+        { path: "src/a.ts", contentHash: "hash-a", size: 42, language: "typescript" },
+        { path: "src/b.ts", contentHash: "hash-b", size: 21, language: "typescript" }
+      ],
+      changedFiles: [
+        { path: "src/a.ts", contentHash: "hash-a", size: 42, language: "typescript" },
+        { path: "src/b.ts", contentHash: "hash-b", size: 21, language: "typescript" }
+      ],
+      deletedFiles: [],
+      globalOutput: {
+        summary: "Initial global graph",
+        nodes: [
+          {
+            stableKey: "scan-framework-test",
+            kind: "framework",
+            name: "Scan Root",
+            summary: "Scanned repository",
+            codeContext: "Scanned repository",
+            source: { path: null, startLine: null, endLine: null },
+            language: "unknown"
+          }
+        ],
+        edges: []
+      },
+      mediumOutputs: [
+        {
+          scopePath: "src",
+          summary: "Source directory",
+          nodes: [
+            {
+              stableKey: "scan-dir-src",
+              kind: "module",
+              name: "src",
+              summary: "Source directory",
+              codeContext: "Source directory",
+              source: { path: "src", startLine: null, endLine: null },
+              language: "unknown",
+              parentStableKey: "scan-framework-test"
+            }
+          ],
+          edges: []
+        }
+      ],
+      localOutputs: [
+        localScanOutput("src/a.ts", "hash-a", "scan-file-a", "scan-fn-a", "scan-edge-a-to-b"),
+        localScanOutput("src/b.ts", "hash-b", "scan-file-b", "scan-fn-b")
+      ]
+    };
+
+    const initialCounts = repo.applyScanPipelineResult(project.id, initialScan);
+
+    expect(initialCounts.fileCount).toBe(2);
+    expect(repo.listScanFileStates(project.id).map((state) => state.filePath).sort()).toEqual(["src/a.ts", "src/b.ts"]);
+    expect(repo.getEdge("scan-edge-a-to-b").source).toEqual({ path: "src/a.ts", startLine: 2, endLine: 3 });
+
+    const incrementalScan: ScanPipelineResult = {
+      ...initialScan,
+      initial: false,
+      inventory: [{ path: "src/a.ts", contentHash: "hash-a2", size: 45, language: "typescript" }],
+      changedFiles: [{ path: "src/a.ts", contentHash: "hash-a2", size: 45, language: "typescript" }],
+      deletedFiles: [{ filePath: "src/b.ts", contentHash: "hash-b" }],
+      localOutputs: [localScanOutput("src/a.ts", "hash-a2", "scan-file-a", "scan-fn-a")]
+    };
+
+    const incrementalCounts = repo.applyScanPipelineResult(project.id, incrementalScan);
+
+    expect(incrementalCounts.fileCount).toBe(1);
+    expect(repo.listScanFileStates(project.id).map((state) => state.filePath)).toEqual(["src/a.ts"]);
+    expect(db.prepare("SELECT id FROM graph_nodes WHERE id = ?").get("scan-file-b")).toBeUndefined();
+    expect(db.prepare("SELECT id FROM graph_edges WHERE id = ?").get("scan-edge-a-to-b")).toBeUndefined();
+    expect(repo.getNode("scan-file-a").source.path).toBe("src/a.ts");
   });
 
   it("demotes semantic edits while preserving status for layout, style, and tag edits", () => {
@@ -960,6 +1056,55 @@ describe("SQLite graph repository", () => {
 
 function flattenHierarchy(nodes: ReturnType<GraphRepository["getHierarchy"]>): ReturnType<GraphRepository["getHierarchy"]> {
   return nodes.flatMap((node) => [node, ...flattenHierarchy(node.children)]);
+}
+
+function localScanOutput(
+  filePath: string,
+  contentHash: string,
+  fileStableKey: string,
+  functionStableKey: string,
+  edgeStableKey?: string
+): ScanPipelineResult["localOutputs"][number] {
+  return {
+    filePath,
+    contentHash,
+    summary: `Local scan for ${filePath}`,
+    nodes: [
+      {
+        stableKey: fileStableKey,
+        kind: "module",
+        name: path.basename(filePath),
+        summary: `File ${filePath}`,
+        codeContext: `File ${filePath}`,
+        source: { path: filePath, startLine: 1, endLine: 4 },
+        language: "typescript",
+        parentStableKey: "scan-dir-src"
+      },
+      {
+        stableKey: functionStableKey,
+        kind: "function",
+        name: `${path.basename(filePath, ".ts")}Function`,
+        summary: `Function in ${filePath}`,
+        codeContext: `Function in ${filePath}`,
+        source: { path: filePath, startLine: 2, endLine: 3 },
+        language: "typescript",
+        parentStableKey: fileStableKey
+      }
+    ],
+    edges: edgeStableKey
+      ? [
+          {
+            stableKey: edgeStableKey,
+            kind: "calls",
+            sourceStableKey: functionStableKey,
+            targetStableKey: "scan-file-b",
+            label: "calls generated peer",
+            codeContext: "Function calls another generated file.",
+            source: { path: filePath, startLine: 2, endLine: 3 }
+          }
+        ]
+      : []
+  };
 }
 
 function nodeCenterInside(

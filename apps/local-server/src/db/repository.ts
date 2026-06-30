@@ -77,6 +77,10 @@ import {
   type ProcessDetails,
   type ProcessKind,
   type Project,
+  SCANNING_AGENT_MODES,
+  type ScanningAgentConfig,
+  type ScanningAgentConfigView,
+  type ScanningAgentMode,
   type SettingsValidationResult,
   type TagAssignment,
   type TagMutation,
@@ -87,7 +91,8 @@ import {
   isAttachmentNodeKind,
   isDomainNodeKind
 } from "@graphcode/graph-model";
-import type { CodeGraphSnapshot, CodeGraphSymbol, CodeGraphWorkflowNode } from "@graphcode/parser";
+import type { ScanEdgeDraft, ScanNodeDraft, ScanPipelineResult } from "@graphcode/agent-runtime";
+import { codeGraphId, type CodeGraphSnapshot, type CodeGraphSymbol, type CodeGraphWorkflowNode } from "@graphcode/parser";
 import type { GraphDatabase } from "./connection";
 import { layoutCanvasWithBoundaryGroups } from "../layout/elk";
 
@@ -153,6 +158,9 @@ type EdgeRow = {
   target_node_id: string;
   label: string | null;
   code_context: string;
+  source_path: string | null;
+  source_start_line: number | null;
+  source_end_line: number | null;
   color: string;
   animated: 0 | 1;
   pointing_enabled: 0 | 1;
@@ -197,6 +205,34 @@ type CodingAgentSettingsRow = {
   api_key_source_value: string;
   system_prompt_source_type: CodingAgentConfig["systemPromptSource"]["type"];
   system_prompt_source_value: string;
+};
+
+type ScanningAgentSettingsRow = {
+  project_id: string;
+  scanning_mode: ScanningAgentMode;
+  provider: ScanningAgentConfig["provider"];
+  model: string;
+  parallel_limit: number;
+  api_key_source_type: ScanningAgentConfig["apiKeySource"]["type"];
+  api_key_source_value: string;
+  system_prompt_source_type: ScanningAgentConfig["systemPromptSource"]["type"];
+  system_prompt_source_value: string;
+};
+
+export type ScanFileState = {
+  projectId: string;
+  filePath: string;
+  contentHash: string;
+  lastRunId: string | null;
+  lastScannedAt: string;
+};
+
+type ScanFileStateRow = {
+  project_id: string;
+  file_path: string;
+  content_hash: string;
+  last_run_id: string | null;
+  last_scanned_at: string;
 };
 
 type AgentRunRow = {
@@ -429,6 +465,9 @@ type NewGraphEdge = {
   targetNodeId: string;
   label?: string | null;
   codeContext?: string;
+  sourcePath?: string | null;
+  sourceStartLine?: number | null;
+  sourceEndLine?: number | null;
   color?: string;
   animated?: boolean;
   pointingEnabled?: boolean;
@@ -515,6 +554,36 @@ export class GraphRepository {
     return rows.map(mapProject);
   }
 
+  listScanFileStates(projectId: string): ScanFileState[] {
+    this.getProject(projectId);
+    const rows = this.db
+      .prepare("SELECT * FROM scan_file_state WHERE project_id = ? ORDER BY file_path ASC")
+      .all(projectId) as ScanFileStateRow[];
+    return rows.map(mapScanFileState);
+  }
+
+  replaceScanFileStates(projectId: string, states: Array<{ filePath: string; contentHash: string }>, runId?: string | null): void {
+    this.getProject(projectId);
+    const write = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM scan_file_state WHERE project_id = ?").run(projectId);
+      const insert = this.db.prepare(
+        `
+        INSERT INTO scan_file_state (project_id, file_path, content_hash, last_run_id, last_scanned_at)
+        VALUES (@projectId, @filePath, @contentHash, @lastRunId, datetime('now'))
+      `
+      );
+      for (const state of states) {
+        insert.run({
+          projectId,
+          filePath: state.filePath,
+          contentHash: state.contentHash,
+          lastRunId: runId ?? null
+        });
+      }
+    });
+    write();
+  }
+
   getWorkspaceSettings(projectId: string): WorkspaceSettings {
     this.ensureDefaultSettings(projectId);
     const row = this.db.prepare("SELECT * FROM workspace_settings WHERE project_id = ?").get(projectId) as WorkspaceSettingsRow;
@@ -524,6 +593,11 @@ export class GraphRepository {
     const codingAgentRows = this.db
       .prepare("SELECT * FROM coding_agent_settings WHERE project_id = ? ORDER BY CASE coding_mode WHEN 'small' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END")
       .all(projectId) as CodingAgentSettingsRow[];
+    const scanningAgentRows = this.db
+      .prepare(
+        "SELECT * FROM scanning_agent_settings WHERE project_id = ? ORDER BY CASE scanning_mode WHEN 'local' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END"
+      )
+      .all(projectId) as ScanningAgentSettingsRow[];
     return {
       general: {
         theme: row.theme
@@ -545,7 +619,8 @@ export class GraphRepository {
         autoReviewAfterCoding: row.auto_review_after_coding !== 0
       },
       agents: agentRows.map(mapAgentSettingsView),
-      codingAgents: codingAgentRows.map(mapCodingAgentSettingsView)
+      codingAgents: codingAgentRows.map(mapCodingAgentSettingsView),
+      scanningAgents: scanningAgentRows.map(mapScanningAgentSettingsView)
     };
   }
 
@@ -571,9 +646,21 @@ export class GraphRepository {
     return mapCodingAgentSettings(row);
   }
 
+  getScanningAgentConfig(projectId: string, mode: ScanningAgentMode): ScanningAgentConfig {
+    this.ensureDefaultSettings(projectId);
+    const row = this.db
+      .prepare("SELECT * FROM scanning_agent_settings WHERE project_id = ? AND scanning_mode = ?")
+      .get(projectId, mode) as ScanningAgentSettingsRow | undefined;
+    if (!row) {
+      return defaultScanningAgentConfig(mode);
+    }
+    return mapScanningAgentSettings(row);
+  }
+
   saveWorkspaceSettings(projectId: string, input: WorkspaceSettingsMutation): WorkspaceSettings {
     this.getProject(projectId);
     const codingAgents = input.codingAgents ?? [];
+    const scanningAgents = input.scanningAgents ?? [];
     const write = this.db.transaction(() => {
       this.db
         .prepare(
@@ -697,6 +784,37 @@ export class GraphRepository {
           this.upsertCodingAgentSettings(projectId, defaultCodingAgentConfig(mode));
         }
       }
+      if (scanningAgents.length > 0) {
+        for (const scanningAgent of scanningAgents) {
+          const existing = this.getScanningAgentConfig(projectId, scanningAgent.mode);
+          const apiKeyValue = scanningAgent.apiKeySource.value?.trim()
+            ? scanningAgent.apiKeySource.value
+            : scanningAgent.apiKeySource.type === existing.apiKeySource.type
+              ? existing.apiKeySource.value
+              : "";
+          const systemPromptValue = scanningAgent.systemPromptSource.value?.trim()
+            ? scanningAgent.systemPromptSource.value
+            : scanningAgent.systemPromptSource.type === existing.systemPromptSource.type
+              ? existing.systemPromptSource.value
+              : "";
+          this.upsertScanningAgentSettings(projectId, {
+            ...scanningAgent,
+            apiKeySource: {
+              ...scanningAgent.apiKeySource,
+              value: apiKeyValue
+            },
+            systemPromptSource: {
+              ...scanningAgent.systemPromptSource,
+              value: systemPromptValue
+            }
+          });
+        }
+      }
+      for (const mode of SCANNING_AGENT_MODES) {
+        if (!this.hasScanningAgentSettings(projectId, mode)) {
+          this.upsertScanningAgentSettings(projectId, defaultScanningAgentConfig(mode));
+        }
+      }
     });
     write();
     return this.getWorkspaceSettings(projectId);
@@ -760,6 +878,7 @@ export class GraphRepository {
     const fieldErrors: Record<string, string> = {};
     const seen = new Set<AgentKind>();
     const codingAgents = input.codingAgents ?? [];
+    const scanningAgents = input.scanningAgents ?? [];
     if (input.github.enabled) {
       if (!input.github.repository.trim()) {
         fieldErrors["github.repository"] = "Repository is required when GitHub integration is enabled.";
@@ -823,6 +942,35 @@ export class GraphRepository {
       }
       if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
         fieldErrors[`codingAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
+      }
+    });
+    const seenScanningModes = new Set<ScanningAgentMode>();
+    scanningAgents.forEach((agent, index) => {
+      const existing = this.getScanningAgentConfig(projectId, agent.mode);
+      const effectiveApiKeyValue =
+        agent.apiKeySource.value?.trim() || (agent.apiKeySource.type === existing.apiKeySource.type ? (existing.apiKeySource.value ?? "").trim() : "");
+      const effectiveSystemPromptValue =
+        agent.systemPromptSource.value?.trim() ||
+        (agent.systemPromptSource.type === existing.systemPromptSource.type ? (existing.systemPromptSource.value ?? "").trim() : "");
+      if (seenScanningModes.has(agent.mode)) {
+        fieldErrors[`scanningAgents.${index}.mode`] = "Each scanning mode can only be configured once.";
+      }
+      seenScanningModes.add(agent.mode);
+      if (!agent.model.trim()) {
+        fieldErrors[`scanningAgents.${index}.model`] = "Model is required.";
+      }
+      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+        if (!effectiveApiKeyValue) {
+          fieldErrors[`scanningAgents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
+        } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
+          fieldErrors[`scanningAgents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
+        }
+      }
+      if (agent.provider === "claudecode" && !agent.model.trim()) {
+        fieldErrors[`scanningAgents.${index}.model`] = "Claude Code command or model label is required.";
+      }
+      if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
+        fieldErrors[`scanningAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
       }
     });
 
@@ -1143,6 +1291,9 @@ export class GraphRepository {
           targetNodeId: input.targetNodeId,
           label: input.label ?? null,
           codeContext: input.codeContext ?? "",
+          sourcePath: input.source?.path ?? null,
+          sourceStartLine: input.source?.startLine ?? null,
+          sourceEndLine: input.source?.endLine ?? null,
           color: input.color,
           animated: input.animated,
           pointingEnabled: input.pointingEnabled,
@@ -1995,14 +2146,25 @@ export class GraphRepository {
     this.db
       .prepare(
         `
-        INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, pointing_enabled, pointing_direction, agent_status)
-        VALUES (@id, @projectId, @kind, @sourceNodeId, @targetNodeId, @label, @codeContext, @color, @animated, @pointingEnabled, @pointingDirection, @agentStatus)
+        INSERT INTO graph_edges (
+          id, project_id, kind, source_node_id, target_node_id, label, code_context,
+          source_path, source_start_line, source_end_line,
+          color, animated, pointing_enabled, pointing_direction, agent_status
+        )
+        VALUES (
+          @id, @projectId, @kind, @sourceNodeId, @targetNodeId, @label, @codeContext,
+          @sourcePath, @sourceStartLine, @sourceEndLine,
+          @color, @animated, @pointingEnabled, @pointingDirection, @agentStatus
+        )
       `
       )
       .run({
         ...input,
         label: input.label ?? null,
         codeContext: input.codeContext ?? "",
+        sourcePath: input.sourcePath ?? null,
+        sourceStartLine: input.sourceStartLine ?? null,
+        sourceEndLine: input.sourceEndLine ?? null,
         color: input.color ?? defaultEdgeColor(input.kind),
         animated: input.animated === true ? 1 : 0,
         pointingEnabled: input.pointingEnabled === false ? 0 : 1,
@@ -2021,6 +2183,9 @@ export class GraphRepository {
       targetNodeId: input.targetNodeId,
       label: input.label ?? null,
       codeContext: input.codeContext ?? "",
+      sourcePath: input.source?.path ?? null,
+      sourceStartLine: input.source?.startLine ?? null,
+      sourceEndLine: input.source?.endLine ?? null,
       color: input.color,
       animated: input.animated,
       pointingEnabled: input.pointingEnabled,
@@ -2049,6 +2214,9 @@ export class GraphRepository {
       targetNodeId: input.targetNodeId ?? existing.targetNodeId,
       label: input.label === undefined ? existing.label : input.label,
       codeContext: input.codeContext ?? existing.codeContext,
+      sourcePath: input.source === undefined ? existing.source.path : input.source.path,
+      sourceStartLine: input.source === undefined ? existing.source.startLine : input.source.startLine,
+      sourceEndLine: input.source === undefined ? existing.source.endLine : input.source.endLine,
       color: input.color ?? existing.color,
       animated: input.animated ?? existing.animated,
       pointingEnabled: input.pointingEnabled ?? existing.pointingEnabled,
@@ -2069,6 +2237,9 @@ export class GraphRepository {
       next.targetNodeId !== existing.targetNodeId ||
       (next.label ?? null) !== existing.label ||
       (next.codeContext ?? "") !== existing.codeContext ||
+      (next.sourcePath ?? null) !== existing.source.path ||
+      (next.sourceStartLine ?? null) !== existing.source.startLine ||
+      (next.sourceEndLine ?? null) !== existing.source.endLine ||
       next.pointingEnabled !== existing.pointingEnabled ||
       next.pointingDirection !== existing.pointingDirection;
     const agentStatus =
@@ -2091,6 +2262,9 @@ export class GraphRepository {
           target_node_id = @targetNodeId,
           label = @label,
           code_context = @codeContext,
+          source_path = @sourcePath,
+          source_start_line = @sourceStartLine,
+          source_end_line = @sourceEndLine,
           color = @color,
           animated = @animated,
           pointing_enabled = @pointingEnabled,
@@ -2106,6 +2280,9 @@ export class GraphRepository {
         targetNodeId: next.targetNodeId,
         label: next.label ?? null,
         codeContext: next.codeContext ?? "",
+        sourcePath: next.sourcePath ?? null,
+        sourceStartLine: next.sourceStartLine ?? null,
+        sourceEndLine: next.sourceEndLine ?? null,
         color: next.color,
         animated: next.animated ? 1 : 0,
         pointingEnabled: next.pointingEnabled ? 1 : 0,
@@ -2582,9 +2759,302 @@ export class GraphRepository {
     return save();
   }
 
+  applyScanPipelineResult(projectId: string, result: ScanPipelineResult, runId?: string | null): CodeGraphRefreshResult {
+    this.getProject(projectId);
+    const save = this.db.transaction(() => {
+      const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
+      if (result.initial) {
+        this.deleteGeneratedCodeGraph(projectId);
+        this.db.prepare("DELETE FROM scan_file_state WHERE project_id = ?").run(projectId);
+      } else {
+        this.deleteGeneratedCodeGraphForFiles(projectId, [
+          ...result.changedFiles.map((file) => file.path),
+          ...result.deletedFiles.map((file) => file.filePath)
+        ]);
+      }
+
+      const nodeDrafts = uniqueScanNodes([
+        ...result.globalOutput.nodes,
+        ...result.mediumOutputs.flatMap((output) => output.nodes),
+        ...result.localOutputs.flatMap((output) => output.nodes)
+      ]);
+      const stableIdByKey = new Map(nodeDrafts.map((node) => [node.stableKey, this.scanStableNodeId(projectId, node.stableKey)]));
+      const pending = [...nodeDrafts];
+      let progressed = true;
+      while (pending.length > 0 && progressed) {
+        progressed = false;
+        for (let index = pending.length - 1; index >= 0; index -= 1) {
+          const node = pending[index];
+          const parentId = node.parentStableKey ? stableIdByKey.get(node.parentStableKey) ?? null : null;
+          const attachedToId = node.attachedToStableKey ? stableIdByKey.get(node.attachedToStableKey) ?? null : null;
+          if ((parentId && !this.nodeExists(parentId)) || (attachedToId && !this.nodeExists(attachedToId))) {
+            continue;
+          }
+          this.upsertScanNode(projectId, node, stableIdByKey.get(node.stableKey)!, parentId, attachedToId);
+          pending.splice(index, 1);
+          progressed = true;
+        }
+      }
+      if (pending.length > 0) {
+        throw validationError(`Scanner emitted nodes with unresolved parents: ${pending.map((node) => node.stableKey).join(", ")}`);
+      }
+
+      const edgeDrafts = uniqueScanEdges([
+        ...result.globalOutput.edges,
+        ...result.mediumOutputs.flatMap((output) => output.edges),
+        ...result.localOutputs.flatMap((output) => output.edges)
+      ]);
+      for (const edge of edgeDrafts) {
+        const sourceId = stableIdByKey.get(edge.sourceStableKey);
+        const targetId = stableIdByKey.get(edge.targetStableKey);
+        if (!sourceId || !targetId || !this.nodeExists(sourceId) || !this.nodeExists(targetId)) {
+          continue;
+        }
+        this.upsertScanEdge(projectId, edge, this.scanStableEdgeId(edge), sourceId, targetId);
+      }
+
+      this.db.prepare("DELETE FROM scan_file_state WHERE project_id = ?").run(projectId);
+      const stateInsert = this.db.prepare(
+        "INSERT INTO scan_file_state (project_id, file_path, content_hash, last_run_id, last_scanned_at) VALUES (?, ?, ?, ?, datetime('now'))"
+      );
+      for (const file of result.inventory) {
+        stateInsert.run(projectId, file.path, file.contentHash, runId ?? null);
+      }
+
+      this.bumpGraphEntities(
+        projectId,
+        [...this.listGeneratedGraphEntities(projectId, false), ...previousGeneratedEntities],
+        `Applied ${result.initial ? "initial" : "incremental"} three-mode scanner output.`
+      );
+
+      return this.generatedCodeGraphCounts(projectId, result.inventory.length);
+    });
+
+    return save();
+  }
+
   private deleteGeneratedCodeGraph(projectId: string): void {
     this.db.prepare("DELETE FROM graph_nodes WHERE project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')").run(projectId);
     this.db.prepare("DELETE FROM graph_revisions WHERE project_id = ? AND id LIKE 'code-graph-revision-%'").run(projectId);
+  }
+
+  private deleteGeneratedCodeGraphForFiles(projectId: string, filePaths: string[]): void {
+    const paths = [...new Set(filePaths.filter(Boolean))];
+    if (paths.length === 0) {
+      return;
+    }
+    const placeholders = paths.map(() => "?").join(", ");
+    this.db
+      .prepare(
+        `
+        DELETE FROM graph_nodes
+        WHERE project_id = ?
+          AND (id LIKE 'scan-%' OR id LIKE 'code-%')
+          AND (source_path IN (${placeholders}) OR code_directory IN (${placeholders}))
+      `
+      )
+      .run(projectId, ...paths, ...paths);
+    this.db
+      .prepare(
+        `
+        DELETE FROM graph_edges
+        WHERE project_id = ?
+          AND (id LIKE 'scan-%' OR id LIKE 'code-%')
+          AND source_path IN (${placeholders})
+      `
+      )
+      .run(projectId, ...paths);
+  }
+
+  private scanStableNodeId(projectId: string, stableKey: string): string {
+    if (stableKey === "root") {
+      return `scan-framework-${hashId(projectId)}`;
+    }
+    if (stableKey.startsWith("dir:")) {
+      return codeGraphId("code-dir", stableKey.slice("dir:".length) || ".");
+    }
+    if (stableKey.startsWith("file:")) {
+      return codeGraphId("code-file", stableKey.slice("file:".length));
+    }
+    if (stableKey.startsWith("symbol:")) {
+      return codeGraphId("code-symbol", stableKey.slice("symbol:".length));
+    }
+    if (stableKey.startsWith("code-") || stableKey.startsWith("scan-")) {
+      return stableKey;
+    }
+    return `code-node-${hashId(stableKey)}`;
+  }
+
+  private scanStableEdgeId(edge: ScanEdgeDraft): string {
+    if (edge.stableKey.startsWith("code-") || edge.stableKey.startsWith("scan-")) {
+      return edge.stableKey;
+    }
+    return `code-edge-${hashId(`${edge.stableKey}:${edge.kind}:${edge.sourceStableKey}:${edge.targetStableKey}`)}`;
+  }
+
+  private upsertScanNode(projectId: string, draft: ScanNodeDraft, id: string, parentId: string | null, attachedToId: string | null): void {
+    const input: NewGraphNode = {
+      id,
+      projectId,
+      kind: draft.kind,
+      name: draft.name,
+      summary: draft.summary,
+      codeContext: draft.codeContext || draft.summary,
+      codeDirectory: draft.source.path,
+      codeStartLine: draft.source.startLine,
+      codeEndLine: draft.source.endLine,
+      sourcePath: draft.source.path,
+      sourceStartLine: draft.source.startLine,
+      sourceEndLine: draft.source.endLine,
+      language: draft.language,
+      parentId,
+      attachedToId,
+      agentStatus: "implemented"
+    };
+    this.assertValidNode(input, this.nodeExists(id) ? id : undefined);
+    const size = defaultSizeForKind(draft.kind);
+    if (this.nodeExists(id)) {
+      this.db
+        .prepare(
+          `
+          UPDATE graph_nodes
+          SET
+            kind = @kind,
+            name = @name,
+            summary = @summary,
+            code_context = @codeContext,
+            code_directory = @codeDirectory,
+            code_start_line = @codeStartLine,
+            code_end_line = @codeEndLine,
+            language = @language,
+            parent_id = @parentId,
+            attached_to_id = @attachedToId,
+            source_path = @sourcePath,
+            source_start_line = @sourceStartLine,
+            source_end_line = @sourceEndLine,
+            ui_width = @uiWidth,
+            ui_height = @uiHeight,
+            agent_status = 'implemented',
+            updated_at = datetime('now')
+          WHERE id = @id
+        `
+        )
+        .run({
+          ...input,
+          uiWidth: size.width,
+          uiHeight: size.height
+        });
+    } else {
+      this.createNode({
+        ...input,
+        size
+      });
+    }
+    this.replaceGeneratedDetails(id, draft);
+  }
+
+  private replaceGeneratedDetails(nodeId: string, draft: ScanNodeDraft): void {
+    this.db.prepare("DELETE FROM dependency_details WHERE node_id = ?").run(nodeId);
+    this.db.prepare("DELETE FROM io_details WHERE node_id = ?").run(nodeId);
+    this.db.prepare("DELETE FROM process_details WHERE node_id = ?").run(nodeId);
+    this.db.prepare("DELETE FROM format_details WHERE node_id = ?").run(nodeId);
+    this.db.prepare("DELETE FROM basic_block_details WHERE node_id = ?").run(nodeId);
+    const detail = draft.detail;
+    if ((draft.kind === "input" || draft.kind === "output") && detail) {
+      this.createIoDetails({
+        nodeId,
+        ioKind: detail.ioKind ?? "artifact",
+        channel: detail.channel ?? draft.name,
+        schemaHint: detail.schemaHint ?? null,
+        notes: detail.notes ?? draft.codeContext
+      });
+    }
+    if (draft.kind === "process" && detail) {
+      this.createProcessDetails({
+        nodeId,
+        processKind: detail.processKind ?? "analyze",
+        trigger: detail.trigger ?? null,
+        notes: detail.notes ?? draft.codeContext
+      });
+    }
+    if (draft.kind === "format" && detail) {
+      this.createFormatDetails({
+        nodeId,
+        formatKind: detail.formatKind ?? "type",
+        spec: detail.spec ?? draft.name,
+        notes: detail.notes ?? draft.codeContext
+      });
+    }
+  }
+
+  private upsertScanEdge(projectId: string, draft: ScanEdgeDraft, id: string, sourceNodeId: string, targetNodeId: string): void {
+    const input: NewGraphEdge = {
+      id,
+      projectId,
+      kind: draft.kind,
+      sourceNodeId,
+      targetNodeId,
+      label: draft.label ?? null,
+      codeContext: draft.codeContext,
+      sourcePath: draft.source.path,
+      sourceStartLine: draft.source.startLine,
+      sourceEndLine: draft.source.endLine,
+      animated: draft.animated ?? (draft.kind === "flows"),
+      agentStatus: "implemented"
+    };
+    this.getNode(sourceNodeId);
+    this.getNode(targetNodeId);
+    if (this.edgeExists(id)) {
+      this.db
+        .prepare(
+          `
+          UPDATE graph_edges
+          SET
+            kind = @kind,
+            source_node_id = @sourceNodeId,
+            target_node_id = @targetNodeId,
+            label = @label,
+            code_context = @codeContext,
+            source_path = @sourcePath,
+            source_start_line = @sourceStartLine,
+            source_end_line = @sourceEndLine,
+            animated = @animated,
+            agent_status = 'implemented'
+          WHERE id = @id
+        `
+        )
+        .run({
+          ...input,
+          animated: input.animated === true ? 1 : 0
+        });
+    } else {
+      this.createEdge(input);
+    }
+  }
+
+  private edgeExists(edgeId: string): boolean {
+    return Boolean(this.db.prepare("SELECT id FROM graph_edges WHERE id = ?").get(edgeId));
+  }
+
+  private generatedCodeGraphCounts(projectId: string, fileCount: number): CodeGraphRefreshResult {
+    const generatedNodeWhere = "project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')";
+    const nodeCount = (this.db.prepare(`SELECT COUNT(*) AS count FROM graph_nodes WHERE ${generatedNodeWhere}`).get(projectId) as { count: number }).count;
+    const symbolCount = (
+      this.db
+        .prepare(`SELECT COUNT(*) AS count FROM graph_nodes WHERE ${generatedNodeWhere} AND kind IN ('function', 'object')`)
+        .get(projectId) as { count: number }
+    ).count;
+    const workflowNodeCount = (
+      this.db
+        .prepare(`SELECT COUNT(*) AS count FROM graph_nodes WHERE ${generatedNodeWhere} AND kind IN ('input', 'process', 'output', 'format')`)
+        .get(projectId) as { count: number }
+    ).count;
+    const edgeCount = (
+      this.db
+        .prepare("SELECT COUNT(*) AS count FROM graph_edges WHERE project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')")
+        .get(projectId) as { count: number }
+    ).count;
+    return { nodeCount, edgeCount, fileCount, symbolCount, workflowNodeCount };
   }
 
   private listGeneratedGraphEntities(projectId: string, deleted: boolean): GraphEntityVersionInput[] {
@@ -4481,6 +4951,11 @@ export class GraphRepository {
         });
       }
     }
+    for (const mode of SCANNING_AGENT_MODES) {
+      if (!this.hasScanningAgentSettings(projectId, mode)) {
+        this.upsertScanningAgentSettings(projectId, defaultScanningAgentConfig(mode));
+      }
+    }
   }
 
   private upsertAgentSettings(projectId: string, agent: AgentConfig): void {
@@ -4563,6 +5038,55 @@ export class GraphRepository {
       .run({
         projectId,
         codingMode: agent.mode,
+        provider: agent.provider,
+        model: agent.model,
+        parallelLimit: agent.parallelLimit,
+        apiKeySourceType: agent.apiKeySource.type,
+        apiKeySourceValue: agent.apiKeySource.value ?? "",
+        systemPromptSourceType: agent.systemPromptSource.type,
+        systemPromptSourceValue: agent.systemPromptSource.value ?? ""
+      });
+  }
+
+  private hasScanningAgentSettings(projectId: string, mode: ScanningAgentMode): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT scanning_mode FROM scanning_agent_settings WHERE project_id = ? AND scanning_mode = ?")
+        .get(projectId, mode)
+    );
+  }
+
+  private upsertScanningAgentSettings(projectId: string, agent: ScanningAgentConfig): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO scanning_agent_settings (
+          project_id, scanning_mode, provider, model, parallel_limit,
+          api_key_source_type, api_key_source_value,
+          system_prompt_source_type, system_prompt_source_value,
+          created_at, updated_at
+        )
+        VALUES (
+          @projectId, @scanningMode, @provider, @model, @parallelLimit,
+          @apiKeySourceType, @apiKeySourceValue,
+          @systemPromptSourceType, @systemPromptSourceValue,
+          datetime('now'), datetime('now')
+        )
+        ON CONFLICT(project_id, scanning_mode)
+        DO UPDATE SET
+          provider = excluded.provider,
+          model = excluded.model,
+          parallel_limit = excluded.parallel_limit,
+          api_key_source_type = excluded.api_key_source_type,
+          api_key_source_value = excluded.api_key_source_value,
+          system_prompt_source_type = excluded.system_prompt_source_type,
+          system_prompt_source_value = excluded.system_prompt_source_value,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        projectId,
+        scanningMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
         parallelLimit: agent.parallelLimit,
@@ -5125,6 +5649,24 @@ function mapProject(row: ProjectRow): Project {
   };
 }
 
+function mapScanFileState(row: ScanFileStateRow): ScanFileState {
+  return {
+    projectId: row.project_id,
+    filePath: row.file_path,
+    contentHash: row.content_hash,
+    lastRunId: row.last_run_id,
+    lastScannedAt: row.last_scanned_at
+  };
+}
+
+function uniqueScanNodes(nodes: ScanNodeDraft[]): ScanNodeDraft[] {
+  return [...new Map(nodes.map((node) => [node.stableKey, node])).values()];
+}
+
+function uniqueScanEdges(edges: ScanEdgeDraft[]): ScanEdgeDraft[] {
+  return [...new Map(edges.map((edge) => [edge.stableKey, edge])).values()];
+}
+
 function parseScopes(value: string): string[] {
   return value
     .split(",")
@@ -5166,6 +5708,23 @@ function defaultCodingAgentConfig(mode: CodingAgentMode): CodingAgentConfig {
   };
 }
 
+function defaultScanningAgentConfig(mode: ScanningAgentMode): ScanningAgentConfig {
+  return {
+    mode,
+    provider: "fake",
+    model: `graphcode-scanner-${mode}-v1`,
+    parallelLimit: mode === "local" ? 8 : mode === "medium" ? 4 : 1,
+    apiKeySource: {
+      type: "env",
+      value: "OPENAI_API_KEY"
+    },
+    systemPromptSource: {
+      type: "manual",
+      value: defaultScanningSystemPrompt(mode)
+    }
+  };
+}
+
 function defaultApiKeyEnv(agentKind: AgentKind): string {
   switch (agentKind) {
     case "planning":
@@ -5181,32 +5740,83 @@ function defaultApiKeyEnv(agentKind: AgentKind): string {
   }
 }
 
+const DEFAULT_SCANNING_SYSTEM_PROMPTS = {
+  local: `You are the GraphCode Scanning Local agent.
+
+Analyze exactly one source file and translate the bottom layer into GraphCode scan JSON. Create source-linked nodes for the file, functions, classes, objects, nested symbols, and local workflow blocks. Workflow blocks should include inputs, processes, outputs, and formats for the concrete code in this file.
+
+Use only evidence from the numbered file content. Every node and edge that comes from code must carry source.path, source.startLine, and source.endLine using 1-based inclusive line numbers. Do not invent files, imports, calls, symbols, or line ranges. Stable keys should be based on source facts such as path, symbol name, start line, and relationship kind; the runtime will normalize final IDs.
+
+Return strict JSON only. Do not include markdown, commentary, or prose outside the JSON object.`,
+  medium: `You are the GraphCode Scanning Medium agent.
+
+Consolidate local scan outputs for one directory or package into GraphCode scan JSON. Identify directory/module grouping, exported surfaces, important file roles, package boundaries, and intra-directory dependency candidates. Prefer compact summaries that preserve the source-linked stable keys emitted by local scans.
+
+Use local outputs and repository inventory as evidence. Keep relationships scoped to the requested directory unless the provided local evidence proves an outward dependency candidate. Attach source evidence to edges when a specific file range proves the relationship; otherwise leave source lines null rather than guessing.
+
+Return strict JSON only. Do not include markdown, commentary, or prose outside the JSON object.`,
+  global: `You are the GraphCode Scanning Global agent.
+
+Construct the whole-system GraphCode scan JSON from repository inventory, medium summaries, and changed local outputs. Create repository and subsystem modules, wire cross-directory functions/modules/files, summarize architectural boundaries, and emit high-level calls, imports, uses, owns, impacts, flows, and format relationships when evidence supports them.
+
+Use compact unchanged graph summaries and changed artifacts to update only the affected higher-level wiring. Preserve manual or curated graph intent by emitting generated scan structure only. For every edge with code evidence, include source.path, source.startLine, and source.endLine; if exact evidence is unavailable, keep the edge summary conservative and leave the source range null.
+
+Return strict JSON only. Do not include markdown, commentary, or prose outside the JSON object.`
+} satisfies Record<ScanningAgentMode, string>;
+
+const DEFAULT_CODING_SYSTEM_PROMPTS = {
+  small: `You are the GraphCode Coding Small agent.
+
+Produce the smallest safe unified diff for the selected low-level graph block. Use the selected node, direct workflow attachments, direct edges, source path, source range, and current git status. Stay inside the selected block's source range unless the prompt explicitly grants a broader file scope.
+
+Prefer local fixes, small tests, and clear behavior over refactors. Do not edit generated .graphcode state or unrelated files. If the requested change cannot fit in the selected range, explain the blocker in the proposal rather than widening the edit silently.
+
+Return a clean unified diff plus any required test artifact manifest. Do not include unrelated commentary.`,
+  medium: `You are the GraphCode Coding Medium agent.
+
+Produce a scoped unified diff using the selected block plus its containing function, object, or file workflow. Use input/process/output/format blocks, branch-labeled flow edges, related callers/importers, source path, source ranges, execution metadata, and git status to make the change.
+
+Keep edits inside the selected organization scope. You may touch directly related tests or fixtures when behavior changes, but avoid broad rewrites and unrelated formatting churn. Preserve public DTO, route, graph schema, and UI contracts unless the prompt explicitly asks to change them.
+
+Return a clean unified diff plus any required test artifact manifest. Do not include unrelated commentary.`,
+  large: `You are the GraphCode Coding Large agent.
+
+Produce a coordinated unified diff for a larger graph-scoped change. Use descendant graph context, one-hop related edges, module boundaries, workflow blocks, source ranges, execution metadata, and git status to reason across files while preserving the requested edit boundary.
+
+Large mode gives more context, not unlimited scope. Touch only files required by the selected graph scope and user request. Keep generated graph/database artifacts out of source diffs unless the task explicitly asks for generated-state refresh. Update tests and docs when the behavioral surface changes.
+
+Return a clean unified diff plus any required test artifact manifest. Do not include unrelated commentary.`
+} satisfies Record<CodingAgentMode, string>;
+
+const DEFAULT_ROLE_SYSTEM_PROMPTS = {
+  planning: `You are the GraphCode Planning agent.
+
+Convert user intent into small, reviewable graph and implementation plans. Use framework blocks for ownership and module boundaries, and workflow blocks for inputs, processes, outputs, formats, branch flow, and source-linked behavior.
+
+Name the smallest source-linked blocks involved, the relevant callers/importers, affected line ranges when known, likely tests, and any graph patch operations needed. Prefer scoped plans over broad rewrites. Preserve explicit workspace-opening behavior and reproducible .graphcode state.`,
+  coding: DEFAULT_CODING_SYSTEM_PROMPTS.medium,
+  review: `You are the GraphCode Review agent.
+
+Review proposed diffs for correctness, scope, graph consistency, source evidence, and missing verification. Start with concrete findings ordered by severity. Check that the diff stays inside the selected graph scope, preserves API/DTO/database/UI contracts, and updates tests when behavior changes.
+
+For scanner or graph-schema changes, verify stable IDs, source ranges, scan state, generated-row cleanup, branch workflow blocks, and canvas/detail payloads. Mark a block reviewed only when the change is scoped, behaviorally sound, and adequately verified or has an explicit test-gap note.`,
+  scanning: `You are the GraphCode Scanning coordinator.
+
+Coordinate local, medium, and global scanner modes into a generated, source-linked GraphCode graph. Inventory scannable files, run local file analysis in parallel, consolidate affected directories, run one global synthesis pass, and merge generated rows while preserving manual graph data.
+
+Use content hashes for incremental scans. Re-analyze only added or modified files locally, delete generated rows for deleted files, refresh affected medium scopes, and update global wiring from compact unchanged summaries plus changed artifacts. Require exact source evidence for code-backed nodes and edges.`
+} satisfies Record<AgentKind, string>;
+
 function defaultCodingSystemPrompt(mode: CodingAgentMode): string {
-  switch (mode) {
-    case "small":
-      return "Produce minimal scoped diffs for the selected low-level GraphCode block.";
-    case "medium":
-      return "Produce scoped diffs using the selected block plus its containing function workflow.";
-    case "large":
-      return "Produce scoped diffs using broader graph context while preserving selected-block edit boundaries.";
-    default:
-      return "";
-  }
+  return DEFAULT_CODING_SYSTEM_PROMPTS[mode] ?? "";
+}
+
+function defaultScanningSystemPrompt(mode: ScanningAgentMode): string {
+  return DEFAULT_SCANNING_SYSTEM_PROMPTS[mode] ?? "";
 }
 
 function defaultSystemPrompt(agentKind: AgentKind): string {
-  switch (agentKind) {
-    case "planning":
-      return "Plan graph changes as small validated graph patches.";
-    case "coding":
-      return "Produce scoped unified diffs only for the selected graph block.";
-    case "review":
-      return "Review proposed diffs for bugs, scope leaks, and missing tests.";
-    case "scanning":
-      return "Scan repositories into concise GraphCode blocks and edges.";
-    default:
-      return "";
-  }
+  return DEFAULT_ROLE_SYSTEM_PROMPTS[agentKind] ?? "";
 }
 
 function mapAgentSettingsView(row: AgentSettingsRow): AgentConfigView {
@@ -5268,9 +5878,47 @@ function mapCodingAgentSettingsView(row: CodingAgentSettingsRow): CodingAgentCon
   };
 }
 
+function mapScanningAgentSettingsView(row: ScanningAgentSettingsRow): ScanningAgentConfigView {
+  const apiValue = row.api_key_source_value ?? "";
+  const promptValue = row.system_prompt_source_value ?? "";
+  return {
+    mode: row.scanning_mode,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: ""
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_type === "manual" ? promptValue : ""
+    },
+    apiKeyConfigured: apiValue.trim().length > 0,
+    systemPromptConfigured: promptValue.trim().length > 0
+  };
+}
+
 function mapCodingAgentSettings(row: CodingAgentSettingsRow): CodingAgentConfig {
   return {
     mode: row.coding_mode,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: row.api_key_source_value
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_value
+    }
+  };
+}
+
+function mapScanningAgentSettings(row: ScanningAgentSettingsRow): ScanningAgentConfig {
+  return {
+    mode: row.scanning_mode,
     provider: row.provider,
     model: row.model,
     parallelLimit: row.parallel_limit,
@@ -5518,6 +6166,11 @@ function mapEdge(row: EdgeRow, tags: GraphTag[] = []): GraphEdge {
     targetNodeId: row.target_node_id,
     label: row.label,
     codeContext: row.code_context ?? "",
+    source: {
+      path: row.source_path ?? null,
+      startLine: row.source_start_line ?? null,
+      endLine: row.source_end_line ?? null
+    },
     color: row.color ?? defaultEdgeColor(row.kind),
     animated: row.animated === 1,
     pointingEnabled: row.pointing_enabled !== 0,

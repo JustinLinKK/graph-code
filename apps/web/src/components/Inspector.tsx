@@ -149,6 +149,15 @@ export function Inspector({
             Code Context
           </h3>
           {selectedEdge.codeContext ? <p className="context-box">{selectedEdge.codeContext}</p> : <p className="muted">No edge code context yet.</p>}
+          {selectedEdge.source.path ? (
+            <div className="source-box">
+              <span>Source Evidence</span>
+              <small>{selectedEdge.source.path}</small>
+              <small>
+                {selectedEdge.source.startLine ?? "?"}-{selectedEdge.source.endLine ?? "?"}
+              </small>
+            </div>
+          ) : null}
         </section>
       </div>
     );

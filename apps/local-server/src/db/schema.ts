@@ -55,6 +55,9 @@ const GRAPH_EDGES_SQL = `
     target_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
     label TEXT,
     code_context TEXT NOT NULL DEFAULT '',
+    source_path TEXT,
+    source_start_line INTEGER,
+    source_end_line INTEGER,
     color TEXT NOT NULL DEFAULT '#727782',
     animated INTEGER NOT NULL DEFAULT 0,
     pointing_enabled INTEGER NOT NULL DEFAULT 1,
@@ -181,6 +184,34 @@ const CODING_AGENT_SETTINGS_SQL = `
   );
 `;
 
+const SCANNING_AGENT_SETTINGS_SQL = `
+  CREATE TABLE scanning_agent_settings (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    scanning_mode TEXT NOT NULL CHECK (scanning_mode IN ('local', 'medium', 'global')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    model TEXT NOT NULL DEFAULT '',
+    parallel_limit INTEGER NOT NULL DEFAULT 4,
+    api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
+    api_key_source_value TEXT NOT NULL DEFAULT '',
+    system_prompt_source_type TEXT NOT NULL DEFAULT 'manual' CHECK (system_prompt_source_type IN ('manual', 'file')),
+    system_prompt_source_value TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, scanning_mode)
+  );
+`;
+
+const SCAN_FILE_STATE_SQL = `
+  CREATE TABLE scan_file_state (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    file_path TEXT NOT NULL,
+    content_hash TEXT NOT NULL,
+    last_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+    last_scanned_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, file_path)
+  );
+`;
+
 const CODING_WORKFLOWS_SQL = `
   CREATE TABLE coding_workflows (
     id TEXT PRIMARY KEY,
@@ -237,7 +268,9 @@ const GRAPH_TABLES = [
   "graph_revisions",
   "graph_nodes",
   "custom_block_types",
+  "scan_file_state",
   "workspace_settings",
+  "scanning_agent_settings",
   "coding_agent_settings",
   "agent_settings",
   "agent_runs",
@@ -351,6 +384,7 @@ export function migrate(db: GraphDatabase): void {
     );
 
     ${GRAPH_ENTITY_VERSIONS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${SCAN_FILE_STATE_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
     CREATE TABLE IF NOT EXISTS workspace_settings (
       project_id TEXT PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
@@ -384,6 +418,7 @@ export function migrate(db: GraphDatabase): void {
     );
 
     ${CODING_AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${SCANNING_AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
     CREATE TABLE IF NOT EXISTS agent_runs (
       id TEXT PRIMARY KEY,
@@ -461,9 +496,12 @@ export function migrate(db: GraphDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_code_proposals_project ON code_proposals(project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_coding_workflows_project ON coding_workflows(project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_coding_workflow_items_workflow ON coding_workflow_items(workflow_id, layer_index, status);
+    CREATE INDEX IF NOT EXISTS idx_scan_file_state_project ON scan_file_state(project_id, last_scanned_at);
   `);
   ensureWorkspaceSettingsTable(db);
   ensureCodingAgentSettingsTable(db);
+  ensureScanningAgentSettingsTable(db);
+  ensureScanFileStateTable(db);
   ensureAgentRunsTable(db);
   ensureAgentReferenceTables(db);
   ensureCodingWorkflowTables(db);
@@ -514,6 +552,18 @@ function ensureWorkspaceSettingsTable(db: GraphDatabase): void {
 function ensureCodingAgentSettingsTable(db: GraphDatabase): void {
   if (!getTableSql(db, "coding_agent_settings")) {
     db.exec(CODING_AGENT_SETTINGS_SQL);
+  }
+}
+
+function ensureScanningAgentSettingsTable(db: GraphDatabase): void {
+  if (!getTableSql(db, "scanning_agent_settings")) {
+    db.exec(SCANNING_AGENT_SETTINGS_SQL);
+  }
+}
+
+function ensureScanFileStateTable(db: GraphDatabase): void {
+  if (!getTableSql(db, "scan_file_state")) {
+    db.exec(SCAN_FILE_STATE_SQL);
   }
 }
 
@@ -742,6 +792,15 @@ function ensureGraphEdgesTable(db: GraphDatabase): void {
     if (!tableHasColumn(db, "graph_edges", "agent_status")) {
       db.exec("ALTER TABLE graph_edges ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'none';");
     }
+    if (!tableHasColumn(db, "graph_edges", "source_path")) {
+      db.exec("ALTER TABLE graph_edges ADD COLUMN source_path TEXT;");
+    }
+    if (!tableHasColumn(db, "graph_edges", "source_start_line")) {
+      db.exec("ALTER TABLE graph_edges ADD COLUMN source_start_line INTEGER;");
+    }
+    if (!tableHasColumn(db, "graph_edges", "source_end_line")) {
+      db.exec("ALTER TABLE graph_edges ADD COLUMN source_end_line INTEGER;");
+    }
     if (!sql.includes("'implemented'")) {
       rebuildGraphEdgesTable(db);
     }
@@ -808,15 +867,17 @@ function resetGraphStorage(db: GraphDatabase): void {
     DROP TABLE IF EXISTS format_details;
     DROP TABLE IF EXISTS basic_block_details;
 	    DROP TABLE IF EXISTS graph_entity_versions;
+	    DROP TABLE IF EXISTS scan_file_state;
 	    DROP TABLE IF EXISTS graph_edges;
 	    DROP TABLE IF EXISTS graph_revisions;
 	    DROP TABLE IF EXISTS coding_workflow_items;
 	    DROP TABLE IF EXISTS coding_workflows;
 	    DROP TABLE IF EXISTS code_proposals;
     DROP TABLE IF EXISTS graph_status_history;
-    DROP TABLE IF EXISTS agent_messages;
-    DROP TABLE IF EXISTS agent_runs;
-    DROP TABLE IF EXISTS coding_agent_settings;
+	    DROP TABLE IF EXISTS agent_messages;
+	    DROP TABLE IF EXISTS agent_runs;
+	    DROP TABLE IF EXISTS scanning_agent_settings;
+	    DROP TABLE IF EXISTS coding_agent_settings;
     DROP TABLE IF EXISTS agent_settings;
     DROP TABLE IF EXISTS workspace_settings;
     DROP TABLE IF EXISTS graph_edges_old;
@@ -835,7 +896,9 @@ function resetGraphStorage(db: GraphDatabase): void {
     ${GRAPH_BOUNDARY_TAGS_SQL}
 	    ${GRAPH_NODE_REUSES_SQL}
 	    ${GRAPH_ENTITY_VERSIONS_SQL}
+	    ${SCAN_FILE_STATE_SQL}
 	    ${CODING_AGENT_SETTINGS_SQL}
+	    ${SCANNING_AGENT_SETTINGS_SQL}
 	    ${CODING_WORKFLOWS_SQL}
 	    ${CODING_WORKFLOW_ITEMS_SQL}
 	  `);
@@ -881,14 +944,20 @@ function rebuildGraphEdgesTable(db: GraphDatabase): void {
   const hasPointingEnabled = tableHasColumn(db, "graph_edges", "pointing_enabled");
   const hasPointingDirection = tableHasColumn(db, "graph_edges", "pointing_direction");
   const hasAgentStatus = tableHasColumn(db, "graph_edges", "agent_status");
+  const hasSourcePath = tableHasColumn(db, "graph_edges", "source_path");
+  const hasSourceStartLine = tableHasColumn(db, "graph_edges", "source_start_line");
+  const hasSourceEndLine = tableHasColumn(db, "graph_edges", "source_end_line");
   db.pragma("foreign_keys = OFF");
   db.exec(`
     ALTER TABLE graph_edges RENAME TO graph_edges_old;
     ${GRAPH_EDGES_SQL}
-    INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, color, animated, pointing_enabled, pointing_direction, agent_status, created_at)
+    INSERT INTO graph_edges (id, project_id, kind, source_node_id, target_node_id, label, code_context, source_path, source_start_line, source_end_line, color, animated, pointing_enabled, pointing_direction, agent_status, created_at)
     SELECT
       id, project_id, kind, source_node_id, target_node_id, label,
       ${hasCodeContext ? "code_context" : "''"},
+      ${hasSourcePath ? "source_path" : "NULL"},
+      ${hasSourceStartLine ? "source_start_line" : "NULL"},
+      ${hasSourceEndLine ? "source_end_line" : "NULL"},
       ${hasColor ? "color" : "'#727782'"},
       ${hasAnimated ? "animated" : "0"},
       ${hasPointingEnabled ? "pointing_enabled" : "1"},

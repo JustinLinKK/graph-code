@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, NodeDetail } from "@graphcode/graph-model";
-import { runCodingAgent, runPlanningAgent, runReviewAgent, runScanningAgent, type GraphCodeToolbox } from "./index";
+import { runCodingAgent, runPlanningAgent, runReviewAgent, runScanningAgent, scanLocalOutputSchema, type GraphCodeToolbox, type ScanPipelineResult } from "./index";
 
 const baseConfig: AgentConfig = {
   agentKind: "planning",
@@ -100,9 +100,40 @@ function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
     readGraph: vi.fn(async () => ({ nodes: [node], edges: [] as GraphEdge[] })),
 	    getNodeDetail: vi.fn(async () => detail),
 	    getCanvasGraph: vi.fn(async () => canvas()),
-	    resolveExecutionMetadata: vi.fn(async () => execution),
-	    setStatuses: vi.fn(async () => {}),
+    resolveExecutionMetadata: vi.fn(async () => execution),
+    setStatuses: vi.fn(async () => {}),
     applyGraphPatch: vi.fn(async () => {}),
+    listScannableFiles: vi.fn(async () => [
+      { path: "src/module.ts", contentHash: "hash-module", size: 24, language: "typescript" },
+      { path: "src/other.ts", contentHash: "hash-other", size: 12, language: "typescript" },
+      { path: "README.md", contentHash: "hash-readme", size: 8, language: "markdown" }
+    ]),
+    getScanFileStates: vi.fn(async () => []),
+    buildFakeLocalScanOutput: vi.fn(async (_projectId, file) => ({
+      filePath: file.path,
+      contentHash: file.contentHash,
+      summary: `Fake local scan for ${file.path}`,
+      nodes: [
+        {
+          stableKey: `file:${file.path}`,
+          kind: "module" as const,
+          name: file.path.split("/").at(-1) ?? file.path,
+          summary: `File ${file.path}`,
+          codeContext: `File ${file.path}`,
+          source: { path: file.path, startLine: 1, endLine: 1 },
+          language: file.language === "markdown" ? ("markdown" as const) : ("typescript" as const),
+          parentStableKey: "dir:."
+        }
+      ],
+      edges: []
+    })),
+    applyScanResult: vi.fn(async (_projectId, result) => ({
+      nodeCount: 12,
+      edgeCount: 4,
+      fileCount: result.inventory.length,
+      symbolCount: result.localOutputs.length,
+      workflowNodeCount: 4
+    })),
     readSourceFile: vi.fn(async () => "export const value = 1;\n"),
     writeCodeProposal: vi.fn(async () => {}),
     readGitStatus: vi.fn(async () => ""),
@@ -223,6 +254,7 @@ describe("GraphCode agent runtime", () => {
       targetNodeId: outputNode.id,
       label: "return",
       codeContext: "Validated data flows to the return value.",
+      source: { path: "src/module.ts", startLine: 2, endLine: 3 },
       color: "#059669",
       animated: true,
       pointingEnabled: true,
@@ -277,7 +309,7 @@ describe("GraphCode agent runtime", () => {
     ).rejects.toThrow(/escaped/);
   });
 
-  it("refreshes the parser-backed code graph", async () => {
+  it("runs the initial three-mode scan pipeline", async () => {
     const tools = toolbox();
     const result = await runScanningAgent(
       { projectId: "project" },
@@ -286,8 +318,134 @@ describe("GraphCode agent runtime", () => {
 
     expect(result.response).toContain("Scanned 3 files");
     expect(result.response).toContain("12 Code Graph nodes");
-    expect(tools.refreshCodeGraph).toHaveBeenCalledWith("project", undefined);
+    expect(result.response).toContain("ran 3 local, 2 medium, and 1 global scan pass");
+    expect(tools.buildFakeLocalScanOutput).toHaveBeenCalledTimes(3);
+    expect(tools.refreshCodeGraph).not.toHaveBeenCalled();
+    const scanResult = vi.mocked(tools.applyScanResult).mock.calls[0]?.[1] as ScanPipelineResult;
+    expect(scanResult.initial).toBe(true);
+    expect(scanResult.localOutputs.map((output) => output.filePath).sort()).toEqual(["README.md", "src/module.ts", "src/other.ts"]);
+    expect(scanResult.mediumOutputs.map((output) => output.scopePath).sort()).toEqual([".", "src"]);
+    expect(scanResult.globalOutput.nodes).toHaveLength(1);
     expect(tools.setStatuses).not.toHaveBeenCalled();
+  });
+
+  it("rescans only changed files while consolidating affected medium and global passes", async () => {
+    const tools = toolbox({
+      getScanFileStates: vi.fn(async () => [
+        { filePath: "src/module.ts", contentHash: "hash-module", scannedAt: "before" },
+        { filePath: "src/other.ts", contentHash: "old-other", scannedAt: "before" },
+        { filePath: "README.md", contentHash: "hash-readme", scannedAt: "before" },
+        { filePath: "src/deleted.ts", contentHash: "hash-deleted", scannedAt: "before" }
+      ])
+    });
+
+    const result = await runScanningAgent(
+      { projectId: "project" },
+      { config: { ...baseConfig, agentKind: "scanning", parallelLimit: 4 }, runId: "run-5", toolbox: tools }
+    );
+
+    expect(result.response).toContain("Changed 1 files, removed 1 files, ran 1 local, 2 medium, and 1 global scan pass");
+    expect(tools.buildFakeLocalScanOutput).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(tools.buildFakeLocalScanOutput).mock.calls[0]?.[1].path).toBe("src/other.ts");
+    const scanResult = vi.mocked(tools.applyScanResult).mock.calls[0]?.[1] as ScanPipelineResult;
+    expect(scanResult.initial).toBe(false);
+    expect(scanResult.changedFiles.map((file) => file.path)).toEqual(["src/other.ts"]);
+    expect(scanResult.deletedFiles.map((file) => file.filePath)).toEqual(["src/deleted.ts"]);
+    expect(scanResult.mediumOutputs.map((output) => output.scopePath).sort()).toEqual([".", "src"]);
+    expect(scanResult.globalOutput.summary).toContain("Whole-repository");
+  });
+
+  it("cleans up deleted files without re-running local scans for unchanged files", async () => {
+    const tools = toolbox({
+      getScanFileStates: vi.fn(async () => [
+        { filePath: "src/module.ts", contentHash: "hash-module", scannedAt: "before" },
+        { filePath: "src/other.ts", contentHash: "hash-other", scannedAt: "before" },
+        { filePath: "README.md", contentHash: "hash-readme", scannedAt: "before" },
+        { filePath: "src/deleted.ts", contentHash: "hash-deleted", scannedAt: "before" }
+      ])
+    });
+
+    const result = await runScanningAgent(
+      { projectId: "project" },
+      { config: { ...baseConfig, agentKind: "scanning", parallelLimit: 4 }, runId: "run-6", toolbox: tools }
+    );
+
+    expect(result.response).toContain("Changed 0 files, removed 1 files, ran 0 local, 2 medium, and 1 global scan pass");
+    expect(tools.buildFakeLocalScanOutput).not.toHaveBeenCalled();
+    const scanResult = vi.mocked(tools.applyScanResult).mock.calls[0]?.[1] as ScanPipelineResult;
+    expect(scanResult.deletedFiles.map((file) => file.filePath)).toEqual(["src/deleted.ts"]);
+  });
+
+  it("honors the local scanning parallel limit", async () => {
+    let active = 0;
+    let maxActive = 0;
+    const files = Array.from({ length: 5 }, (_, index) => ({
+      path: `src/file-${index}.ts`,
+      contentHash: `hash-${index}`,
+      size: 12,
+      language: "typescript"
+    }));
+    const tools = toolbox({
+      listScannableFiles: vi.fn(async () => files),
+      buildFakeLocalScanOutput: vi.fn(async (_projectId, file) => {
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+        return {
+          filePath: file.path,
+          contentHash: file.contentHash,
+          summary: `Fake local scan for ${file.path}`,
+          nodes: [
+            {
+              stableKey: `file:${file.path}`,
+              kind: "module" as const,
+              name: file.path,
+              summary: `File ${file.path}`,
+              codeContext: `File ${file.path}`,
+              source: { path: file.path, startLine: 1, endLine: 1 },
+              language: "typescript" as const
+            }
+          ],
+          edges: []
+        };
+      })
+    });
+
+    await runScanningAgent(
+      { projectId: "project" },
+      {
+        config: { ...baseConfig, agentKind: "scanning", parallelLimit: 8 },
+        scanningConfigs: {
+          local: { ...baseConfig, mode: "local", parallelLimit: 2 },
+          medium: { ...baseConfig, mode: "medium", parallelLimit: 8 },
+          global: { ...baseConfig, mode: "global", parallelLimit: 1 }
+        },
+        runId: "run-7",
+        toolbox: tools
+      }
+    );
+
+    expect(maxActive).toBeLessThanOrEqual(2);
+    expect(tools.buildFakeLocalScanOutput).toHaveBeenCalledTimes(5);
+  });
+
+  it("rejects inverted source ranges in structured scan output", () => {
+    expect(() =>
+      scanLocalOutputSchema.parse({
+        filePath: "src/module.ts",
+        contentHash: "hash-module",
+        nodes: [
+          {
+            stableKey: "function:bad",
+            kind: "function",
+            name: "bad",
+            source: { path: "src/module.ts", startLine: 4, endLine: 2 }
+          }
+        ],
+        edges: []
+      })
+    ).toThrow(/startLine/);
   });
 
   it("marks reviewed or bugged after review", async () => {

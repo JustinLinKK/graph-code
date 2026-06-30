@@ -1,5 +1,6 @@
 import {
   CODING_AGENT_MODES,
+  SCANNING_AGENT_MODES,
   type AgentConfig,
   type AgentKind,
   type AgentProvider,
@@ -8,6 +9,8 @@ import {
   type GithubDevicePollResponse,
   type GithubDeviceStartResponse,
   type Project,
+  type ScanningAgentConfig,
+  type ScanningAgentMode,
   type SettingsValidationResult,
   type WorkspaceSettings,
   type WorkspaceSettingsMutation
@@ -15,7 +18,7 @@ import {
 import { Button } from "@heroui/react";
 import { Bot, CheckCircle2, ExternalLink, Github, Monitor, Save, Unplug, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { agentKindLabel, codingAgentModeLabel, providerLabel } from "../displayLabels";
+import { agentKindLabel, codingAgentModeLabel, providerLabel, scanningAgentModeLabel } from "../displayLabels";
 
 type SettingsPageProps = {
   project: Project;
@@ -29,7 +32,7 @@ type SettingsPageProps = {
   onDisconnectGithub: () => Promise<WorkspaceSettings>;
 };
 
-const agentKinds: AgentKind[] = ["planning", "review", "scanning"];
+const agentKinds: AgentKind[] = ["planning", "review"];
 const providers: AgentProvider[] = ["fake", "claudecode", "openai", "gemini", "openrouter"];
 
 export function SettingsPage({
@@ -53,6 +56,8 @@ export function SettingsPage({
   const agentByKind = useMemo(() => new Map(draft.agents.map((agent) => [agent.agentKind, agent])), [draft.agents]);
   const codingAgentDrafts = useMemo(() => draft.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent), [draft.codingAgents]);
   const codingAgentByMode = useMemo(() => new Map(codingAgentDrafts.map((agent) => [agent.mode, agent])), [codingAgentDrafts]);
+  const scanningAgentDrafts = useMemo(() => draft.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent), [draft.scanningAgents]);
+  const scanningAgentByMode = useMemo(() => new Map(scanningAgentDrafts.map((agent) => [agent.mode, agent])), [scanningAgentDrafts]);
 
   useEffect(() => {
     setDraft(toMutation(settings));
@@ -69,6 +74,13 @@ export function SettingsPage({
     setDraft((current) => ({
       ...current,
       codingAgents: (current.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
+    }));
+  };
+
+  const updateScanningAgent = (mode: ScanningAgentMode, patch: Partial<ScanningAgentConfig>) => {
+    setDraft((current) => ({
+      ...current,
+      scanningAgents: (current.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
     }));
   };
 
@@ -92,6 +104,18 @@ export function SettingsPage({
 
   const setCodingSystemPromptSourceType = (agent: CodingAgentConfig, type: CodingAgentConfig["systemPromptSource"]["type"]) => {
     updateCodingAgent(agent.mode, {
+      systemPromptSource: { type, value: type === "manual" ? agent.systemPromptSource.value ?? "" : "" }
+    });
+  };
+
+  const setScanningApiKeySourceType = (agent: ScanningAgentConfig, type: ScanningAgentConfig["apiKeySource"]["type"]) => {
+    updateScanningAgent(agent.mode, {
+      apiKeySource: { type, value: "" }
+    });
+  };
+
+  const setScanningSystemPromptSourceType = (agent: ScanningAgentConfig, type: ScanningAgentConfig["systemPromptSource"]["type"]) => {
+    updateScanningAgent(agent.mode, {
       systemPromptSource: { type, value: type === "manual" ? agent.systemPromptSource.value ?? "" : "" }
     });
   };
@@ -154,6 +178,36 @@ export function SettingsPage({
       systemPromptSource: { type: "file", value }
     });
     setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.prompt`]: "System prompt read successfully" }));
+  };
+
+  const handleScanningApiKeyFile = async (agent: ScanningAgentConfig, file: File | null) => {
+    if (!file) {
+      return;
+    }
+    const value = parseSecretFile(await readFileText(file));
+    if (!value) {
+      setReadSuccessByField((current) => ({ ...current, [`scanning.${agent.mode}.apiKey`]: "" }));
+      return;
+    }
+    updateScanningAgent(agent.mode, {
+      apiKeySource: { type: "file", value }
+    });
+    setReadSuccessByField((current) => ({ ...current, [`scanning.${agent.mode}.apiKey`]: "API key read successfully" }));
+  };
+
+  const handleScanningPromptFile = async (agent: ScanningAgentConfig, file: File | null) => {
+    if (!file) {
+      return;
+    }
+    const value = (await readFileText(file)).trim();
+    if (!value) {
+      setReadSuccessByField((current) => ({ ...current, [`scanning.${agent.mode}.prompt`]: "" }));
+      return;
+    }
+    updateScanningAgent(agent.mode, {
+      systemPromptSource: { type: "file", value }
+    });
+    setReadSuccessByField((current) => ({ ...current, [`scanning.${agent.mode}.prompt`]: "System prompt read successfully" }));
   };
 
   const handleStartGithub = async () => {
@@ -440,6 +494,92 @@ export function SettingsPage({
                     </div>
                   );
                 })}
+                {SCANNING_AGENT_MODES.map((mode) => {
+                  const agent = scanningAgentByMode.get(mode)!;
+                  const index = scanningAgentDrafts.findIndex((item) => item.mode === mode);
+                  return (
+                    <div className="agent-settings-card" key={`scanning-${mode}`}>
+                      <h4>Scanning {scanningAgentModeLabel(mode)}</h4>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>Provider</span>
+                          <select value={agent.provider} onChange={(event) => updateScanningAgent(mode, { provider: event.target.value as AgentProvider })}>
+                            {providers.map((provider) => (
+                              <option key={provider} value={provider}>
+                                {providerLabel(provider)}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                        <label className="form-field">
+                          <span>Model</span>
+                          <input value={agent.model} onChange={(event) => updateScanningAgent(mode, { model: event.target.value })} />
+                          <FieldError value={errors[`scanningAgents.${index}.model`]} />
+                        </label>
+                      </div>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>API Key Source</span>
+                          <select value={agent.apiKeySource.type} onChange={(event) => setScanningApiKeySourceType(agent, event.target.value as ScanningAgentConfig["apiKeySource"]["type"])}>
+                            <option value="manual">Manual</option>
+                            <option value="file">Read File</option>
+                            <option value="env">Environment Variable</option>
+                          </select>
+                        </label>
+                        <div className="form-field">
+                          <span>{apiKeyEntryLabel(agent.apiKeySource.type)}</span>
+                          <ApiKeyEntry
+                            agent={agent}
+                            configured={(settings.scanningAgents ?? []).find((item) => item.mode === mode)?.apiKeyConfigured ?? false}
+                            onChange={(value) => updateScanningAgent(mode, { apiKeySource: { ...agent.apiKeySource, value } })}
+                            onFile={(file) => void handleScanningApiKeyFile(agent, file)}
+                          />
+                          <ReadSuccess value={readSuccessByField[`scanning.${mode}.apiKey`]} />
+                          <FieldError value={errors[`scanningAgents.${index}.apiKeySource.value`]} />
+                        </div>
+                      </div>
+                      <label className="form-field">
+                        <span>Parallel Calls</span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={64}
+                          value={agent.parallelLimit}
+                          onChange={(event) => updateScanningAgent(mode, { parallelLimit: Number.parseInt(event.target.value, 10) || 1 })}
+                        />
+                      </label>
+                      <div className="form-grid">
+                        <label className="form-field">
+                          <span>System Prompt Source</span>
+                          <select value={agent.systemPromptSource.type} onChange={(event) => setScanningSystemPromptSourceType(agent, event.target.value as ScanningAgentConfig["systemPromptSource"]["type"])}>
+                            <option value="manual">Manual</option>
+                            <option value="file">Read File</option>
+                          </select>
+                        </label>
+                        <div className="form-field">
+                          <span>{agent.systemPromptSource.type === "file" ? "System Prompt File" : "System Prompt"}</span>
+                          {agent.systemPromptSource.type === "file" ? (
+                            <>
+                              <FilePicker label="Select Prompt File" accept=".txt,.md,.prompt,*/*" onFile={(file) => void handleScanningPromptFile(agent, file)} />
+                              <ReadSuccess value={readSuccessByField[`scanning.${mode}.prompt`]} />
+                            </>
+                          ) : (
+                            <textarea
+                              rows={3}
+                              value={agent.systemPromptSource.value ?? ""}
+                              onChange={(event) =>
+                                updateScanningAgent(mode, {
+                                  systemPromptSource: { ...agent.systemPromptSource, value: event.target.value }
+                                })
+                              }
+                            />
+                          )}
+                          <FieldError value={errors[`scanningAgents.${index}.systemPromptSource.value`]} />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
               </section>
             ) : null}
 
@@ -532,7 +672,7 @@ function ApiKeyEntry({
   onChange,
   onFile
 }: {
-  agent: Pick<AgentConfig, "apiKeySource"> | Pick<CodingAgentConfig, "apiKeySource">;
+	  agent: Pick<AgentConfig, "apiKeySource"> | Pick<CodingAgentConfig, "apiKeySource"> | Pick<ScanningAgentConfig, "apiKeySource">;
   configured: boolean;
   onChange: (value: string) => void;
   onFile: (file: File | null) => void;
@@ -613,9 +753,22 @@ function defaultCodingAgent(mode: CodingAgentMode): CodingAgentConfig {
   };
 }
 
+function defaultScanningAgent(mode: ScanningAgentMode): ScanningAgentConfig {
+  return {
+    mode,
+    provider: "fake",
+    model: `graphcode-scanner-${mode}-v1`,
+    parallelLimit: mode === "local" ? 8 : mode === "medium" ? 4 : 1,
+    apiKeySource: { type: "env", value: "" },
+    systemPromptSource: { type: "manual", value: `Use ${mode} scanner context.` }
+  };
+}
+
 function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
   const settingsCodingAgents = settings.codingAgents ?? [];
   const codingAgents = settingsCodingAgents.length > 0 ? settingsCodingAgents : CODING_AGENT_MODES.map(defaultCodingAgent);
+  const settingsScanningAgents = settings.scanningAgents ?? [];
+  const scanningAgents = settingsScanningAgents.length > 0 ? settingsScanningAgents : SCANNING_AGENT_MODES.map(defaultScanningAgent);
   return {
     general: settings.general,
     github: {
@@ -633,6 +786,14 @@ function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
       systemPromptSource: agent.systemPromptSource
     })),
     codingAgents: codingAgents.map((agent) => ({
+      mode: agent.mode,
+      provider: agent.provider,
+      model: agent.model,
+      parallelLimit: agent.parallelLimit,
+      apiKeySource: { ...agent.apiKeySource, value: "" },
+      systemPromptSource: agent.systemPromptSource
+    })),
+    scanningAgents: scanningAgents.map((agent) => ({
       mode: agent.mode,
       provider: agent.provider,
       model: agent.model,

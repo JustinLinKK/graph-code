@@ -20,7 +20,17 @@ import {
   type PlanningChatRequest,
   type ReviewAgentRequest,
   type ScanningAgentRequest,
+  type ScanningAgentConfig,
+  type ScanningAgentMode,
+  graphEdgeKindSchema,
+  graphNodeKindSchema,
+  ioKindSchema,
+  languageTypeSchema,
+  processKindSchema,
+  formatKindSchema,
   codeProposalArtifactManifestSchema,
+  sourceRangeSchema,
+  SCANNING_AGENT_MODES,
   graphPatchSchema,
   isAttachmentNodeKind,
   isDomainNodeKind
@@ -36,6 +46,10 @@ export type GraphCodeToolbox = {
   resolveExecutionMetadata: (nodeId: string) => Promise<BlockExecutionMetadata>;
   setStatuses: (projectId: string, patches: GraphStatusPatch[]) => Promise<void>;
   applyGraphPatch: (projectId: string, patch: GraphPatch, runId?: string) => Promise<void>;
+  listScannableFiles: (projectId: string) => Promise<ScannableFile[]>;
+  getScanFileStates: (projectId: string) => Promise<ScanFileState[]>;
+  buildFakeLocalScanOutput: (projectId: string, file: ScannableFile) => Promise<ScanLocalOutput>;
+  applyScanResult: (projectId: string, result: ScanPipelineResult, runId?: string | null) => Promise<CodeGraphRefreshResult>;
   readSourceFile: (relativePath: string) => Promise<string>;
   writeCodeProposal: (projectId: string, runId: string | null, targetNodeId: string | null, diff: string, artifactManifest?: CodeProposalArtifactManifest | null) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
@@ -55,6 +69,7 @@ type PlanningGraph = Awaited<ReturnType<GraphCodeToolbox["readGraph"]>>;
 
 export type AgentRuntimeOptions = {
   config: AgentConfig;
+  scanningConfigs?: Partial<Record<ScanningAgentMode, ScanningAgentConfig>>;
   runId?: string;
   toolbox: GraphCodeToolbox;
 };
@@ -76,6 +91,99 @@ type AgentTask = {
   prompt: string;
   execute: () => Promise<AgentResult>;
 };
+
+export type ScannableFile = {
+  path: string;
+  contentHash: string;
+  size: number;
+  language: string;
+};
+
+export type ScanFileState = {
+  filePath: string;
+  contentHash: string;
+};
+
+export type CodeGraphRefreshResult = {
+  nodeCount: number;
+  edgeCount: number;
+  fileCount: number;
+  symbolCount: number;
+  workflowNodeCount: number;
+};
+
+const scanDetailSchema = z.object({
+  ioKind: ioKindSchema.optional(),
+  channel: z.string().optional(),
+  schemaHint: z.string().nullable().optional(),
+  processKind: processKindSchema.optional(),
+  trigger: z.string().nullable().optional(),
+  formatKind: formatKindSchema.optional(),
+  spec: z.string().optional(),
+  notes: z.string().optional()
+});
+
+export const scanNodeDraftSchema = z.object({
+  stableKey: z.string().min(1),
+  kind: graphNodeKindSchema,
+  name: z.string().min(1),
+  summary: z.string().default(""),
+  codeContext: z.string().default(""),
+  source: sourceRangeSchema.default({ path: null, startLine: null, endLine: null }),
+  language: languageTypeSchema.default("unknown"),
+  parentStableKey: z.string().nullable().optional(),
+  attachedToStableKey: z.string().nullable().optional(),
+  detail: scanDetailSchema.optional()
+});
+
+export const scanEdgeDraftSchema = z.object({
+  stableKey: z.string().min(1),
+  kind: graphEdgeKindSchema,
+  sourceStableKey: z.string().min(1),
+  targetStableKey: z.string().min(1),
+  label: z.string().nullable().optional(),
+  codeContext: z.string().default(""),
+  source: sourceRangeSchema.default({ path: null, startLine: null, endLine: null }),
+  animated: z.boolean().optional()
+});
+
+export const scanLocalOutputSchema = z.object({
+  filePath: z.string().min(1),
+  contentHash: z.string().min(1),
+  summary: z.string().default(""),
+  nodes: z.array(scanNodeDraftSchema).default([]),
+  edges: z.array(scanEdgeDraftSchema).default([])
+});
+
+export const scanMediumOutputSchema = z.object({
+  scopePath: z.string().min(1),
+  summary: z.string().default(""),
+  nodes: z.array(scanNodeDraftSchema).default([]),
+  edges: z.array(scanEdgeDraftSchema).default([])
+});
+
+export const scanGlobalOutputSchema = z.object({
+  summary: z.string().default(""),
+  nodes: z.array(scanNodeDraftSchema).default([]),
+  edges: z.array(scanEdgeDraftSchema).default([])
+});
+
+export const scanPipelineResultSchema = z.object({
+  initial: z.boolean(),
+  inventory: z.array(z.object({ path: z.string(), contentHash: z.string(), size: z.number(), language: z.string() })),
+  changedFiles: z.array(z.object({ path: z.string(), contentHash: z.string(), size: z.number(), language: z.string() })),
+  deletedFiles: z.array(z.object({ filePath: z.string(), contentHash: z.string() })),
+  localOutputs: z.array(scanLocalOutputSchema),
+  mediumOutputs: z.array(scanMediumOutputSchema),
+  globalOutput: scanGlobalOutputSchema
+});
+
+export type ScanNodeDraft = z.infer<typeof scanNodeDraftSchema>;
+export type ScanEdgeDraft = z.infer<typeof scanEdgeDraftSchema>;
+export type ScanLocalOutput = z.infer<typeof scanLocalOutputSchema>;
+export type ScanMediumOutput = z.infer<typeof scanMediumOutputSchema>;
+export type ScanGlobalOutput = z.infer<typeof scanGlobalOutputSchema>;
+export type ScanPipelineResult = z.infer<typeof scanPipelineResultSchema>;
 
 const AgentState = Annotation.Root({
   task: Annotation<AgentTask>(),
@@ -243,10 +351,43 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
     kind: "scanning",
     prompt: scanningPrompt(input),
     execute: async () => {
-      const result = await options.toolbox.refreshCodeGraph(input.projectId, input.rootPath);
+      const scanConfigs = resolveScanningConfigs(options);
+      const inventory = await options.toolbox.listScannableFiles(input.projectId);
+      const previousStates = await options.toolbox.getScanFileStates(input.projectId);
+      const previousByPath = new Map(previousStates.map((state) => [state.filePath, state.contentHash]));
+      const inventoryByPath = new Map(inventory.map((file) => [file.path, file]));
+      const changedFiles = inventory.filter((file) => previousByPath.get(file.path) !== file.contentHash);
+      const deletedFiles = previousStates.filter((state) => !inventoryByPath.has(state.filePath));
+      const initial = previousStates.length === 0;
+      const localTargets = initial ? inventory : changedFiles;
+      const localOutputs = await boundedMap(localTargets, scanConfigs.local.parallelLimit, (file) =>
+        runLocalScan(input, file, scanConfigs.local, options.toolbox)
+      );
+      const mediumScopes = directoriesForScan(initial ? inventory : [...changedFiles, ...deletedFiles.map((file) => ({ path: file.filePath, contentHash: file.contentHash, size: 0, language: "unknown" }))]);
+      const mediumOutputs = await boundedMap(mediumScopes, scanConfigs.medium.parallelLimit, (scopePath) =>
+        runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium)
+      );
+      const unchangedGraphSummary = initial
+        ? { nodes: [], edges: [] }
+        : compactUnchangedGraphSummary(await options.toolbox.readGraph(input.projectId), [
+            ...changedFiles.map((file) => file.path),
+            ...deletedFiles.map((file) => file.filePath)
+          ]);
+      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global);
+      const pipeline = scanPipelineResultSchema.parse({
+        initial,
+        inventory,
+        changedFiles,
+        deletedFiles,
+        localOutputs,
+        mediumOutputs,
+        globalOutput
+      });
+      const result = await options.toolbox.applyScanResult(input.projectId, pipeline, options.runId ?? null);
       return {
         response: [
           `Scanned ${result.fileCount} files into ${result.nodeCount} Code Graph nodes.`,
+          `Changed ${changedFiles.length} files, removed ${deletedFiles.length} files, ran ${localOutputs.length} local, ${mediumOutputs.length} medium, and 1 global scan pass.`,
           `Extracted ${result.symbolCount} symbols, ${result.workflowNodeCount} workflow blocks, and ${result.edgeCount} edges.`
         ].join(" "),
         touched: []
@@ -265,6 +406,236 @@ function scanningPrompt(input: ScanningAgentRequest): string {
       .filter(Boolean)
       .join("\n\n") || input.projectId
   );
+}
+
+function resolveScanningConfigs(options: AgentRuntimeOptions): Record<ScanningAgentMode, ScanningAgentConfig> {
+  return Object.fromEntries(
+    SCANNING_AGENT_MODES.map((mode) => {
+      const configured = options.scanningConfigs?.[mode];
+      return [
+        mode,
+        configured ?? {
+          mode,
+          provider: options.config.provider,
+          model: options.config.model,
+          parallelLimit: options.config.parallelLimit,
+          apiKeySource: options.config.apiKeySource,
+          systemPromptSource: options.config.systemPromptSource
+        }
+      ];
+    })
+  ) as Record<ScanningAgentMode, ScanningAgentConfig>;
+}
+
+async function runLocalScan(
+  input: ScanningAgentRequest,
+  file: ScannableFile,
+  config: ScanningAgentConfig,
+  toolbox: GraphCodeToolbox
+): Promise<ScanLocalOutput> {
+  if (config.provider === "fake") {
+    return scanLocalOutputSchema.parse(await toolbox.buildFakeLocalScanOutput(input.projectId, file));
+  }
+  const provider = createProvider(config);
+  const source = await toolbox.readSourceFile(file.path);
+  const response = await provider.invoke([
+    { role: "system", content: resolveSystemPrompt(config, "Return strict JSON for one GraphCode local scan file analysis.") },
+    {
+      role: "user",
+      content: [
+        scanningPrompt(input),
+        `Mode: local`,
+        `File: ${file.path}`,
+        `Content hash: ${file.contentHash}`,
+        "Return only JSON matching this shape: {filePath, contentHash, summary, nodes:[{stableKey, kind, name, summary, codeContext, source:{path,startLine,endLine}, language, parentStableKey, attachedToStableKey, detail}], edges:[{stableKey, kind, sourceStableKey, targetStableKey, label, codeContext, source:{path,startLine,endLine}}]}.",
+        "Every source range must be exact and use 1-based inclusive line numbers from this file.",
+        numberedSource(source)
+      ].join("\n\n")
+    }
+  ]);
+  return scanLocalOutputSchema.parse(parseJsonResponse(response));
+}
+
+async function runMediumScan(
+  input: ScanningAgentRequest,
+  scopePath: string,
+  inventory: ScannableFile[],
+  localOutputs: ScanLocalOutput[],
+  config: ScanningAgentConfig
+): Promise<ScanMediumOutput> {
+  if (config.provider === "fake") {
+    return fakeMediumOutput(scopePath);
+  }
+  const provider = createProvider(config);
+  const response = await provider.invoke([
+    { role: "system", content: resolveSystemPrompt(config, "Return strict JSON for one GraphCode medium scan consolidation.") },
+    {
+      role: "user",
+      content: [
+        scanningPrompt(input),
+        `Mode: medium`,
+        `Scope path: ${scopePath}`,
+        `Files in scope:\n${inventory.filter((file) => fileInScope(file.path, scopePath)).map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
+        `Changed local outputs:\n${JSON.stringify(localOutputs.filter((output) => fileInScope(output.filePath, scopePath)).map(compactLocalOutput), null, 2)}`,
+        "Return only JSON matching this shape: {scopePath, summary, nodes, edges}. Medium nodes should describe directory/package/module grouping and exported surfaces."
+      ].join("\n\n")
+    }
+  ]);
+  return scanMediumOutputSchema.parse(parseJsonResponse(response));
+}
+
+async function runGlobalScan(
+  input: ScanningAgentRequest,
+  inventory: ScannableFile[],
+  localOutputs: ScanLocalOutput[],
+  mediumOutputs: ScanMediumOutput[],
+  unchangedGraphSummary: { nodes: object[]; edges: object[] },
+  config: ScanningAgentConfig
+): Promise<ScanGlobalOutput> {
+  if (config.provider === "fake") {
+    return fakeGlobalOutput(input);
+  }
+  const provider = createProvider(config);
+  const response = await provider.invoke([
+    { role: "system", content: resolveSystemPrompt(config, "Return strict JSON for one GraphCode global scan synthesis.") },
+    {
+      role: "user",
+      content: [
+        scanningPrompt(input),
+        `Mode: global`,
+        `Repository inventory:\n${inventory.map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
+        `Compact unchanged graph summaries:\n${JSON.stringify(unchangedGraphSummary, null, 2)}`,
+        `Changed local summaries:\n${JSON.stringify(localOutputs.map(compactLocalOutput), null, 2)}`,
+        `Medium outputs:\n${JSON.stringify(mediumOutputs, null, 2)}`,
+        "Return only JSON matching this shape: {summary, nodes, edges}. Global nodes should include the repository root and high-level subsystem modules; edges should wire functions, files, modules, and directories with exact source evidence where available."
+      ].join("\n\n")
+    }
+  ]);
+  return scanGlobalOutputSchema.parse(parseJsonResponse(response));
+}
+
+function fakeMediumOutput(scopePath: string): ScanMediumOutput {
+  const normalized = normalizeDirectory(scopePath);
+  const parent = normalized === "." ? "root" : `dir:${normalizeDirectory(normalized.split("/").slice(0, -1).join("/") || ".")}`;
+  return scanMediumOutputSchema.parse({
+    scopePath: normalized,
+    summary: normalized === "." ? "Repository source root." : `Directory module ${normalized}.`,
+    nodes: [
+      {
+        stableKey: `dir:${normalized}`,
+        kind: "module",
+        name: normalized === "." ? "Code Graph" : normalized.split("/").at(-1),
+        summary: normalized === "." ? "Generated bottom-up code graph" : `Directory ${normalized}`,
+        codeContext: normalized === "." ? "Generated scanner root directory." : `Generated directory module for ${normalized}.`,
+        source: { path: normalized, startLine: null, endLine: null },
+        language: "unknown",
+        parentStableKey: normalized === "." ? "root" : parent
+      }
+    ],
+    edges: []
+  });
+}
+
+function fakeGlobalOutput(input: ScanningAgentRequest): ScanGlobalOutput {
+  return scanGlobalOutputSchema.parse({
+    summary: "Whole-repository scan synthesis.",
+    nodes: [
+      {
+        stableKey: "root",
+        kind: "framework",
+        name: "Scanned Workspace",
+        summary: "Scanned repository workspace",
+        codeContext: scanningPrompt(input),
+        source: { path: null, startLine: null, endLine: null },
+        language: "unknown"
+      }
+    ],
+    edges: []
+  });
+}
+
+function compactUnchangedGraphSummary(graph: PlanningGraph, affectedPaths: string[]): { nodes: object[]; edges: object[] } {
+  const affected = new Set(affectedPaths.filter(Boolean));
+  const isAffected = (path: string | null | undefined) => Boolean(path && affected.has(path));
+  return {
+    nodes: graph.nodes
+      .filter((node) => !isAffected(node.source.path) && !isAffected(node.code.directory))
+      .slice(0, 200)
+      .map((node) => ({
+        id: node.id,
+        kind: node.kind,
+        name: node.name,
+        summary: node.summary,
+        parentId: node.parentId,
+        attachedToId: node.attachedToId,
+        source: node.source
+      })),
+    edges: graph.edges
+      .filter((edge) => !isAffected(edge.source.path))
+      .slice(0, 300)
+      .map((edge) => ({
+        id: edge.id,
+        kind: edge.kind,
+        sourceNodeId: edge.sourceNodeId,
+        targetNodeId: edge.targetNodeId,
+        label: edge.label,
+        source: edge.source
+      }))
+  };
+}
+
+function directoriesForScan(files: Array<Pick<ScannableFile, "path">>): string[] {
+  const directories = new Set<string>(["."]);
+  for (const file of files) {
+    const parts = file.path.split("/").slice(0, -1);
+    for (let index = 1; index <= parts.length; index += 1) {
+      directories.add(parts.slice(0, index).join("/") || ".");
+    }
+  }
+  return [...directories].sort((a, b) => a.split("/").length - b.split("/").length || a.localeCompare(b));
+}
+
+function normalizeDirectory(value: string): string {
+  const trimmed = value.replace(/^\.\/+/, "").replace(/\/+$/, "");
+  return trimmed || ".";
+}
+
+function fileInScope(filePath: string, scopePath: string): boolean {
+  return scopePath === "." || filePath === scopePath || filePath.startsWith(`${scopePath}/`);
+}
+
+function compactLocalOutput(output: ScanLocalOutput): object {
+  return {
+    filePath: output.filePath,
+    contentHash: output.contentHash,
+    summary: output.summary,
+    nodes: output.nodes.map((node) => ({ stableKey: node.stableKey, kind: node.kind, name: node.name, source: node.source })),
+    edges: output.edges.map((edge) => ({ stableKey: edge.stableKey, kind: edge.kind, sourceStableKey: edge.sourceStableKey, targetStableKey: edge.targetStableKey, source: edge.source }))
+  };
+}
+
+function numberedSource(source: string): string {
+  return source
+    .split(/\r?\n/)
+    .map((line, index) => `${String(index + 1).padStart(5, " ")} | ${line}`)
+    .join("\n");
+}
+
+function parseJsonResponse(response: string): unknown {
+  const trimmed = response.trim();
+  if (trimmed.startsWith("{")) {
+    return JSON.parse(trimmed);
+  }
+  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) {
+    return JSON.parse(fenced[1]);
+  }
+  const start = trimmed.indexOf("{");
+  const end = trimmed.lastIndexOf("}");
+  if (start >= 0 && end > start) {
+    return JSON.parse(trimmed.slice(start, end + 1));
+  }
+  throw new Error("Scanning agent did not return JSON.");
 }
 
 type CodingContextInput = {
@@ -448,10 +819,12 @@ async function runLangGraphTask(task: AgentTask): Promise<AgentResult> {
   return result.result ?? { response: "" };
 }
 
-function createProvider(config: AgentConfig): { invoke: (messages: PromptMessage[]) => Promise<string> } {
+type ProviderConfig = Omit<AgentConfig, "agentKind"> & { agentKind?: AgentKind; mode?: string };
+
+function createProvider(config: ProviderConfig): { invoke: (messages: PromptMessage[]) => Promise<string> } {
 	  if (config.provider === "fake") {
 	    return {
-	      invoke: async (messages) => `Fake ${config.agentKind} response: ${messages.at(-1)?.content.slice(0, 4000) ?? ""}`
+	      invoke: async (messages) => `Fake ${config.agentKind ?? config.mode ?? "agent"} response: ${messages.at(-1)?.content.slice(0, 4000) ?? ""}`
 	    };
 	  }
   if (config.provider === "openai" || config.provider === "openrouter") {
@@ -513,7 +886,7 @@ async function invokeChatModel(model: { invoke: (messages: Array<SystemMessage |
   return String(output ?? "");
 }
 
-function resolveApiKey(config: AgentConfig): string | undefined {
+function resolveApiKey(config: ProviderConfig): string | undefined {
   const value = config.apiKeySource.value?.trim();
   if (!value) {
     return undefined;
@@ -527,7 +900,7 @@ function resolveApiKey(config: AgentConfig): string | undefined {
   return undefined;
 }
 
-function resolveSystemPrompt(config: AgentConfig, fallback: string): string {
+function resolveSystemPrompt(config: ProviderConfig, fallback: string): string {
   if ((config.systemPromptSource.type === "manual" || config.systemPromptSource.type === "file") && config.systemPromptSource.value?.trim()) {
     return config.systemPromptSource.value;
   }

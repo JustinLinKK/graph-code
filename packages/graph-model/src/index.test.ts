@@ -18,6 +18,7 @@ import {
 	  edgeMutationSchema,
 	  graphNodeSchema,
 	  graphPatchSchema,
+  SCANNING_AGENT_MODES,
   githubDevicePollRequestSchema,
   githubDeviceStartResponseSchema,
   gitStatusInfoSchema,
@@ -38,6 +39,8 @@ import {
   openWorkspaceSchema,
   planningChatRequestSchema,
   projectSchema,
+  scanningAgentConfigSchema,
+  scanningAgentModeSchema,
   scanningAgentRequestSchema,
   settingsValidationResultSchema,
   workspaceInitializationSchema,
@@ -72,12 +75,21 @@ describe("graph model enums", () => {
       color: "#0891b2",
       animated: true,
       pointingEnabled: true,
-      pointingDirection: "bidirectional"
+      pointingDirection: "bidirectional",
+      source: { path: "src/web.ts", startLine: 10, endLine: 12 }
     });
 
     expect(parsed.codeContext).toContain("local server");
     expect(parsed.animated).toBe(true);
     expect(parsed.pointingDirection).toBe("bidirectional");
+    expect(
+      graphEdgeSchema.parse({
+        ...parsed,
+        id: "edge-web-server",
+        projectId: "graphcode-self",
+        createdAt: "now"
+      }).source.path
+    ).toBe("src/web.ts");
     expect(
       graphEdgeSchema.parse({
         ...parsed,
@@ -212,6 +224,18 @@ describe("graph model enums", () => {
         systemPromptSource: { type: "manual", value: "Use full scoped context." }
       }).mode
     ).toBe("large");
+    expect(SCANNING_AGENT_MODES).toEqual(["local", "medium", "global"]);
+    expect(scanningAgentModeSchema.parse("global")).toBe("global");
+    expect(
+      scanningAgentConfigSchema.parse({
+        mode: "local",
+        provider: "fake",
+        model: "fake-local",
+        parallelLimit: 8,
+        apiKeySource: { type: "env", value: "" },
+        systemPromptSource: { type: "manual", value: "Analyze one file." }
+      }).mode
+    ).toBe("local");
     expect(
       codingAgentRequestSchema.parse({
         projectId: "project",
@@ -248,9 +272,19 @@ describe("graph model enums", () => {
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Small scoped coding." }
           }
+        ],
+        scanningAgents: [
+          {
+            mode: "local",
+            provider: "fake",
+            model: "fake-local",
+            parallelLimit: 8,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Local scan." }
+          }
         ]
-      }).codingAgents[0].mode
-    ).toBe("small");
+      }).scanningAgents[0].mode
+    ).toBe("local");
     expect(
       workspaceSettingsSchema.parse({
         general: { theme: "dark" },
@@ -280,9 +314,21 @@ describe("graph model enums", () => {
             apiKeyConfigured: false,
             systemPromptConfigured: true
           }
+        ],
+        scanningAgents: [
+          {
+            mode: "global",
+            provider: "fake",
+            model: "fake-global",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Global scan." },
+            apiKeyConfigured: false,
+            systemPromptConfigured: true
+          }
         ]
-      }).codingAgents[0].mode
-    ).toBe("medium");
+      }).scanningAgents[0].mode
+    ).toBe("global");
     expect(
       settingsValidationResultSchema.parse({
         ok: false,

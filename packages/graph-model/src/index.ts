@@ -68,6 +68,7 @@ export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const
 export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "conflicted"] as const;
 export const AGENT_PROVIDERS = ["fake", "claudecode", "openai", "gemini", "openrouter"] as const;
 export const CODING_AGENT_MODES = ["small", "medium", "large"] as const;
+export const SCANNING_AGENT_MODES = ["local", "medium", "global"] as const;
 export const CODING_WORKFLOW_STATUSES = ["preview", "running", "blocked", "succeeded", "failed"] as const;
 export const CODING_WORKFLOW_ITEM_STATUSES = ["pending", "running", "proposed", "applied", "skipped", "failed", "blocked"] as const;
 export const SETTINGS_THEME_MODES = ["light", "dark", "system"] as const;
@@ -95,6 +96,7 @@ export const agentKindSchema = z.enum(AGENT_KINDS);
 export const agentRunStatusSchema = z.enum(AGENT_RUN_STATUSES);
 export const agentProviderSchema = z.enum(AGENT_PROVIDERS);
 export const codingAgentModeSchema = z.enum(CODING_AGENT_MODES);
+export const scanningAgentModeSchema = z.enum(SCANNING_AGENT_MODES);
 export const codingWorkflowStatusSchema = z.enum(CODING_WORKFLOW_STATUSES);
 export const codingWorkflowItemStatusSchema = z.enum(CODING_WORKFLOW_ITEM_STATUSES);
 export const settingsThemeModeSchema = z.enum(SETTINGS_THEME_MODES);
@@ -122,6 +124,7 @@ export type AgentKind = z.infer<typeof agentKindSchema>;
 export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
 export type AgentProvider = z.infer<typeof agentProviderSchema>;
 export type CodingAgentMode = z.infer<typeof codingAgentModeSchema>;
+export type ScanningAgentMode = z.infer<typeof scanningAgentModeSchema>;
 export type CodingWorkflowStatus = z.infer<typeof codingWorkflowStatusSchema>;
 export type CodingWorkflowItemStatus = z.infer<typeof codingWorkflowItemStatusSchema>;
 export type SettingsThemeMode = z.infer<typeof settingsThemeModeSchema>;
@@ -144,6 +147,9 @@ export const sourceRangeSchema = z.object({
   path: z.string().nullable(),
   startLine: z.number().int().positive().nullable(),
   endLine: z.number().int().positive().nullable()
+}).refine((range) => range.startLine === null || range.endLine === null || range.startLine <= range.endLine, {
+  message: "source startLine must be less than or equal to endLine",
+  path: ["endLine"]
 });
 
 export const codeMetadataSchema = z.object({
@@ -246,6 +252,7 @@ export const graphEdgeSchema = z.object({
   targetNodeId: z.string(),
   label: z.string().nullable(),
   codeContext: z.string(),
+  source: sourceRangeSchema.default({ path: null, startLine: null, endLine: null }),
   color: styleColorSchema,
   animated: z.boolean(),
   pointingEnabled: z.boolean().default(true),
@@ -400,6 +407,7 @@ export const edgeMutationSchema = z.object({
   targetNodeId: z.string().min(1),
   label: z.string().nullable().optional(),
   codeContext: z.string().optional(),
+  source: sourceRangeSchema.optional(),
   color: styleColorSchema.optional(),
   animated: z.boolean().optional(),
   pointingEnabled: z.boolean().optional(),
@@ -454,6 +462,15 @@ export const codingAgentConfigViewSchema = codingAgentConfigSchema.extend({
   systemPromptConfigured: z.boolean()
 });
 
+export const scanningAgentConfigSchema = agentConfigBaseSchema.extend({
+  mode: scanningAgentModeSchema
+});
+
+export const scanningAgentConfigViewSchema = scanningAgentConfigSchema.extend({
+  apiKeyConfigured: z.boolean(),
+  systemPromptConfigured: z.boolean()
+});
+
 export const generalSettingsSchema = z.object({
   theme: settingsThemeModeSchema
 });
@@ -486,7 +503,8 @@ export const workspaceSettingsSchema = z.object({
   github: githubIntegrationSettingsSchema,
   automation: agentAutomationSettingsSchema,
   agents: z.array(agentConfigViewSchema),
-  codingAgents: z.array(codingAgentConfigViewSchema).default([])
+  codingAgents: z.array(codingAgentConfigViewSchema).default([]),
+  scanningAgents: z.array(scanningAgentConfigViewSchema).default([])
 });
 
 export const workspaceSettingsMutationSchema = z.object({
@@ -494,7 +512,8 @@ export const workspaceSettingsMutationSchema = z.object({
   github: githubIntegrationSettingsMutationSchema,
   automation: agentAutomationSettingsSchema,
   agents: z.array(agentConfigSchema),
-  codingAgents: z.array(codingAgentConfigSchema).default([])
+  codingAgents: z.array(codingAgentConfigSchema).default([]),
+  scanningAgents: z.array(scanningAgentConfigSchema).default([])
 });
 
 export const githubDeviceStartRequestSchema = z.object({
@@ -632,7 +651,8 @@ export const scanningAgentRequestSchema = z.object({
   projectId: z.string().min(1),
   rootPath: z.string().optional(),
   projectDescription: z.string().optional(),
-  scanningInstructions: z.string().optional()
+  scanningInstructions: z.string().optional(),
+  background: z.boolean().optional().default(false)
 });
 
 export const graphPatchOperationSchema = z.object({
@@ -759,6 +779,8 @@ export type AgentConfig = z.infer<typeof agentConfigSchema>;
 export type AgentConfigView = z.infer<typeof agentConfigViewSchema>;
 export type CodingAgentConfig = z.infer<typeof codingAgentConfigSchema>;
 export type CodingAgentConfigView = z.infer<typeof codingAgentConfigViewSchema>;
+export type ScanningAgentConfig = z.infer<typeof scanningAgentConfigSchema>;
+export type ScanningAgentConfigView = z.infer<typeof scanningAgentConfigViewSchema>;
 export type GeneralSettings = z.infer<typeof generalSettingsSchema>;
 export type GithubAuthState = z.infer<typeof githubAuthStateSchema>;
 export type GithubIntegrationSettingsMutation = z.infer<typeof githubIntegrationSettingsMutationSchema>;

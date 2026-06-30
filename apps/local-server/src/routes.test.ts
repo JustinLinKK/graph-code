@@ -86,6 +86,7 @@ describe("graph API routes", () => {
     expect(settingsResponse.statusCode).toBe(200);
     expect(settingsResponse.json().agents.some((agent: { agentKind: string }) => agent.agentKind === "coding")).toBe(false);
     expect(settingsResponse.json().codingAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
+    expect(settingsResponse.json().scanningAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
 
     const saveResponse = await app.inject({
       method: "PUT",
@@ -126,6 +127,32 @@ describe("graph API routes", () => {
             parallelLimit: 2,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Scan." }
+          }
+        ],
+        scanningAgents: [
+          {
+            mode: "local",
+            provider: "fake",
+            model: "fake-local",
+            parallelLimit: 8,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Scan local." }
+          },
+          {
+            mode: "medium",
+            provider: "fake",
+            model: "fake-medium",
+            parallelLimit: 4,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Scan medium." }
+          },
+          {
+            mode: "global",
+            provider: "fake",
+            model: "fake-global",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Scan global." }
           }
         ]
       }
@@ -568,10 +595,13 @@ describe("graph API routes", () => {
     );
 
     const projectId = createResponse.json().project.id;
+    const completedBackgroundScan = await waitForAgentKind(projectId, "scanning", "succeeded");
+    expect(completedBackgroundScan.response).toContain("Scanned");
+
     const hierarchyResponse = await app.inject({ method: "GET", url: `/api/projects/${projectId}/hierarchy` });
     expect(hierarchyResponse.statusCode).toBe(200);
     const hierarchyText = JSON.stringify(hierarchyResponse.json());
-    expect(hierarchyText).toContain("Route Workspace Code Graph");
+    expect(hierarchyText).toContain("Scanned Workspace");
     expect(hierarchyText).toContain("scanned.ts");
 
     const scanResponse = await app.inject({
@@ -679,14 +709,26 @@ function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-async function waitForAgentRun(runId: string, status: string) {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const response = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/agent-runs" });
+async function waitForAgentRun(runId: string, status: string, projectId = "graphcode-self") {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await app.inject({ method: "GET", url: `/api/projects/${projectId}/agent-runs` });
     const run = response.json().find((item: { id: string }) => item.id === runId);
     if (run?.status === status) {
       return run;
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`Agent run ${runId} did not reach ${status}.`);
+}
+
+async function waitForAgentKind(projectId: string, agentKind: string, status: string) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const response = await app.inject({ method: "GET", url: `/api/projects/${projectId}/agent-runs` });
+    const run = response.json().find((item: { agentKind: string; status: string }) => item.agentKind === agentKind && item.status === status);
+    if (run) {
+      return run;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`Agent kind ${agentKind} did not reach ${status}.`);
 }

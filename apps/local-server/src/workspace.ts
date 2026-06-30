@@ -25,13 +25,25 @@ import {
   type PlanningChatRequest,
   type Project,
   type ReviewAgentRequest,
+  SCANNING_AGENT_MODES,
   type ScanningAgentRequest,
   type SettingsValidationResult,
   type WorkspaceSettings,
   type WorkspaceSettingsMutation
 } from "@graphcode/graph-model";
-import { runCodingAgent, runPlanningAgent, runReviewAgent, runScanningAgent, type GraphCodeToolbox } from "@graphcode/agent-runtime";
-import { scanRepositoryCodeGraph } from "@graphcode/parser";
+import {
+  runCodingAgent,
+  runPlanningAgent,
+  runReviewAgent,
+  runScanningAgent,
+  type GraphCodeToolbox,
+  type ScanEdgeDraft,
+  type ScanLocalOutput,
+  type ScanNodeDraft,
+  type ScanPipelineResult,
+  type ScannableFile
+} from "@graphcode/agent-runtime";
+import { scanRepositoryCodeGraph, type CodeGraphSymbol } from "@graphcode/parser";
 import { openDatabase, type GraphDatabase } from "./db/connection";
 import { GraphRepository, validationError } from "./db/repository";
 import { migrate } from "./db/schema";
@@ -307,13 +319,18 @@ export class WorkspaceRuntime {
       status: "running"
     });
     this.repository.addAgentMessage({ runId: run.id, role: "user", content: prompt });
-    return this.finishAgentRun(run, () =>
+    const execute = () =>
       runScanningAgent(enrichedInput, {
         config: this.repository.getAgentConfig(input.projectId, "scanning"),
+        scanningConfigs: Object.fromEntries(SCANNING_AGENT_MODES.map((mode) => [mode, this.repository.getScanningAgentConfig(input.projectId, mode)])),
         runId: run.id,
         toolbox: this.createToolbox(input.projectId)
-      })
-    );
+      });
+    if (input.background) {
+      void this.finishAgentRun(run, execute);
+      return run;
+    }
+    return this.finishAgentRun(run, execute);
   }
 
   openWorkspace(input: OpenWorkspaceRequest): OpenWorkspaceResult {
@@ -369,7 +386,13 @@ export class WorkspaceRuntime {
 
     this.writeWorkspaceManifest(graphcodePath, project, rootPath);
     if (creationMode === "scan") {
-      this.refreshCodeGraph(project.id, rootPath);
+      void this.runScanning({
+        projectId: project.id,
+        rootPath,
+        projectDescription: project.description,
+        scanningInstructions: project.scanningInstructions,
+        background: true
+      });
     }
 
     return {
@@ -507,6 +530,17 @@ export class WorkspaceRuntime {
       applyGraphPatch: async (inputProjectId, patch, runId) => {
         await this.applyGraphPatch(inputProjectId, patch, runId);
       },
+      listScannableFiles: async (inputProjectId) => this.listScannableFiles(inputProjectId),
+      getScanFileStates: async (inputProjectId) =>
+        this.repository.listScanFileStates(inputProjectId).map((state) => ({
+          filePath: state.filePath,
+          contentHash: state.contentHash
+        })),
+      buildFakeLocalScanOutput: async (inputProjectId, file) => this.buildFakeLocalScanOutput(inputProjectId, file),
+      applyScanResult: async (inputProjectId, result, runId) => {
+        await this.validateScanResultSourceRanges(inputProjectId, result);
+        return this.repository.applyScanPipelineResult(inputProjectId, result, runId);
+      },
       readSourceFile: async (relativePath) => this.readSourceFile(projectId, relativePath),
       resolveExecutionMetadata: async (nodeId) => this.repository.resolveExecutionMetadata(nodeId),
       writeCodeProposal: async (inputProjectId, runId, targetNodeId, diff, artifactManifest) => {
@@ -545,24 +579,47 @@ export class WorkspaceRuntime {
     return text.slice(0, 200000);
   }
 
-  private async listScannableFiles(projectId: string): Promise<string[]> {
+  private async listScannableFiles(projectId: string): Promise<ScannableFile[]> {
     const project = this.repository.getProject(projectId);
     if (!fs.existsSync(project.rootPath)) {
       return [];
     }
+    let relativePaths: string[];
     try {
       const { stdout } = await execFileAsync("git", ["-C", project.rootPath, "ls-files", "-co", "--exclude-standard"], {
         timeout: 20000,
         maxBuffer: 1024 * 1024 * 4
       });
-      return stdout
+      relativePaths = stdout
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line && isScannablePath(line))
         .slice(0, 2000);
     } catch {
-      return this.walkScannableFiles(project.rootPath, project.rootPath);
+      relativePaths = await this.walkScannableFiles(project.rootPath, project.rootPath);
     }
+    const uniquePaths = [...new Set(relativePaths.map((relativePath) => normalizeGitPath(relativePath)))].sort();
+    const files = await Promise.all(uniquePaths.map((relativePath) => this.scannableFile(project.rootPath, relativePath)));
+    return files.filter((file): file is ScannableFile => Boolean(file));
+  }
+
+  private async scannableFile(rootPath: string, relativePath: string): Promise<ScannableFile | null> {
+    const absolutePath = path.resolve(rootPath, relativePath);
+    const root = path.resolve(rootPath);
+    if (!absolutePath.startsWith(root)) {
+      return null;
+    }
+    const stat = await fsp.stat(absolutePath).catch(() => null);
+    if (!stat?.isFile()) {
+      return null;
+    }
+    const buffer = await fsp.readFile(absolutePath);
+    return {
+      path: normalizeGitPath(relativePath),
+      contentHash: crypto.createHash("sha1").update(buffer).digest("hex"),
+      size: stat.size,
+      language: normalizeLanguage(languageForFilePath(relativePath))
+    };
   }
 
   private async walkScannableFiles(rootPath: string, currentPath: string): Promise<string[]> {
@@ -586,6 +643,300 @@ export class WorkspaceRuntime {
       }
     }
     return files;
+  }
+
+  private async buildFakeLocalScanOutput(projectId: string, file: ScannableFile): Promise<ScanLocalOutput> {
+    const project = this.repository.getProject(projectId);
+    const snapshot = scanRepositoryCodeGraph(project.rootPath, { files: [file.path] });
+    const parsedFile = snapshot.files.find((item) => item.path === file.path);
+    if (!parsedFile) {
+      return { filePath: file.path, contentHash: file.contentHash, summary: "No scannable source entities found.", nodes: [], edges: [] };
+    }
+    const nodes: ScanNodeDraft[] = [
+      {
+        stableKey: parsedFile.id,
+        kind: "module",
+        name: parsedFile.name,
+        summary: `${parsedFile.language} file module with ${(snapshot.symbols ?? []).filter((symbol) => symbol.filePath === file.path).length} symbols`,
+        codeContext: `Generated local scan file module for ${parsedFile.path}. Imports: ${parsedFile.imports.map((item) => item.moduleSpecifier).join(", ") || "none"}. Exports: ${parsedFile.exports.join(", ") || "none"}.`,
+        source: { path: parsedFile.path, startLine: parsedFile.startLine, endLine: parsedFile.endLine },
+        language: parsedFile.language,
+        parentStableKey: `dir:${parsedFile.directoryPath}`
+      }
+    ];
+    const edges: ScanEdgeDraft[] = [];
+    const symbols = snapshot.symbols.filter((symbol) => symbol.filePath === file.path);
+    for (const symbol of symbols) {
+      nodes.push({
+        stableKey: symbol.id,
+        kind: symbol.kind,
+        name: symbol.name,
+        summary: symbol.summary,
+        codeContext: `${symbol.signature}\n${symbol.summary}`,
+        source: { path: symbol.filePath, startLine: symbol.startLine, endLine: symbol.endLine },
+        language: parsedFile.language,
+        parentStableKey: symbol.parentSymbolId ?? parsedFile.id
+      });
+      if (symbol.kind === "function") {
+        this.addFakeWorkflowDrafts(symbol, parsedFile.language, nodes, edges);
+      }
+    }
+    for (const edge of snapshot.edges) {
+      edges.push({
+        stableKey: edge.id,
+        kind: edge.kind,
+        sourceStableKey: edge.sourceId,
+        targetStableKey: edge.targetId,
+        label: edge.label,
+        codeContext: edge.codeContext,
+        source: sourceForEdge(edge.sourceId, symbols, parsedFile.path)
+      });
+    }
+    return {
+      filePath: file.path,
+      contentHash: file.contentHash,
+      summary: `Local scanner analyzed ${parsedFile.path}.`,
+      nodes,
+      edges
+    };
+  }
+
+  private addFakeWorkflowDrafts(symbol: CodeGraphSymbol, language: LanguageType, nodes: ScanNodeDraft[], edges: ScanEdgeDraft[]): void {
+    const workflow = symbol.workflow ?? {
+      nodes: [
+        {
+          id: `${symbol.id}-process`,
+          kind: "entry" as const,
+          name: `Entry ${symbol.name}`,
+          summary: `Function entry for ${symbol.name}`,
+          codeContext: symbol.signature,
+          startLine: symbol.startLine,
+          endLine: symbol.endLine
+        }
+      ],
+      edges: []
+    };
+    const entryNode = workflow.nodes.find((node) => node.kind === "entry") ?? workflow.nodes[0];
+    const hasThrowPath = workflow.nodes.some((node) => node.kind === "throw");
+    const outputId = `${symbol.id}-output`;
+    const outputFormatId = `${outputId}-format`;
+    const throwOutputId = `${symbol.id}-throw-output`;
+    const throwOutputFormatId = `${throwOutputId}-format`;
+
+    for (const workflowNode of workflow.nodes) {
+      nodes.push({
+        stableKey: workflowNode.id,
+        kind: "process",
+        name: workflowNode.kind === "entry" ? `Entry ${symbol.name}` : workflowNode.name,
+        summary: workflowNode.summary,
+        codeContext: workflowNode.codeContext,
+        source: { path: symbol.filePath, startLine: workflowNode.startLine, endLine: workflowNode.endLine },
+        language,
+        attachedToStableKey: symbol.id,
+        detail: {
+          processKind: workflowNode.kind === "condition" ? "condition" : "analyze",
+          trigger: workflowNode.kind,
+          notes: workflowNode.codeContext
+        }
+      });
+    }
+
+    nodes.push({
+      stableKey: outputId,
+      kind: "output",
+      name: symbol.returnHint ? `Returns ${symbol.returnHint}` : "Return value",
+      summary: `Output produced by ${symbol.name}`,
+      codeContext: `Generated output boundary for ${symbol.name}.`,
+      source: { path: symbol.filePath, startLine: symbol.startLine, endLine: symbol.endLine },
+      language,
+      attachedToStableKey: symbol.id,
+      detail: { ioKind: "artifact", channel: `${symbol.name} return`, schemaHint: symbol.returnHint ?? "unknown" }
+    });
+    nodes.push({
+      stableKey: outputFormatId,
+      kind: "format",
+      name: symbol.returnHint ?? "return type",
+      summary: "Return format",
+      codeContext: `Generated return format for ${symbol.name}.`,
+      source: { path: symbol.filePath, startLine: null, endLine: null },
+      language,
+      attachedToStableKey: outputId,
+      detail: { formatKind: "type", spec: symbol.returnHint ?? "unknown" }
+    });
+    edges.push({
+      stableKey: `code-edge-${hashPath(`${outputId}:describes_format:${outputFormatId}`)}`,
+      kind: "describes_format",
+      sourceStableKey: outputId,
+      targetStableKey: outputFormatId,
+      label: "format",
+      codeContext: `${outputFormatId} describes the return type of ${symbol.name}.`,
+      source: { path: symbol.filePath, startLine: null, endLine: null }
+    });
+
+    if (hasThrowPath) {
+      nodes.push({
+        stableKey: throwOutputId,
+        kind: "output",
+        name: "Throws error",
+        summary: `Exceptional output produced by ${symbol.name}`,
+        codeContext: `Generated throw boundary for ${symbol.name}.`,
+        source: { path: symbol.filePath, startLine: symbol.startLine, endLine: symbol.endLine },
+        language,
+        attachedToStableKey: symbol.id,
+        detail: { ioKind: "artifact", channel: `${symbol.name} throw`, schemaHint: "Error" }
+      });
+      nodes.push({
+        stableKey: throwOutputFormatId,
+        kind: "format",
+        name: "Error",
+        summary: "Throw format",
+        codeContext: `Generated throw format for ${symbol.name}.`,
+        source: { path: symbol.filePath, startLine: null, endLine: null },
+        language,
+        attachedToStableKey: throwOutputId,
+        detail: { formatKind: "type", spec: "Error" }
+      });
+      edges.push({
+        stableKey: `code-edge-${hashPath(`${throwOutputId}:describes_format:${throwOutputFormatId}`)}`,
+        kind: "describes_format",
+        sourceStableKey: throwOutputId,
+        targetStableKey: throwOutputFormatId,
+        label: "format",
+        codeContext: `${throwOutputFormatId} describes the throw output type of ${symbol.name}.`,
+        source: { path: symbol.filePath, startLine: null, endLine: null }
+      });
+    }
+
+    const workflowInputs = symbol.parameters.length > 0 ? symbol.parameters : [{ name: "Invocation", typeHint: "function call" }];
+    workflowInputs.forEach((parameter, index) => {
+      const inputId = `${symbol.id}-input-${hashPath(`${parameter.name}:${index}`)}`;
+      const inputFormatId = `${inputId}-format`;
+      nodes.push({
+        stableKey: inputId,
+        kind: "input",
+        name: parameter.name,
+        summary: `Input to ${symbol.name}`,
+        codeContext: `Generated input boundary for ${symbol.name} parameter ${parameter.name}.`,
+        source: { path: symbol.filePath, startLine: symbol.startLine, endLine: symbol.endLine },
+        language,
+        attachedToStableKey: symbol.id,
+        detail: { ioKind: "artifact", channel: `${symbol.name}.${parameter.name}`, schemaHint: parameter.typeHint ?? "unknown" }
+      });
+      nodes.push({
+        stableKey: inputFormatId,
+        kind: "format",
+        name: parameter.typeHint ?? "input type",
+        summary: "Input format",
+        codeContext: `Generated input format for ${symbol.name}.${parameter.name}.`,
+        source: { path: symbol.filePath, startLine: null, endLine: null },
+        language,
+        attachedToStableKey: inputId,
+        detail: { formatKind: "type", spec: parameter.typeHint ?? "unknown" }
+      });
+      edges.push({
+        stableKey: `code-edge-${hashPath(`${inputId}:flows:${entryNode.id}`)}`,
+        kind: "flows",
+        sourceStableKey: inputId,
+        targetStableKey: entryNode.id,
+        label: "parameter",
+        codeContext: `${parameter.name} flows into ${symbol.name}.`,
+        source: { path: symbol.filePath, startLine: symbol.startLine, endLine: symbol.endLine },
+        animated: true
+      });
+      edges.push({
+        stableKey: `code-edge-${hashPath(`${inputId}:describes_format:${inputFormatId}`)}`,
+        kind: "describes_format",
+        sourceStableKey: inputId,
+        targetStableKey: inputFormatId,
+        label: "format",
+        codeContext: `${inputFormatId} describes the ${parameter.name} input type.`,
+        source: { path: symbol.filePath, startLine: null, endLine: null }
+      });
+    });
+
+    for (const edge of workflow.edges) {
+      edges.push({
+        stableKey: edge.id,
+        kind: "flows",
+        sourceStableKey: edge.sourceId,
+        targetStableKey: edge.targetId,
+        label: edge.label,
+        codeContext: edge.codeContext,
+        source: sourceForWorkflowEdge(edge.sourceId, workflow.nodes, symbol.filePath),
+        animated: true
+      });
+    }
+
+    const workflowOutgoing = new Set(workflow.edges.map((edge) => edge.sourceId));
+    for (const workflowNode of workflow.nodes) {
+      if (workflowNode.kind === "return") {
+        edges.push({
+          stableKey: `code-edge-${hashPath(`${workflowNode.id}:flows:${outputId}`)}`,
+          kind: "flows",
+          sourceStableKey: workflowNode.id,
+          targetStableKey: outputId,
+          label: "return",
+          codeContext: `${symbol.name} returns through ${workflowNode.name}.`,
+          source: { path: symbol.filePath, startLine: workflowNode.startLine, endLine: workflowNode.endLine },
+          animated: true
+        });
+      } else if (workflowNode.kind === "throw" && hasThrowPath) {
+        edges.push({
+          stableKey: `code-edge-${hashPath(`${workflowNode.id}:flows:${throwOutputId}`)}`,
+          kind: "flows",
+          sourceStableKey: workflowNode.id,
+          targetStableKey: throwOutputId,
+          label: "throw",
+          codeContext: `${symbol.name} throws through ${workflowNode.name}.`,
+          source: { path: symbol.filePath, startLine: workflowNode.startLine, endLine: workflowNode.endLine },
+          animated: true
+        });
+      } else if (!workflowOutgoing.has(workflowNode.id)) {
+        edges.push({
+          stableKey: `code-edge-${hashPath(`${workflowNode.id}:flows:${outputId}`)}`,
+          kind: "flows",
+          sourceStableKey: workflowNode.id,
+          targetStableKey: outputId,
+          label: "return",
+          codeContext: `${symbol.name} falls through to its return output.`,
+          source: { path: symbol.filePath, startLine: workflowNode.startLine, endLine: workflowNode.endLine },
+          animated: true
+        });
+      }
+    }
+  }
+
+  private async validateScanResultSourceRanges(projectId: string, result: ScanPipelineResult): Promise<void> {
+    const project = this.repository.getProject(projectId);
+    const ranges = [
+      ...result.globalOutput.nodes.map((node) => node.source),
+      ...result.globalOutput.edges.map((edge) => edge.source),
+      ...result.mediumOutputs.flatMap((output) => [...output.nodes.map((node) => node.source), ...output.edges.map((edge) => edge.source)]),
+      ...result.localOutputs.flatMap((output) => [...output.nodes.map((node) => node.source), ...output.edges.map((edge) => edge.source)])
+    ];
+    const lineCountByPath = new Map<string, number>();
+    for (const range of ranges) {
+      if (!range.path || range.startLine === null || range.endLine === null) {
+        continue;
+      }
+      if (range.startLine > range.endLine) {
+        throw validationError(`Invalid scan source range ${range.path}:${range.startLine}-${range.endLine}.`);
+      }
+      let lineCount = lineCountByPath.get(range.path);
+      if (lineCount === undefined) {
+        const absolutePath = path.resolve(project.rootPath, range.path);
+        const rootPath = path.resolve(project.rootPath);
+        if (!absolutePath.startsWith(rootPath)) {
+          throw validationError(`Scanner source range escaped workspace: ${range.path}`);
+        }
+        const text = await fsp.readFile(absolutePath, "utf8").catch(() => "");
+        lineCount = Math.max(1, text.split(/\r?\n/).length);
+        lineCountByPath.set(range.path, lineCount);
+      }
+      if (range.endLine > lineCount) {
+        throw validationError(`Scan source range exceeds file length: ${range.path}:${range.startLine}-${range.endLine}.`);
+      }
+    }
   }
 
   private async applyGraphPatch(projectId: string, patch: GraphPatch, runId?: string): Promise<void> {
@@ -640,6 +991,56 @@ function scanningPrompt(input: ScanningAgentRequest): string {
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function sourceForEdge(sourceId: string, symbols: CodeGraphSymbol[], fallbackPath: string): { path: string; startLine: number; endLine: number } {
+  const symbol = symbols.find((item) => item.id === sourceId);
+  return {
+    path: symbol?.filePath ?? fallbackPath,
+    startLine: symbol?.startLine ?? 1,
+    endLine: symbol?.endLine ?? 1
+  };
+}
+
+function sourceForWorkflowEdge(
+  sourceId: string,
+  workflowNodes: Array<{ id: string; startLine: number; endLine: number }>,
+  fallbackPath: string
+): { path: string; startLine: number; endLine: number } {
+  const source = workflowNodes.find((node) => node.id === sourceId);
+  return {
+    path: fallbackPath,
+    startLine: source?.startLine ?? 1,
+    endLine: source?.endLine ?? 1
+  };
+}
+
+function languageForFilePath(filePath: string): string {
+  if (filePath.endsWith(".ts") || filePath.endsWith(".tsx")) {
+    return "typescript";
+  }
+  if (filePath.endsWith(".js") || filePath.endsWith(".jsx") || filePath.endsWith(".mjs") || filePath.endsWith(".cjs")) {
+    return "javascript";
+  }
+  if (filePath.endsWith(".py")) {
+    return "python";
+  }
+  if (filePath.endsWith(".json")) {
+    return "json";
+  }
+  if (filePath.endsWith(".md")) {
+    return "markdown";
+  }
+  if (filePath.endsWith(".yaml") || filePath.endsWith(".yml")) {
+    return "yaml";
+  }
+  if (filePath.endsWith(".css")) {
+    return "css";
+  }
+  if (filePath.endsWith(".html")) {
+    return "html";
+  }
+  return "other";
 }
 
 function hashPath(value: string): string {

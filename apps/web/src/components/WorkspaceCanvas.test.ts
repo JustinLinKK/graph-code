@@ -225,6 +225,7 @@ function edge(input: Partial<GraphEdge> & Pick<GraphEdge, "id" | "label">): Grap
     agentStatus: "none",
     gitStatus: null,
     tags: [],
+    source: { path: null, startLine: null, endLine: null },
     createdAt: "now",
     ...input
   };

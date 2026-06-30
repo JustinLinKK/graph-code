@@ -400,6 +400,7 @@ const moduleCanvasGraph: CanvasGraph = {
       agentStatus: "none",
       gitStatus: null,
       tags: [],
+      source: { path: null, startLine: null, endLine: null },
       createdAt: "now"
     },
     {
@@ -417,6 +418,7 @@ const moduleCanvasGraph: CanvasGraph = {
       agentStatus: "none",
       gitStatus: null,
       tags: [],
+      source: { path: null, startLine: null, endLine: null },
       createdAt: "now"
     }
   ],
@@ -483,6 +485,7 @@ const functionCanvasGraph: CanvasGraph = {
       agentStatus: "none",
       gitStatus: null,
       tags: [],
+      source: { path: null, startLine: null, endLine: null },
       createdAt: "now"
     },
     {
@@ -500,6 +503,7 @@ const functionCanvasGraph: CanvasGraph = {
       agentStatus: "none",
       gitStatus: null,
       tags: [],
+      source: { path: null, startLine: null, endLine: null },
       createdAt: "now"
     },
     {
@@ -517,6 +521,7 @@ const functionCanvasGraph: CanvasGraph = {
       agentStatus: "none",
       gitStatus: null,
       tags: [],
+      source: { path: null, startLine: null, endLine: null },
       createdAt: "now"
     }
   ],
@@ -609,6 +614,16 @@ const defaultSettings = {
     systemPromptSource: { type: "manual", value: `${mode} coding prompt` },
     apiKeyConfigured: false,
     systemPromptConfigured: true
+  })),
+  scanningAgents: ["local", "medium", "global"].map((mode) => ({
+    mode,
+    provider: "fake",
+    model: `fake-${mode}`,
+    parallelLimit: mode === "local" ? 8 : 1,
+    apiKeySource: { type: "env", value: "" },
+    systemPromptSource: { type: "manual", value: `${mode} scanning prompt` },
+    apiKeyConfigured: false,
+    systemPromptConfigured: true
   }))
 };
 
@@ -633,6 +648,15 @@ function settingsViewFromMutation(input: any) {
     }),
     codingAgents: defaultSettings.codingAgents.map((agent) => {
       const next = input.codingAgents?.find((item: { mode: string }) => item.mode === agent.mode);
+      return {
+        ...agent,
+        ...(next ?? {}),
+        apiKeyConfigured: Boolean(next?.apiKeySource?.value) || agent.apiKeyConfigured,
+        systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
+      };
+    }),
+    scanningAgents: defaultSettings.scanningAgents.map((agent) => {
+      const next = input.scanningAgents?.find((item: { mode: string }) => item.mode === agent.mode);
       return {
         ...agent,
         ...(next ?? {}),
@@ -1660,6 +1684,9 @@ describe("GraphCode app shell", () => {
     expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Agents/i }));
     expect(screen.getByRole("heading", { name: "Planning" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Scanning Local" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Scanning Medium" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Scanning Global" })).toBeInTheDocument();
     expect(screen.getAllByText("Environment Variable Name")[0]).toBeInTheDocument();
 
     fireEvent.change(screen.getAllByLabelText("API Key Source")[0], { target: { value: "file" } });
@@ -1684,6 +1711,30 @@ describe("GraphCode app shell", () => {
         })
       );
     });
+    const settingsCall = vi
+      .mocked(fetch)
+      .mock.calls.find(([url, init]) => url === "/api/projects/graphcode-self/settings" && init?.method === "PUT");
+    expect(JSON.parse(String(settingsCall?.[1]?.body)).scanningAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
+  });
+
+  it("shows scanning runs in the activity feed", async () => {
+    render(<App />);
+
+    await screen.findByTestId("react-flow");
+    fireEvent.click(screen.getByRole("button", { name: /^Scan$/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/agents/scanning",
+        expect.objectContaining({
+          method: "POST"
+        })
+      );
+    });
+    const tablist = await screen.findByRole("tablist", { name: /Details panel mode/i });
+    fireEvent.click(within(tablist).getByRole("button", { name: /Planning/i }));
+    expect(await screen.findByText("Scanning")).toBeInTheDocument();
+    expect(screen.getByText("Agent completed")).toBeInTheDocument();
   });
 
   it("updates the canvas background when Night theme is saved", async () => {

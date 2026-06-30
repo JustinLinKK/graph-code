@@ -15,3 +15,4 @@ Current notes:
 
 - [Agent System Prompts](agent-system-prompts.md)
 - [Function Hierarchy and CFG Workflows](function-hierarchy-and-cfg.md)
+- [Three-Mode Scanning Pipeline](three-mode-scanning-pipeline.md)
