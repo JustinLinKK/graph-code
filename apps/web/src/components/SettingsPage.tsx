@@ -36,7 +36,7 @@ type SettingsPageProps = {
 };
 
 const agentKinds: AgentKind[] = ["planning"];
-const providers: AgentProvider[] = ["fake", "claudecode", "openai", "gemini", "openrouter"];
+const providers: AgentProvider[] = ["fake", "codex", "claudecode", "openai", "gemini", "openrouter"];
 
 export function SettingsPage({
   project,
@@ -66,7 +66,7 @@ export function SettingsPage({
 
   useEffect(() => {
     setDraft(toMutation(settings));
-  }, [settings]);
+  }, [project.id]);
 
   const updateAgent = (agentKind: AgentKind, patch: Partial<AgentConfig>) => {
     setDraft((current) => ({
@@ -429,7 +429,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateAgent(agentKind, { provider: event.target.value as AgentProvider })}>
+                          <select value={agent.provider} onChange={(event) => updateAgent(agentKind, providerPatch(agent.model, event.target.value as AgentProvider))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -438,7 +438,7 @@ export function SettingsPage({
                           </select>
                         </label>
                         <label className="form-field">
-                          <span>Model</span>
+                          <span>{modelFieldLabel(agent.provider)}</span>
                           <input value={agent.model} onChange={(event) => updateAgent(agentKind, { model: event.target.value })} />
                           <FieldError value={errors[`agents.${index}.model`]} />
                         </label>
@@ -446,14 +446,18 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>API Key Source</span>
-                          <select value={agent.apiKeySource.type} onChange={(event) => setApiKeySourceType(agent, event.target.value as AgentConfig["apiKeySource"]["type"])}>
+                          <select
+                            value={agent.apiKeySource.type}
+                            disabled={isCliProvider(agent.provider)}
+                            onChange={(event) => setApiKeySourceType(agent, event.target.value as AgentConfig["apiKeySource"]["type"])}
+                          >
                             <option value="manual">Manual</option>
                             <option value="file">Read File</option>
                             <option value="env">Environment Variable</option>
                           </select>
                         </label>
                         <div className="form-field">
-                          <span>{apiKeyEntryLabel(agent.apiKeySource.type)}</span>
+                          <span>{authEntryLabel(agent.provider, agent.apiKeySource.type)}</span>
                           <ApiKeyEntry
                             agent={agent}
                             configured={settings.agents.find((item) => item.agentKind === agentKind)?.apiKeyConfigured ?? false}
@@ -515,7 +519,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateCodingAgent(mode, { provider: event.target.value as AgentProvider })}>
+                          <select value={agent.provider} onChange={(event) => updateCodingAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -524,7 +528,7 @@ export function SettingsPage({
                           </select>
                         </label>
                         <label className="form-field">
-                          <span>Model</span>
+                          <span>{modelFieldLabel(agent.provider)}</span>
                           <input value={agent.model} onChange={(event) => updateCodingAgent(mode, { model: event.target.value })} />
                           <FieldError value={errors[`codingAgents.${index}.model`]} />
                         </label>
@@ -532,14 +536,18 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>API Key Source</span>
-                          <select value={agent.apiKeySource.type} onChange={(event) => setCodingApiKeySourceType(agent, event.target.value as CodingAgentConfig["apiKeySource"]["type"])}>
+                          <select
+                            value={agent.apiKeySource.type}
+                            disabled={isCliProvider(agent.provider)}
+                            onChange={(event) => setCodingApiKeySourceType(agent, event.target.value as CodingAgentConfig["apiKeySource"]["type"])}
+                          >
                             <option value="manual">Manual</option>
                             <option value="file">Read File</option>
                             <option value="env">Environment Variable</option>
                           </select>
                         </label>
                         <div className="form-field">
-                          <span>{apiKeyEntryLabel(agent.apiKeySource.type)}</span>
+                          <span>{authEntryLabel(agent.provider, agent.apiKeySource.type)}</span>
                           <ApiKeyEntry
                             agent={agent}
                             configured={(settings.codingAgents ?? []).find((item) => item.mode === mode)?.apiKeyConfigured ?? false}
@@ -601,7 +609,7 @@ export function SettingsPage({
                         <div className="form-grid">
                           <label className="form-field">
                             <span>Provider</span>
-                            <select value={agent.provider} onChange={(event) => updateReviewAgent(mode, { provider: event.target.value as AgentProvider })}>
+                            <select value={agent.provider} onChange={(event) => updateReviewAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider))}>
                               {providers.map((provider) => (
                                 <option key={provider} value={provider}>
                                   {providerLabel(provider)}
@@ -610,7 +618,7 @@ export function SettingsPage({
                             </select>
                           </label>
                           <label className="form-field">
-                            <span>Model</span>
+                            <span>{modelFieldLabel(agent.provider)}</span>
                             <input value={agent.model} onChange={(event) => updateReviewAgent(mode, { model: event.target.value })} />
                             <FieldError value={errors[`reviewAgents.${index}.model`]} />
                           </label>
@@ -618,14 +626,18 @@ export function SettingsPage({
                         <div className="form-grid">
                           <label className="form-field">
                             <span>API Key Source</span>
-                            <select value={agent.apiKeySource.type} onChange={(event) => setReviewApiKeySourceType(agent, event.target.value as ReviewAgentConfig["apiKeySource"]["type"])}>
+                            <select
+                              value={agent.apiKeySource.type}
+                              disabled={isCliProvider(agent.provider)}
+                              onChange={(event) => setReviewApiKeySourceType(agent, event.target.value as ReviewAgentConfig["apiKeySource"]["type"])}
+                            >
                               <option value="manual">Manual</option>
                               <option value="file">Read File</option>
                               <option value="env">Environment Variable</option>
                             </select>
                           </label>
                           <div className="form-field">
-                            <span>{apiKeyEntryLabel(agent.apiKeySource.type)}</span>
+                            <span>{authEntryLabel(agent.provider, agent.apiKeySource.type)}</span>
                             <ApiKeyEntry
                               agent={agent}
                               configured={(settings.reviewAgents ?? []).find((item) => item.mode === mode)?.apiKeyConfigured ?? false}
@@ -687,7 +699,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateScanningAgent(mode, { provider: event.target.value as AgentProvider })}>
+                          <select value={agent.provider} onChange={(event) => updateScanningAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -696,7 +708,7 @@ export function SettingsPage({
                           </select>
                         </label>
                         <label className="form-field">
-                          <span>Model</span>
+                          <span>{modelFieldLabel(agent.provider)}</span>
                           <input value={agent.model} onChange={(event) => updateScanningAgent(mode, { model: event.target.value })} />
                           <FieldError value={errors[`scanningAgents.${index}.model`]} />
                         </label>
@@ -704,14 +716,18 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>API Key Source</span>
-                          <select value={agent.apiKeySource.type} onChange={(event) => setScanningApiKeySourceType(agent, event.target.value as ScanningAgentConfig["apiKeySource"]["type"])}>
+                          <select
+                            value={agent.apiKeySource.type}
+                            disabled={isCliProvider(agent.provider)}
+                            onChange={(event) => setScanningApiKeySourceType(agent, event.target.value as ScanningAgentConfig["apiKeySource"]["type"])}
+                          >
                             <option value="manual">Manual</option>
                             <option value="file">Read File</option>
                             <option value="env">Environment Variable</option>
                           </select>
                         </label>
                         <div className="form-field">
-                          <span>{apiKeyEntryLabel(agent.apiKeySource.type)}</span>
+                          <span>{authEntryLabel(agent.provider, agent.apiKeySource.type)}</span>
                           <ApiKeyEntry
                             agent={agent}
                             configured={(settings.scanningAgents ?? []).find((item) => item.mode === mode)?.apiKeyConfigured ?? false}
@@ -855,12 +871,19 @@ function ApiKeyEntry({
     configured,
     onChange,
     onFile
-  }: {
-    agent: Pick<AgentConfig, "apiKeySource"> | Pick<CodingAgentConfig, "apiKeySource"> | Pick<ReviewAgentConfig, "apiKeySource"> | Pick<ScanningAgentConfig, "apiKeySource">;
+}: {
+    agent:
+      | Pick<AgentConfig, "provider" | "apiKeySource">
+      | Pick<CodingAgentConfig, "provider" | "apiKeySource">
+      | Pick<ReviewAgentConfig, "provider" | "apiKeySource">
+      | Pick<ScanningAgentConfig, "provider" | "apiKeySource">;
   configured: boolean;
   onChange: (value: string) => void;
   onFile: (file: File | null) => void;
 }) {
+  if (isCliProvider(agent.provider)) {
+    return <small className="muted">Uses your logged-in {providerLabel(agent.provider)} account. No API key is stored.</small>;
+  }
   if (agent.apiKeySource.type === "file") {
     return <FilePicker label="Select Key File" accept=".env,.txt,*/*" onFile={onFile} />;
   }
@@ -916,6 +939,14 @@ function readFileText(file: File): Promise<string> {
   });
 }
 
+function modelFieldLabel(provider: AgentProvider): string {
+  return isCliProvider(provider) ? "CLI Command" : "Model";
+}
+
+function authEntryLabel(provider: AgentProvider, type: AgentConfig["apiKeySource"]["type"]): string {
+  return isCliProvider(provider) ? "CLI Account" : apiKeyEntryLabel(type);
+}
+
 function apiKeyEntryLabel(type: AgentConfig["apiKeySource"]["type"]): string {
   if (type === "env") {
     return "Environment Variable Name";
@@ -924,6 +955,21 @@ function apiKeyEntryLabel(type: AgentConfig["apiKeySource"]["type"]): string {
     return "API Key File";
   }
   return "API Key Entry";
+}
+
+function providerPatch(currentModel: string, provider: AgentProvider): Pick<AgentConfig, "provider" | "model"> {
+  return {
+    provider,
+    model: isCliProvider(provider) ? defaultCliCommand(provider) : currentModel
+  };
+}
+
+function isCliProvider(provider: AgentProvider): provider is "codex" | "claudecode" {
+  return provider === "codex" || provider === "claudecode";
+}
+
+function defaultCliCommand(provider: "codex" | "claudecode"): string {
+  return provider === "codex" ? "codex" : "claude";
 }
 
 function defaultCodingAgent(mode: CodingAgentMode): CodingAgentConfig {

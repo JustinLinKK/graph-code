@@ -194,6 +194,79 @@ describe("graph API routes", () => {
     expect(runsResponse.json()).toEqual([]);
   });
 
+  it("validates Codex CLI account commands for settings", async () => {
+    const command = path.join(os.tmpdir(), `graphcode-codex-cli-${crypto.randomUUID()}.sh`);
+    fs.writeFileSync(
+      command,
+      [
+        "#!/bin/sh",
+        "if [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi",
+        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then echo logged-in; exit 0; fi",
+        "exit 0"
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+
+    const saveResponse = await app.inject({
+      method: "PUT",
+      url: "/api/projects/graphcode-self/settings",
+      payload: {
+        general: { theme: "dark" },
+        github: { enabled: false, repository: "", clientId: "" },
+        automation: { autoReviewAfterCoding: true },
+        extensions: { enabledPackageIds: [], configs: {} },
+        agents: [
+          {
+            agentKind: "planning",
+            provider: "codex",
+            model: command,
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Plan with Codex." }
+          }
+        ]
+      }
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+    expect(saveResponse.json().validation.ok).toBe(true);
+    expect(saveResponse.json().settings.agents.find((agent: { agentKind: string }) => agent.agentKind === "planning").provider).toBe("codex");
+  });
+
+  it("reports Codex CLI auth failures after command validation", async () => {
+    const command = path.join(os.tmpdir(), `graphcode-codex-cli-auth-${crypto.randomUUID()}.sh`);
+    fs.writeFileSync(
+      command,
+      ["#!/bin/sh", "if [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi", "exit 1"].join("\n"),
+      { mode: 0o755 }
+    );
+
+    const saveResponse = await app.inject({
+      method: "PUT",
+      url: "/api/projects/graphcode-self/settings",
+      payload: {
+        general: { theme: "dark" },
+        github: { enabled: false, repository: "", clientId: "" },
+        automation: { autoReviewAfterCoding: true },
+        extensions: { enabledPackageIds: [], configs: {} },
+        agents: [
+          {
+            agentKind: "planning",
+            provider: "codex",
+            model: command,
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Plan with Codex." }
+          }
+        ]
+      }
+    });
+
+    expect(saveResponse.statusCode).toBe(200);
+    expect(saveResponse.json().validation.ok).toBe(false);
+    expect(JSON.stringify(saveResponse.json().validation.fieldErrors)).toContain("Codex CLI account login");
+  });
+
   it("connects and disconnects GitHub with OAuth device flow routes", async () => {
     vi.stubGlobal(
       "fetch",

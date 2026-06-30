@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import {
   type AgentKind,
+  type AgentProvider,
   type AgentRun,
   type CanvasGraph,
   type CodingAgentRequest,
@@ -96,30 +97,24 @@ export class WorkspaceRuntime {
     async validateSettings(projectId: string, input: WorkspaceSettingsMutation): Promise<SettingsValidationResult> {
       const validation = this.repository.validateWorkspaceSettings(projectId, input);
       const fieldErrors = { ...validation.fieldErrors };
-      await Promise.all([
-        ...input.agents.map(async (agent, index) => {
-          if (agent.provider !== "claudecode") {
+      const cliChecks = [
+        ...input.agents.map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `agents.${index}.model` })),
+        ...(input.codingAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `codingAgents.${index}.model` })),
+        ...(input.reviewAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `reviewAgents.${index}.model` })),
+        ...(input.scanningAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `scanningAgents.${index}.model` }))
+      ];
+      await Promise.all(
+        cliChecks.map(async (check) => {
+          if (!isCliProvider(check.provider)) {
             return;
           }
-        const command = agent.model.trim() || "claude";
-        try {
-          await execFileAsync(command, ["--version"], { timeout: 5000 });
-          } catch {
-            fieldErrors[`agents.${index}.model`] = `Claude Code command not found or not executable: ${command}`;
-          }
-        }),
-        ...(input.reviewAgents ?? []).map(async (agent, index) => {
-          if (agent.provider !== "claudecode") {
-            return;
-          }
-          const command = agent.model.trim() || "claude";
-          try {
-            await execFileAsync(command, ["--version"], { timeout: 5000 });
-          } catch {
-            fieldErrors[`reviewAgents.${index}.model`] = `Claude Code command not found or not executable: ${command}`;
+          const command = check.command.trim() || defaultCliCommand(check.provider);
+          const error = await validateCliProvider(check.provider, command);
+          if (error) {
+            fieldErrors[check.field] = error;
           }
         })
-      ]);
+      );
     return {
       ok: Object.keys(fieldErrors).length === 0,
       testedAt: new Date().toISOString(),
@@ -216,6 +211,7 @@ export class WorkspaceRuntime {
   }
 
   async runPlanning(input: PlanningChatRequest): Promise<AgentRun> {
+    const project = this.repository.getProject(input.projectId);
     const run = this.repository.createAgentRun({
       projectId: input.projectId,
       agentKind: "planning",
@@ -228,6 +224,7 @@ export class WorkspaceRuntime {
       runPlanningAgent(input, {
         config: this.repository.getAgentConfig(input.projectId, "planning"),
         runId: run.id,
+        workspaceRoot: project.rootPath,
         toolbox: this.createToolbox(input.projectId)
       });
     if (input.background) {
@@ -238,6 +235,7 @@ export class WorkspaceRuntime {
   }
 
   async runCoding(input: CodingAgentRequest, options: { autoReview?: boolean } = {}): Promise<AgentRun> {
+    const project = this.repository.getProject(input.projectId);
     const mode = input.mode ?? "medium";
     const run = this.repository.createAgentRun({
       projectId: input.projectId,
@@ -252,6 +250,7 @@ export class WorkspaceRuntime {
       runCodingAgent(input, {
         config: { ...this.repository.getCodingAgentConfig(input.projectId, mode), agentKind: "coding" },
         runId: run.id,
+        workspaceRoot: project.rootPath,
         toolbox: this.createToolbox(input.projectId)
       })
       );
@@ -310,6 +309,7 @@ export class WorkspaceRuntime {
           {
             config: { ...this.repository.getReviewAgentConfig(input.projectId, mode), agentKind: "review" },
           runId: run.id,
+          workspaceRoot: this.repository.getProject(input.projectId).rootPath,
           toolbox: this.createToolbox(input.projectId)
         }
       )
@@ -342,6 +342,7 @@ export class WorkspaceRuntime {
         config: this.repository.getAgentConfig(input.projectId, "scanning"),
         scanningConfigs: Object.fromEntries(SCANNING_AGENT_MODES.map((mode) => [mode, this.repository.getScanningAgentConfig(input.projectId, mode)])),
         runId: run.id,
+        workspaceRoot: project.rootPath,
         toolbox: this.createToolbox(input.projectId)
       });
     if (input.background) {
@@ -1075,6 +1076,34 @@ function realPathOrResolve(value: string): string {
   } catch {
     return path.resolve(value);
   }
+}
+
+function isCliProvider(provider: AgentProvider): provider is "codex" | "claudecode" {
+  return provider === "codex" || provider === "claudecode";
+}
+
+function defaultCliCommand(provider: "codex" | "claudecode"): string {
+  return provider === "codex" ? "codex" : "claude";
+}
+
+function cliProviderLabel(provider: "codex" | "claudecode"): string {
+  return provider === "codex" ? "Codex CLI" : "Claude Code";
+}
+
+async function validateCliProvider(provider: "codex" | "claudecode", command: string): Promise<string | null> {
+  const label = cliProviderLabel(provider);
+  try {
+    await execFileAsync(command, ["--version"], { timeout: 5000 });
+  } catch {
+    return `${label} command not found or not executable: ${command}`;
+  }
+  const authArgs = provider === "codex" ? ["login", "status"] : ["auth", "status"];
+  try {
+    await execFileAsync(command, authArgs, { timeout: 10000 });
+  } catch {
+    return `${label} account login is not available. Run ${command} ${authArgs.join(" ")} or sign in with the CLI before saving.`;
+  }
+  return null;
 }
 
 function isScannablePath(value: string): boolean {

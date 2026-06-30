@@ -182,10 +182,12 @@ describe("GraphCode agent runtime", () => {
 
     it("stores parsed test artifact manifests with coding proposals", async () => {
       const command = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.sh`);
+      const argsLog = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.args`);
       fs.writeFileSync(
         command,
         [
           "#!/bin/sh",
+          `printf '%s\\n' "$@" > ${argsLog}`,
           "cat <<'EOF'",
           "diff --git a/src/module.ts b/src/module.ts",
           "--- a/src/module.ts",
@@ -219,6 +221,52 @@ describe("GraphCode agent runtime", () => {
           scripts: [expect.objectContaining({ relativePath: "module.test.ts" })]
         })
       );
+      const args = fs.readFileSync(argsLog, "utf8");
+      expect(args).toContain("--append-system-prompt\nTest prompt");
+      expect(args).toContain("--permission-mode\nplan");
+      expect(args).toContain("--disallowedTools\nEdit\nMultiEdit\nWrite\nNotebookEdit");
+      expect(args).toContain("GraphCode Claude Code CLI account-plan invocation.");
+    });
+
+    it("runs Codex CLI providers with workspace root and prompt skills on stdin", async () => {
+      const command = path.join(os.tmpdir(), `graphcode-codex-${crypto.randomUUID()}.sh`);
+      const argsLog = path.join(os.tmpdir(), `graphcode-codex-${crypto.randomUUID()}.args`);
+      const stdinLog = path.join(os.tmpdir(), `graphcode-codex-${crypto.randomUUID()}.stdin`);
+      const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-workspace-"));
+      fs.writeFileSync(
+        command,
+        [
+          "#!/bin/sh",
+          `printf '%s\\n' "$@" > ${argsLog}`,
+          `cat > ${stdinLog}`,
+          "cat <<'EOF'",
+          "diff --git a/src/module.ts b/src/module.ts",
+          "--- a/src/module.ts",
+          "+++ b/src/module.ts",
+          "@@",
+          "+export const value = 3;",
+          "EOF"
+        ].join("\n"),
+        { mode: 0o755 }
+      );
+      const tools = toolbox();
+
+      const result = await runCodingAgent(
+        {
+          projectId: "project",
+          nodeId: "node-1",
+          mode: "small",
+          prompt: "Update value through codex"
+        },
+        { config: { ...baseConfig, agentKind: "coding", provider: "codex", model: command }, runId: "run-codex", workspaceRoot, toolbox: tools }
+      );
+
+      expect(result.diff).toContain("src/module.ts");
+      expect(fs.readFileSync(argsLog, "utf8")).toBe(`exec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--ask-for-approval\nnever\n-\n`);
+      const stdin = fs.readFileSync(stdinLog, "utf8");
+      expect(stdin).toContain("GraphCode Codex CLI account-plan invocation.");
+      expect(stdin).toContain("GraphCode skill instructions:\nTest prompt");
+      expect(stdin).toContain("Update value through codex");
     });
 
   it("includes function workflow canvas context for medium coding runs", async () => {

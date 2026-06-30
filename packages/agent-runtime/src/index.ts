@@ -1,5 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
@@ -41,8 +40,6 @@ import {
 } from "@graphcode/graph-model";
 import { z } from "zod";
 
-const execFileAsync = promisify(execFile);
-
 export type GraphCodeToolbox = {
   readGraph: (projectId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
   getNodeDetail: (nodeId: string) => Promise<NodeDetail>;
@@ -75,6 +72,7 @@ export type AgentRuntimeOptions = {
   config: AgentConfig;
   scanningConfigs?: Partial<Record<ScanningAgentMode, ScanningAgentConfig>>;
   runId?: string;
+  workspaceRoot?: string;
   toolbox: GraphCodeToolbox;
 };
 
@@ -203,7 +201,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
     kind: "planning",
     prompt: input.prompt,
     execute: async () => {
-      const provider = createProvider(options.config);
+      const provider = createProvider(options.config, options.workspaceRoot);
       const graph = await options.toolbox.readGraph(input.projectId);
       const scope = input.scopeNodeId ? graph.nodes.find((node) => node.id === input.scopeNodeId) : null;
       const planningChunks = buildPlanningContextChunks(graph, options.config.parallelLimit);
@@ -272,7 +270,7 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
     kind: "coding",
     prompt: input.prompt ?? "",
     execute: async () => {
-      const provider = createProvider(options.config);
+      const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const detail = await options.toolbox.getNodeDetail(input.nodeId);
       const graph = await options.toolbox.readGraph(input.projectId);
@@ -327,7 +325,7 @@ export async function runReviewAgent(
     kind: "review",
     prompt: input.runId,
     execute: async () => {
-      const provider = createProvider(options.config);
+      const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const diff = input.diff ?? "";
       const graph = await options.toolbox.readGraph(input.projectId);
@@ -399,11 +397,11 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
       const initial = previousStates.length === 0;
       const localTargets = initial ? inventory : changedFiles;
       const localOutputs = await boundedMap(localTargets, scanConfigs.local.parallelLimit, (file) =>
-        runLocalScan(input, file, scanConfigs.local, options.toolbox)
+        runLocalScan(input, file, scanConfigs.local, options.toolbox, options.workspaceRoot)
       );
       const mediumScopes = directoriesForScan(initial ? inventory : [...changedFiles, ...deletedFiles.map((file) => ({ path: file.filePath, contentHash: file.contentHash, size: 0, language: "unknown" }))]);
       const mediumOutputs = await boundedMap(mediumScopes, scanConfigs.medium.parallelLimit, (scopePath) =>
-        runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium)
+        runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium, options.workspaceRoot)
       );
       const unchangedGraphSummary = initial
         ? { nodes: [], edges: [] }
@@ -411,7 +409,7 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
             ...changedFiles.map((file) => file.path),
             ...deletedFiles.map((file) => file.filePath)
           ]);
-      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global);
+      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global, options.workspaceRoot);
       const pipeline = scanPipelineResultSchema.parse({
         initial,
         inventory,
@@ -484,12 +482,13 @@ async function runLocalScan(
   input: ScanningAgentRequest,
   file: ScannableFile,
   config: ScanningAgentConfig,
-  toolbox: GraphCodeToolbox
+  toolbox: GraphCodeToolbox,
+  workspaceRoot?: string
 ): Promise<ScanLocalOutput> {
   if (config.provider === "fake") {
     return scanLocalOutputSchema.parse(await toolbox.buildFakeLocalScanOutput(input.projectId, file));
   }
-  const provider = createProvider(config);
+  const provider = createProvider(config, workspaceRoot);
   const source = await toolbox.readSourceFile(file.path);
   const response = await provider.invoke([
     { role: "system", content: resolveSystemPrompt(config, "Return strict JSON for one GraphCode local scan file analysis.") },
@@ -514,12 +513,13 @@ async function runMediumScan(
   scopePath: string,
   inventory: ScannableFile[],
   localOutputs: ScanLocalOutput[],
-  config: ScanningAgentConfig
+  config: ScanningAgentConfig,
+  workspaceRoot?: string
 ): Promise<ScanMediumOutput> {
   if (config.provider === "fake") {
     return fakeMediumOutput(scopePath);
   }
-  const provider = createProvider(config);
+  const provider = createProvider(config, workspaceRoot);
   const response = await provider.invoke([
     { role: "system", content: resolveSystemPrompt(config, "Return strict JSON for one GraphCode medium scan consolidation.") },
     {
@@ -543,12 +543,13 @@ async function runGlobalScan(
   localOutputs: ScanLocalOutput[],
   mediumOutputs: ScanMediumOutput[],
   unchangedGraphSummary: { nodes: object[]; edges: object[] },
-  config: ScanningAgentConfig
+  config: ScanningAgentConfig,
+  workspaceRoot?: string
 ): Promise<ScanGlobalOutput> {
   if (config.provider === "fake") {
     return fakeGlobalOutput(input);
   }
-  const provider = createProvider(config);
+  const provider = createProvider(config, workspaceRoot);
   const response = await provider.invoke([
     { role: "system", content: resolveSystemPrompt(config, "Return strict JSON for one GraphCode global scan synthesis.") },
     {
@@ -946,7 +947,7 @@ async function runLangGraphTask(task: AgentTask): Promise<AgentResult> {
 
 type ProviderConfig = Omit<AgentConfig, "agentKind"> & { agentKind?: AgentKind; mode?: string };
 
-function createProvider(config: ProviderConfig): { invoke: (messages: PromptMessage[]) => Promise<string> } {
+function createProvider(config: ProviderConfig, workspaceRoot?: string): { invoke: (messages: PromptMessage[]) => Promise<string> } {
       if (config.provider === "fake") {
         return {
           invoke: async (messages) => {
@@ -959,6 +960,9 @@ function createProvider(config: ProviderConfig): { invoke: (messages: PromptMess
           }
         };
       }
+  if (config.provider === "codex") {
+    return { invoke: (messages) => invokeCodexCli(config, messages, workspaceRoot) };
+  }
   if (config.provider === "openai" || config.provider === "openrouter") {
     const apiKey = resolveApiKey(config);
     const model = new ChatOpenAI({
@@ -983,17 +987,146 @@ function createProvider(config: ProviderConfig): { invoke: (messages: PromptMess
     });
     return { invoke: (messages) => invokeChatModel(model, messages) };
   }
-  return {
-    invoke: async (messages) => {
-      const command = config.model || "claude";
-      const prompt = messages.map((message) => `${message.role}: ${message.content}`).join("\n\n");
-      const { stdout } = await execFileAsync(command, ["-p", prompt], {
-        timeout: 120000,
-        maxBuffer: 1024 * 1024 * 4
-      });
-      return stdout.trim();
+  if (config.provider === "claudecode") {
+    return { invoke: (messages) => invokeClaudeCodeCli(config, messages, workspaceRoot) };
+  }
+  throw new Error(`Unsupported agent provider: ${config.provider}`);
+}
+
+async function invokeCodexCli(config: ProviderConfig, messages: PromptMessage[], workspaceRoot?: string): Promise<string> {
+  const command = resolveCliCommand(config, "codex");
+  const cwd = workspaceRoot ?? process.cwd();
+  const prompt = buildCliPrompt(messages, {
+    providerName: "Codex CLI",
+    systemInPrompt: true
+  });
+  const { stdout } = await runCliCommand(command, ["exec", "--cd", cwd, "--sandbox", "read-only", "--ask-for-approval", "never", "-"], {
+    cwd,
+    input: prompt,
+    timeout: 120000,
+    maxBuffer: 1024 * 1024 * 4
+  });
+  return stdout.trim();
+}
+
+async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessage[], workspaceRoot?: string): Promise<string> {
+  const command = resolveCliCommand(config, "claude");
+  const cwd = workspaceRoot ?? process.cwd();
+  const systemPrompt = systemPromptFromMessages(messages);
+  const prompt = buildCliPrompt(messages, {
+    providerName: "Claude Code CLI",
+    systemInPrompt: false
+  });
+  const { stdout } = await runCliCommand(
+    command,
+    [
+      "-p",
+      "--append-system-prompt",
+      systemPrompt,
+      "--permission-mode",
+      "plan",
+      "--disallowedTools",
+      "Edit",
+      "MultiEdit",
+      "Write",
+      "NotebookEdit",
+      "--output-format",
+      "text",
+      prompt
+    ],
+    {
+      cwd,
+      timeout: 120000,
+      maxBuffer: 1024 * 1024 * 4
     }
-  };
+  );
+  return stdout.trim();
+}
+
+function resolveCliCommand(config: ProviderConfig, fallback: string): string {
+  return config.model.trim() || fallback;
+}
+
+function systemPromptFromMessages(messages: PromptMessage[]): string {
+  return messages
+    .filter((message) => message.role === "system")
+    .map((message) => message.content)
+    .join("\n\n")
+    .trim();
+}
+
+function buildCliPrompt(messages: PromptMessage[], options: { providerName: string; systemInPrompt: boolean }): string {
+  const system = systemPromptFromMessages(messages);
+  const conversation = messages
+    .filter((message) => options.systemInPrompt || message.role !== "system")
+    .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
+    .join("\n\n");
+  return [
+    `GraphCode ${options.providerName} account-plan invocation.`,
+    "Use the GraphCode role/mode instructions as the active skill for this run.",
+    options.systemInPrompt && system ? `GraphCode skill instructions:\n${system}` : "",
+    "Do not edit, write, or apply files directly. Return the requested GraphCode response only so the app can store, review, and apply proposals.",
+    "For coding runs, return a clean unified diff and append GRAPHCODE_TEST_ARTIFACTS_JSON only when test artifacts are proposed. For scanning runs, return strict JSON only.",
+    conversation
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function runCliCommand(
+  command: string,
+  args: string[],
+  options: { cwd: string; input?: string; timeout: number; maxBuffer: number }
+): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      stdio: ["pipe", "pipe", "pipe"]
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    const finish = (error: Error | null, result?: { stdout: string; stderr: string }) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimeout(timer);
+      if (error) {
+        reject(error);
+      } else {
+        resolve(result ?? { stdout, stderr });
+      }
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(new Error(`${command} timed out after ${options.timeout}ms.`));
+    }, options.timeout);
+    child.on("error", (error) => finish(error));
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+      if (stdout.length + stderr.length > options.maxBuffer) {
+        child.kill("SIGTERM");
+        finish(new Error(`${command} produced more than ${options.maxBuffer} bytes of output.`));
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+      if (stdout.length + stderr.length > options.maxBuffer) {
+        child.kill("SIGTERM");
+        finish(new Error(`${command} produced more than ${options.maxBuffer} bytes of output.`));
+      }
+    });
+    child.on("close", (code, signal) => {
+      if (code === 0) {
+        finish(null, { stdout, stderr });
+        return;
+      }
+      const detail = stderr.trim() || stdout.trim() || (signal ? `signal ${signal}` : `exit code ${code}`);
+      finish(new Error(`${command} failed: ${detail}`));
+    });
+    child.stdin.end(options.input ?? "");
+  });
 }
 
 async function invokeChatModel(model: { invoke: (messages: Array<SystemMessage | HumanMessage | AIMessage>) => Promise<unknown> }, messages: PromptMessage[]): Promise<string> {

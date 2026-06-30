@@ -171,7 +171,7 @@ const CODING_AGENT_SETTINGS_SQL = `
   CREATE TABLE coding_agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     coding_mode TEXT NOT NULL CHECK (coding_mode IN ('small', 'medium', 'large')),
-    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
     model TEXT NOT NULL DEFAULT '',
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
@@ -188,7 +188,7 @@ const REVIEW_AGENT_SETTINGS_SQL = `
   CREATE TABLE review_agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     review_mode TEXT NOT NULL CHECK (review_mode IN ('small', 'medium', 'large')),
-    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
     model TEXT NOT NULL DEFAULT '',
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
@@ -205,7 +205,7 @@ const SCANNING_AGENT_SETTINGS_SQL = `
   CREATE TABLE scanning_agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     scanning_mode TEXT NOT NULL CHECK (scanning_mode IN ('local', 'medium', 'global')),
-    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
     model TEXT NOT NULL DEFAULT '',
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
@@ -215,6 +215,23 @@ const SCANNING_AGENT_SETTINGS_SQL = `
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (project_id, scanning_mode)
+  );
+`;
+
+const AGENT_SETTINGS_SQL = `
+  CREATE TABLE agent_settings (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    model TEXT NOT NULL DEFAULT '',
+    parallel_limit INTEGER NOT NULL DEFAULT 4,
+    api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
+    api_key_source_value TEXT NOT NULL DEFAULT '',
+    system_prompt_source_type TEXT NOT NULL DEFAULT 'manual' CHECK (system_prompt_source_type IN ('manual', 'file')),
+    system_prompt_source_value TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, agent_kind)
   );
 `;
 
@@ -449,20 +466,7 @@ export function migrate(db: GraphDatabase): void {
 
     ${WORKSPACE_EXTENSION_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
-    CREATE TABLE IF NOT EXISTS agent_settings (
-      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-      agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
-      provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter')),
-      model TEXT NOT NULL DEFAULT '',
-      parallel_limit INTEGER NOT NULL DEFAULT 4,
-      api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
-      api_key_source_value TEXT NOT NULL DEFAULT '',
-      system_prompt_source_type TEXT NOT NULL DEFAULT 'manual' CHECK (system_prompt_source_type IN ('manual', 'file')),
-      system_prompt_source_value TEXT NOT NULL DEFAULT '',
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY (project_id, agent_kind)
-    );
+    ${AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
     ${CODING_AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
     ${REVIEW_AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
@@ -551,6 +555,7 @@ export function migrate(db: GraphDatabase): void {
   `);
   ensureWorkspaceSettingsTable(db);
   ensureWorkspaceExtensionSettingsTable(db);
+  ensureAgentSettingsTable(db);
     ensureCodingAgentSettingsTable(db);
     ensureReviewAgentSettingsTable(db);
     ensureScanningAgentSettingsTable(db);
@@ -608,21 +613,30 @@ function ensureWorkspaceExtensionSettingsTable(db: GraphDatabase): void {
   }
 }
 
+function ensureAgentSettingsTable(db: GraphDatabase): void {
+  ensureProviderSettingsTable(db, "agent_settings", AGENT_SETTINGS_SQL);
+}
+
 function ensureCodingAgentSettingsTable(db: GraphDatabase): void {
-  if (!getTableSql(db, "coding_agent_settings")) {
-    db.exec(CODING_AGENT_SETTINGS_SQL);
-  }
+  ensureProviderSettingsTable(db, "coding_agent_settings", CODING_AGENT_SETTINGS_SQL);
 }
 
 function ensureReviewAgentSettingsTable(db: GraphDatabase): void {
-  if (!getTableSql(db, "review_agent_settings")) {
-    db.exec(REVIEW_AGENT_SETTINGS_SQL);
-  }
+  ensureProviderSettingsTable(db, "review_agent_settings", REVIEW_AGENT_SETTINGS_SQL);
 }
 
 function ensureScanningAgentSettingsTable(db: GraphDatabase): void {
-  if (!getTableSql(db, "scanning_agent_settings")) {
-    db.exec(SCANNING_AGENT_SETTINGS_SQL);
+  ensureProviderSettingsTable(db, "scanning_agent_settings", SCANNING_AGENT_SETTINGS_SQL);
+}
+
+function ensureProviderSettingsTable(db: GraphDatabase, tableName: string, createSql: string): void {
+  const sql = getTableSql(db, tableName);
+  if (!sql) {
+    db.exec(createSql);
+    return;
+  }
+  if (!sql.includes("'codex'")) {
+    rebuildProviderSettingsTable(db, tableName, createSql);
   }
 }
 
@@ -979,6 +993,39 @@ function resetGraphStorage(db: GraphDatabase): void {
       ${CODING_WORKFLOWS_SQL}
       ${CODING_WORKFLOW_ITEMS_SQL}
     `);
+  db.pragma("foreign_keys = ON");
+}
+
+function rebuildProviderSettingsTable(db: GraphDatabase, tableName: string, createSql: string): void {
+  const keyColumnByTable: Record<string, string> = {
+    agent_settings: "agent_kind",
+    coding_agent_settings: "coding_mode",
+    review_agent_settings: "review_mode",
+    scanning_agent_settings: "scanning_mode"
+  };
+  const keyColumn = keyColumnByTable[tableName];
+  if (!keyColumn) {
+    return;
+  }
+  const oldTableName = `${tableName}_old`;
+  db.pragma("foreign_keys = OFF");
+  db.exec(`
+    ALTER TABLE ${tableName} RENAME TO ${oldTableName};
+    ${createSql}
+    INSERT INTO ${tableName} (
+      project_id, ${keyColumn}, provider, model, parallel_limit,
+      api_key_source_type, api_key_source_value,
+      system_prompt_source_type, system_prompt_source_value,
+      created_at, updated_at
+    )
+    SELECT
+      project_id, ${keyColumn}, provider, model, parallel_limit,
+      api_key_source_type, api_key_source_value,
+      system_prompt_source_type, system_prompt_source_value,
+      created_at, updated_at
+    FROM ${oldTableName};
+    DROP TABLE ${oldTableName};
+  `);
   db.pragma("foreign_keys = ON");
 }
 

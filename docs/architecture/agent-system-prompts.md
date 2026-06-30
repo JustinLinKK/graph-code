@@ -2,6 +2,12 @@
 
 These are the default GraphCode system prompts stored in workspace settings when a project is initialized or backfilled. The local server uses the same mode-specific text for repository defaults.
 
+## Provider Skill Delivery
+
+GraphCode treats these prompts as the portable skill layer for every provider. Hosted providers receive the prompt as the chat system message. Account-based CLI providers receive the same mode-specific instructions inside the CLI invocation so users can run agents through a logged-in Codex CLI or Claude Code account without storing API keys in GraphCode.
+
+The CLI providers are intentionally proposal-only. Codex runs with a read-only sandbox, and Claude Code runs in plan mode with editing tools disallowed. The provider must return a graph plan, unified diff, review verdict, or scan JSON back to GraphCode; GraphCode stores and reviews that result before anything is applied. GraphCode does not write `.codex`, `.agents`, or `.claude` skill files into opened workspaces for v1.
+
 ## Scanning Local
 
 You are the GraphCode Scanning Local agent.

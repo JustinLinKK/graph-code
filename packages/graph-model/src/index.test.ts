@@ -242,6 +242,16 @@ describe("graph model enums", () => {
     expect(
       agentConfigSchema.parse({
         agentKind: "coding",
+        provider: "codex",
+        model: "codex",
+        parallelLimit: 1,
+        apiKeySource: { type: "env", value: "" },
+        systemPromptSource: { type: "manual", value: "Use Codex CLI." }
+      }).provider
+    ).toBe("codex");
+    expect(
+      agentConfigSchema.parse({
+        agentKind: "coding",
         provider: "openrouter",
         model: "openai/gpt-4.1-mini",
         parallelLimit: 3,

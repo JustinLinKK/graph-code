@@ -478,6 +478,146 @@ describe("SQLite graph repository", () => {
     legacyDb.close();
   });
 
+  it("migrates provider checks while preserving settings and allowing Codex CLI", () => {
+    const dbPath = path.join(os.tmpdir(), `graphcode-provider-check-${crypto.randomUUID()}.sqlite`);
+    const oldDb = openDatabase(dbPath);
+    const providerCheck = "CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter'))";
+    oldDb.exec(`
+      CREATE TABLE projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO projects (id, name, root_path) VALUES ('provider-project', 'Provider Project', '/tmp/provider-project');
+      CREATE TABLE agent_settings (
+        project_id TEXT NOT NULL,
+        agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
+        provider TEXT NOT NULL DEFAULT 'fake' ${providerCheck},
+        model TEXT NOT NULL DEFAULT '',
+        parallel_limit INTEGER NOT NULL DEFAULT 4,
+        api_key_source_type TEXT NOT NULL DEFAULT 'env',
+        api_key_source_value TEXT NOT NULL DEFAULT '',
+        system_prompt_source_type TEXT NOT NULL DEFAULT 'manual',
+        system_prompt_source_value TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (project_id, agent_kind)
+      );
+      CREATE TABLE coding_agent_settings (
+        project_id TEXT NOT NULL,
+        coding_mode TEXT NOT NULL CHECK (coding_mode IN ('small', 'medium', 'large')),
+        provider TEXT NOT NULL DEFAULT 'fake' ${providerCheck},
+        model TEXT NOT NULL DEFAULT '',
+        parallel_limit INTEGER NOT NULL DEFAULT 4,
+        api_key_source_type TEXT NOT NULL DEFAULT 'env',
+        api_key_source_value TEXT NOT NULL DEFAULT '',
+        system_prompt_source_type TEXT NOT NULL DEFAULT 'manual',
+        system_prompt_source_value TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (project_id, coding_mode)
+      );
+      CREATE TABLE review_agent_settings (
+        project_id TEXT NOT NULL,
+        review_mode TEXT NOT NULL CHECK (review_mode IN ('small', 'medium', 'large')),
+        provider TEXT NOT NULL DEFAULT 'fake' ${providerCheck},
+        model TEXT NOT NULL DEFAULT '',
+        parallel_limit INTEGER NOT NULL DEFAULT 4,
+        api_key_source_type TEXT NOT NULL DEFAULT 'env',
+        api_key_source_value TEXT NOT NULL DEFAULT '',
+        system_prompt_source_type TEXT NOT NULL DEFAULT 'manual',
+        system_prompt_source_value TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (project_id, review_mode)
+      );
+      CREATE TABLE scanning_agent_settings (
+        project_id TEXT NOT NULL,
+        scanning_mode TEXT NOT NULL CHECK (scanning_mode IN ('local', 'medium', 'global')),
+        provider TEXT NOT NULL DEFAULT 'fake' ${providerCheck},
+        model TEXT NOT NULL DEFAULT '',
+        parallel_limit INTEGER NOT NULL DEFAULT 4,
+        api_key_source_type TEXT NOT NULL DEFAULT 'env',
+        api_key_source_value TEXT NOT NULL DEFAULT '',
+        system_prompt_source_type TEXT NOT NULL DEFAULT 'manual',
+        system_prompt_source_value TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (project_id, scanning_mode)
+      );
+      INSERT INTO agent_settings (project_id, agent_kind, provider, model, parallel_limit, system_prompt_source_value)
+      VALUES ('provider-project', 'planning', 'openai', 'planner', 2, 'Plan');
+      INSERT INTO coding_agent_settings (project_id, coding_mode, provider, model, parallel_limit, system_prompt_source_value)
+      VALUES ('provider-project', 'small', 'openai', 'coder', 2, 'Code');
+      INSERT INTO review_agent_settings (project_id, review_mode, provider, model, parallel_limit, system_prompt_source_value)
+      VALUES ('provider-project', 'small', 'openai', 'reviewer', 1, 'Review');
+      INSERT INTO scanning_agent_settings (project_id, scanning_mode, provider, model, parallel_limit, system_prompt_source_value)
+      VALUES ('provider-project', 'local', 'openai', 'scanner', 4, 'Scan');
+    `);
+
+    migrate(oldDb);
+    const oldRepo = new GraphRepository(oldDb);
+    expect(oldRepo.getAgentConfig("provider-project", "planning").model).toBe("planner");
+    expect(
+      (oldDb.prepare("SELECT sql FROM sqlite_master WHERE name = 'coding_agent_settings'").get() as { sql: string }).sql
+    ).toContain("'codex'");
+
+    expect(() =>
+      oldRepo.saveWorkspaceSettings("provider-project", {
+        general: { theme: "system" },
+        github: { enabled: false, repository: "", clientId: "" },
+        automation: { autoReviewAfterCoding: true },
+        agents: [
+          {
+            agentKind: "planning",
+            provider: "codex",
+            model: "codex",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Plan with Codex." }
+          }
+        ],
+        codingAgents: [
+          {
+            mode: "small",
+            provider: "codex",
+            model: "codex",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Code with Codex." }
+          }
+        ],
+        reviewAgents: [
+          {
+            mode: "small",
+            provider: "codex",
+            model: "codex",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Review with Codex." }
+          }
+        ],
+        scanningAgents: [
+          {
+            mode: "local",
+            provider: "codex",
+            model: "codex",
+            parallelLimit: 1,
+            apiKeySource: { type: "env", value: "" },
+            systemPromptSource: { type: "manual", value: "Scan with Codex." }
+          }
+        ]
+      })
+    ).not.toThrow();
+    expect(oldRepo.getCodingAgentConfig("provider-project", "small").provider).toBe("codex");
+    expect(oldRepo.getReviewAgentConfig("provider-project", "small").provider).toBe("codex");
+    expect(oldRepo.getScanningAgentConfig("provider-project", "local").provider).toBe("codex");
+
+    oldDb.close();
+  });
+
   it("persists scan file state and source evidence while cleaning generated rows incrementally", () => {
     const project = repo.createProject({ id: "scan-project", name: "Scan Project", rootPath: "/tmp/scan-project" });
     const initialScan: ScanPipelineResult = {

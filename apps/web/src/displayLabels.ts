@@ -17,6 +17,8 @@ export function agentKindLabel(agentKind: AgentKind): string {
 
 export function providerLabel(provider: AgentProvider): string {
   switch (provider) {
+    case "codex":
+      return "Codex CLI";
     case "claudecode":
       return "Claude Code";
     case "openai":

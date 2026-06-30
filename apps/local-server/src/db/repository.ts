@@ -1054,18 +1054,15 @@ export class GraphRepository {
         fieldErrors[`agents.${index}.agentKind`] = "Each agent can only be configured once.";
       }
       seen.add(agent.agentKind);
-      if (!agent.model.trim()) {
+      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
         fieldErrors[`agents.${index}.model`] = "Model is required.";
       }
-      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+      if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
         if (!effectiveApiKeyValue) {
           fieldErrors[`agents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
         } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
           fieldErrors[`agents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
         }
-      }
-      if (agent.provider === "claudecode" && !agent.model.trim()) {
-        fieldErrors[`agents.${index}.model`] = "Claude Code command or model label is required.";
       }
       if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
         fieldErrors[`agents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
@@ -1099,18 +1096,15 @@ export class GraphRepository {
         fieldErrors[`codingAgents.${index}.mode`] = "Each coding mode can only be configured once.";
       }
       seenCodingModes.add(agent.mode);
-      if (!agent.model.trim()) {
+      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
         fieldErrors[`codingAgents.${index}.model`] = "Model is required.";
       }
-      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+      if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
         if (!effectiveApiKeyValue) {
           fieldErrors[`codingAgents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
         } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
           fieldErrors[`codingAgents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
         }
-      }
-      if (agent.provider === "claudecode" && !agent.model.trim()) {
-        fieldErrors[`codingAgents.${index}.model`] = "Claude Code command or model label is required.";
       }
       if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
         fieldErrors[`codingAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
@@ -1128,18 +1122,15 @@ export class GraphRepository {
         fieldErrors[`reviewAgents.${index}.mode`] = "Each review mode can only be configured once.";
       }
       seenReviewModes.add(agent.mode);
-      if (!agent.model.trim()) {
+      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
         fieldErrors[`reviewAgents.${index}.model`] = "Model is required.";
       }
-      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+      if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
         if (!effectiveApiKeyValue) {
           fieldErrors[`reviewAgents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
         } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
           fieldErrors[`reviewAgents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
         }
-      }
-      if (agent.provider === "claudecode" && !agent.model.trim()) {
-        fieldErrors[`reviewAgents.${index}.model`] = "Claude Code command or model label is required.";
       }
       if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
         fieldErrors[`reviewAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
@@ -1157,18 +1148,15 @@ export class GraphRepository {
         fieldErrors[`scanningAgents.${index}.mode`] = "Each scanning mode can only be configured once.";
       }
       seenScanningModes.add(agent.mode);
-      if (!agent.model.trim()) {
+      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
         fieldErrors[`scanningAgents.${index}.model`] = "Model is required.";
       }
-      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+      if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
         if (!effectiveApiKeyValue) {
           fieldErrors[`scanningAgents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
         } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
           fieldErrors[`scanningAgents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
         }
-      }
-      if (agent.provider === "claudecode" && !agent.model.trim()) {
-        fieldErrors[`scanningAgents.${index}.model`] = "Claude Code command or model label is required.";
       }
       if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
         fieldErrors[`scanningAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
@@ -7225,6 +7213,10 @@ function normalizeExtensionDetailPayload(
 
 function hashId(value: string): string {
   return crypto.createHash("sha1").update(value).digest("hex").slice(0, 10);
+}
+
+function isCliAgentProvider(provider: string): boolean {
+  return provider === "codex" || provider === "claudecode";
 }
 
 export function notFound(message: string): Error & { statusCode: number } {

@@ -600,7 +600,7 @@ const defaultSettings = {
   automation: { autoReviewAfterCoding: true },
   extensions: {
     availablePackages: AVAILABLE_EXTENSION_PACKAGES,
-    enabledPackageIds: ["@graphcode/extension-ml-pipeline"],
+    enabledPackageIds: [],
     configs: {}
   },
   agents: ["planning", "review", "scanning"].map((agentKind) => ({
@@ -1728,7 +1728,9 @@ describe("GraphCode app shell", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /Extensions/i }));
     expect(screen.getByRole("heading", { name: "ML Pipeline" })).toBeInTheDocument();
-    fireEvent.click(within(screen.getByRole("heading", { name: "ML Pipeline" }).closest(".agent-settings-card") as HTMLElement).getByLabelText("Enabled"));
+    const mlPipelineEnabled = within(screen.getByRole("heading", { name: "ML Pipeline" }).closest(".agent-settings-card") as HTMLElement).getByLabelText("Enabled");
+    fireEvent.click(mlPipelineEnabled);
+    expect(mlPipelineEnabled).toBeChecked();
 
     fireEvent.click(screen.getByRole("button", { name: /GitHub/i }));
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
@@ -1754,6 +1756,21 @@ describe("GraphCode app shell", () => {
       expect(JSON.parse(String(settingsCall?.[1]?.body)).scanningAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
       expect(JSON.parse(String(settingsCall?.[1]?.body)).extensions.enabledPackageIds).toEqual(["@graphcode/extension-ml-pipeline"]);
     });
+
+  it("shows account-based CLI providers without API key entry", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByLabelText("Settings"));
+    fireEvent.click(await screen.findByRole("button", { name: /Agents/i }));
+    const planningCard = screen.getByRole("heading", { name: "Planning" }).closest(".agent-settings-card") as HTMLElement;
+    const providerSelect = within(planningCard).getByLabelText("Provider");
+
+    fireEvent.change(providerSelect, { target: { value: "codex" } });
+
+    expect(within(planningCard).getByLabelText("CLI Command")).toHaveValue("codex");
+    expect(within(planningCard).getByLabelText("API Key Source")).toBeDisabled();
+    expect(within(planningCard).getByText(/logged-in Codex CLI account/i)).toBeInTheDocument();
+  });
 
   it("shows scanning runs in the activity feed", async () => {
     render(<App />);
