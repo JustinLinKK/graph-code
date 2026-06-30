@@ -3,6 +3,7 @@ import {
   agentConfigSchema,
   agentRunSchema,
   agentStatusSchema,
+  blankWorkspaceInitializationSchema,
   boundaryMutationSchema,
   edgeMutationSchema,
   graphPatchSchema,
@@ -23,7 +24,11 @@ import {
   processKindSchema,
   tagAssignmentSchema,
   nodeTypeStyleSchema,
+  openWorkspaceSchema,
+  projectSchema,
+  scanningAgentRequestSchema,
   settingsValidationResultSchema,
+  workspaceInitializationSchema,
   workspaceSettingsSchema,
   workspaceSettingsMutationSchema
 } from "./index";
@@ -243,6 +248,63 @@ describe("graph model enums", () => {
         updatedAt: "now"
       }).status
     ).toBe("succeeded");
+  });
+
+  it("requires first-run workspace initialization context", () => {
+    const initialization = workspaceInitializationSchema.parse({
+      projectName: "  Compiler Explorer  ",
+      projectDescription: "Maps the frontend, API, and execution backends.",
+      scanningInstructions: "Group by user-visible workflow first, then by package ownership."
+    });
+
+    expect(initialization.projectName).toBe("Compiler Explorer");
+    expect(() =>
+      workspaceInitializationSchema.parse({
+        projectName: "",
+        projectDescription: "Has a description",
+        scanningInstructions: "Has instructions"
+      })
+    ).toThrow();
+    expect(
+      openWorkspaceSchema.parse({
+        rootPath: "/tmp/project",
+        createIfMissing: true,
+        creationMode: "scan",
+        initialization
+      }).initialization?.scanningInstructions
+    ).toContain("workflow");
+    expect(
+      openWorkspaceSchema.parse({
+        rootPath: "/tmp/project",
+        createIfMissing: true,
+        creationMode: "blank",
+        initialization: blankWorkspaceInitializationSchema.parse({
+          projectName: "Blank Project"
+        })
+      }).creationMode
+    ).toBe("blank");
+  });
+
+  it("accepts project metadata and scanner request context", () => {
+    expect(
+      projectSchema.parse({
+        id: "project",
+        name: "Project",
+        rootPath: "/tmp/project",
+        description: "A source workspace.",
+        scanningInstructions: "Show architecture boundaries.",
+        createdAt: "now",
+        updatedAt: "now"
+      }).scanningInstructions
+    ).toContain("architecture");
+    expect(
+      scanningAgentRequestSchema.parse({
+        projectId: "project",
+        rootPath: "/tmp/project",
+        projectDescription: "A source workspace.",
+        scanningInstructions: "Show architecture boundaries."
+      }).projectDescription
+    ).toContain("source");
   });
 
   it("accepts graph patches and status updates", () => {

@@ -275,7 +275,7 @@ describe("SQLite graph repository", () => {
     });
     const result = repo.replaceScannedCodeGraph(project.id, scanRepositoryCodeGraph(rootPath));
     const hierarchy = flattenHierarchy(repo.getHierarchy(project.id));
-    const codeRoot = hierarchy.find((node) => node.name === "Code Graph");
+    const codeRoot = hierarchy.find((node) => node.name === "graph-code Code Graph");
     const mathFile = hierarchy.find((node) => node.name === "math.ts");
     const add = hierarchy.find((node) => node.name === "add");
     const outer = hierarchy.find((node) => node.name === "outer");
@@ -287,7 +287,9 @@ describe("SQLite graph repository", () => {
     expect(result.workflowNodeCount).toBeGreaterThan(0);
     expect(staleScans.count).toBe(0);
     expect(codeRoot?.parentId).toBe("framework-graphcode-self");
-    expect(hierarchy.map((node) => node.name)).toEqual(expect.arrayContaining(["Code Graph", "src", "math.ts", "add", "double", "outer", "inner"]));
+    expect(hierarchy.map((node) => node.name)).toEqual(
+      expect.arrayContaining(["graph-code Code Graph", "src", "math.ts", "add", "double", "outer", "inner"])
+    );
     expect(inner?.parentId).toBe(outer?.id);
     expect(hierarchy.every((node) => ["framework", "module", "website", "ui_component", "function", "object"].includes(node.kind))).toBe(true);
 

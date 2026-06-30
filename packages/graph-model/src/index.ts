@@ -71,6 +71,7 @@ export const SETTINGS_THEME_MODES = ["light", "dark", "system"] as const;
 export const SECRET_SOURCE_TYPES = ["manual", "file", "env"] as const;
 export const PROMPT_SOURCE_TYPES = ["manual", "file"] as const;
 export const GRAPH_PATCH_ENTITY_TYPES = ["node", "edge", "boundary"] as const;
+export const WORKSPACE_CREATION_MODES = ["scan", "blank"] as const;
 
 export const graphNodeKindSchema = z.enum(GRAPH_NODE_KINDS);
 export const domainNodeKindSchema = z.enum(DOMAIN_NODE_KINDS);
@@ -94,6 +95,7 @@ export const settingsThemeModeSchema = z.enum(SETTINGS_THEME_MODES);
 export const secretSourceTypeSchema = z.enum(SECRET_SOURCE_TYPES);
 export const promptSourceTypeSchema = z.enum(PROMPT_SOURCE_TYPES);
 export const graphPatchEntityTypeSchema = z.enum(GRAPH_PATCH_ENTITY_TYPES);
+export const workspaceCreationModeSchema = z.enum(WORKSPACE_CREATION_MODES);
 
 export type GraphNodeKind = z.infer<typeof graphNodeKindSchema>;
 export type DomainNodeKind = z.infer<typeof domainNodeKindSchema>;
@@ -117,6 +119,7 @@ export type SettingsThemeMode = z.infer<typeof settingsThemeModeSchema>;
 export type SecretSourceType = z.infer<typeof secretSourceTypeSchema>;
 export type PromptSourceType = z.infer<typeof promptSourceTypeSchema>;
 export type GraphPatchEntityType = z.infer<typeof graphPatchEntityTypeSchema>;
+export type WorkspaceCreationMode = z.infer<typeof workspaceCreationModeSchema>;
 
 export const positionSchema = z.object({
   x: z.number(),
@@ -184,6 +187,8 @@ export const projectSchema = z.object({
   id: z.string(),
   name: z.string(),
   rootPath: z.string(),
+  description: z.string(),
+  scanningInstructions: z.string(),
   createdAt: z.string(),
   updatedAt: z.string()
 });
@@ -508,9 +513,22 @@ export const reviewAgentRequestSchema = z.object({
   runId: z.string().min(1)
 });
 
+export const workspaceInitializationSchema = z.object({
+  projectName: z.string().trim().min(1),
+  projectDescription: z.string().trim().min(1),
+  scanningInstructions: z.string().trim().min(1)
+});
+
+export const blankWorkspaceInitializationSchema = z.object({
+  projectName: z.string().trim().min(1),
+  projectDescription: z.string().trim().optional().default("")
+});
+
 export const scanningAgentRequestSchema = z.object({
   projectId: z.string().min(1),
-  rootPath: z.string().optional()
+  rootPath: z.string().optional(),
+  projectDescription: z.string().optional(),
+  scanningInstructions: z.string().optional()
 });
 
 export const graphPatchOperationSchema = z.object({
@@ -575,7 +593,9 @@ export const boundaryUpdateSchema = boundaryMutationSchema.partial().extend({
 
 export const openWorkspaceSchema = z.object({
   rootPath: z.string().min(1),
-  createIfMissing: z.boolean().optional()
+  createIfMissing: z.boolean().optional(),
+  creationMode: workspaceCreationModeSchema.optional(),
+  initialization: z.union([workspaceInitializationSchema, blankWorkspaceInitializationSchema]).optional()
 });
 
 export type OpenWorkspaceResult =
@@ -583,15 +603,18 @@ export type OpenWorkspaceResult =
       status: "opened" | "created";
       project: Project;
       graphcodePath: string;
-    }
-  | {
-      status: "missing_graphcode";
-      rootPath: string;
-      graphcodePath: string;
-      message: string;
+	    }
+	  | {
+	      status: "missing_graphcode" | "empty_graphcode";
+	      rootPath: string;
+	      graphcodePath: string;
+	      message: string;
     };
 
 export type Project = z.infer<typeof projectSchema>;
+export type WorkspaceInitialization = z.infer<typeof workspaceInitializationSchema>;
+export type BlankWorkspaceInitialization = z.infer<typeof blankWorkspaceInitializationSchema>;
+export type OpenWorkspaceRequest = z.infer<typeof openWorkspaceSchema>;
 export type GitStatusInfo = z.infer<typeof gitStatusInfoSchema>;
 export type GraphNode = z.infer<typeof graphNodeSchema>;
 export type GraphEdge = z.infer<typeof graphEdgeSchema>;

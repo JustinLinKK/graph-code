@@ -18,6 +18,9 @@ import type {
   NodeMutation,
   NodeUpdate,
   Project,
+  BlankWorkspaceInitialization,
+  WorkspaceCreationMode,
+  WorkspaceInitialization,
   WorkspaceSettings,
   WorkspaceSettingsMutation,
   SettingsValidationResult,
@@ -81,6 +84,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [workspaceDialogOpen, setWorkspaceDialogOpen] = useState(false);
   const [workspaceMissingPath, setWorkspaceMissingPath] = useState<string | null>(null);
+  const [workspaceInitializationStatus, setWorkspaceInitializationStatus] = useState<"missing_graphcode" | "empty_graphcode" | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   const [blockDialogOpen, setBlockDialogOpen] = useState(false);
   const [blockDialogMode, setBlockDialogMode] = useState<"create" | "edit">("create");
@@ -269,31 +273,41 @@ export default function App() {
     }
   }, [loadProject, selectedProjectId]);
 
-  const handleOpenWorkspaceRequest = useCallback(async (rootPath: string, createIfMissing = false) => {
-    setLoading(true);
-    setWorkspaceError(null);
-    setError(null);
-    try {
-      const result = await openWorkspace(rootPath, createIfMissing);
-      if (result.status === "missing_graphcode") {
-        setWorkspaceMissingPath(result.rootPath);
-        setWorkspaceError(result.message);
-        setWorkspaceDialogOpen(true);
-        return;
-      }
-      setWorkspaceMissingPath(null);
-      setWorkspaceDialogOpen(false);
-      setProjects([result.project]);
-      setSelectedProjectId(result.project.id);
-      undoStackRef.current = [];
-      setUndoStack([]);
-      await loadProject(result.project.id);
-    } catch (loadError) {
-      setWorkspaceError(loadError instanceof Error ? loadError.message : "Failed to open workspace.");
-    } finally {
-      setLoading(false);
-    }
-  }, [loadProject]);
+  const handleOpenWorkspaceRequest = useCallback(
+    async (
+      rootPath: string,
+      createIfMissing = false,
+	      initialization?: WorkspaceInitialization | BlankWorkspaceInitialization,
+	      creationMode?: WorkspaceCreationMode
+	    ) => {
+	      setLoading(true);
+	      setWorkspaceError(null);
+	      setError(null);
+	      try {
+	        const result = await openWorkspace(rootPath, createIfMissing, initialization, creationMode);
+	        if (!("project" in result)) {
+	          setWorkspaceMissingPath(result.rootPath);
+	          setWorkspaceInitializationStatus(result.status);
+	          setWorkspaceError(null);
+	          setWorkspaceDialogOpen(true);
+	          return;
+	        }
+	        setWorkspaceMissingPath(null);
+	        setWorkspaceInitializationStatus(null);
+	        setWorkspaceDialogOpen(false);
+	        setProjects([result.project]);
+	        setSelectedProjectId(result.project.id);
+	        undoStackRef.current = [];
+	        setUndoStack([]);
+	        await loadProject(result.project.id);
+	      } catch (loadError) {
+	        setWorkspaceError(loadError instanceof Error ? loadError.message : "Failed to open workspace.");
+	      } finally {
+	        setLoading(false);
+	      }
+	    },
+    [loadProject]
+  );
 
   const handleAddNode = useCallback(() => {
     setBlockDialogMode("create");
@@ -1243,14 +1257,18 @@ export default function App() {
     }
     setAgentBusy(true);
     try {
-      await runScanningAgent({ projectId: selectedProjectId });
+      await runScanningAgent({
+        projectId: selectedProjectId,
+        projectDescription: selectedProject?.description,
+        scanningInstructions: selectedProject?.scanningInstructions
+      });
       await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId);
     } catch (agentError) {
       setError(agentError instanceof Error ? agentError.message : "Scanning agent failed.");
     } finally {
       setAgentBusy(false);
     }
-  }, [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]);
+  }, [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProject?.description, selectedProject?.scanningInstructions, selectedProjectId]);
 
   useEffect(() => {
     void refreshAgentState();
@@ -1339,9 +1357,16 @@ export default function App() {
         loading={loading}
         missingPath={workspaceMissingPath}
         error={workspaceError}
-        onClose={() => setWorkspaceDialogOpen(false)}
+        onClose={() => {
+          setWorkspaceDialogOpen(false);
+          setWorkspaceMissingPath(null);
+          setWorkspaceInitializationStatus(null);
+          setWorkspaceError(null);
+        }}
         onOpen={(rootPath) => void handleOpenWorkspaceRequest(rootPath, false)}
-        onCreateBlank={(rootPath) => void handleOpenWorkspaceRequest(rootPath, true)}
+        initializationStatus={workspaceInitializationStatus}
+        onCreateBlank={(rootPath, initialization) => void handleOpenWorkspaceRequest(rootPath, true, initialization, "blank")}
+        onCreateAndScan={(rootPath, initialization) => void handleOpenWorkspaceRequest(rootPath, true, initialization, "scan")}
       />
       <BlockEditorDialog
         open={blockDialogOpen}

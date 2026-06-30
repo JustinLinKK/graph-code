@@ -432,9 +432,10 @@ describe("graph API routes", () => {
     expect(response.json().id).toBe("graphcode-self");
   });
 
-  it("opens a workspace only after .graphcode exists or blank creation is accepted", async () => {
+  it("opens a workspace only after .graphcode exists or first-run scanning context is accepted", async () => {
     const rootPath = path.join(os.tmpdir(), `graphcode-workspace-${crypto.randomUUID()}`);
-    await fs.promises.mkdir(rootPath, { recursive: true });
+    await fs.promises.mkdir(path.join(rootPath, "src"), { recursive: true });
+    await fs.promises.writeFile(path.join(rootPath, "src", "scanned.ts"), "export function scannedRoute(): string { return 'ok'; }\n");
 
     const missingResponse = await app.inject({
       method: "POST",
@@ -444,17 +445,102 @@ describe("graph API routes", () => {
     expect(missingResponse.statusCode).toBe(409);
     expect(missingResponse.json().status).toBe("missing_graphcode");
 
-    const createResponse = await app.inject({
+    const rejectedCreateResponse = await app.inject({
       method: "POST",
       url: "/api/workspaces/open",
       payload: { rootPath, createIfMissing: true }
     });
+    expect(rejectedCreateResponse.statusCode).toBe(400);
+    expect(rejectedCreateResponse.json().message).toContain("Project name");
+
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/api/workspaces/open",
+      payload: {
+        rootPath,
+        createIfMissing: true,
+        creationMode: "scan",
+        initialization: {
+          projectName: "Route Workspace",
+          projectDescription: "A route-level project used to verify first-run initialization.",
+          scanningInstructions: "Group by API route and source file."
+        }
+      }
+    });
     expect(createResponse.statusCode).toBe(200);
     expect(createResponse.json().status).toBe("created");
+    expect(createResponse.json().project).toEqual(
+      expect.objectContaining({
+        name: "Route Workspace",
+        description: "A route-level project used to verify first-run initialization.",
+        scanningInstructions: "Group by API route and source file."
+      })
+    );
     expect(await fileExists(path.join(rootPath, ".graphcode", "graphcode.sqlite"))).toBe(true);
+    const manifest = JSON.parse(await fs.promises.readFile(path.join(rootPath, ".graphcode", "workspace.json"), "utf8"));
+    expect(manifest).toEqual(
+      expect.objectContaining({
+        projectName: "Route Workspace",
+        projectDescription: "A route-level project used to verify first-run initialization.",
+        scanningInstructions: "Group by API route and source file."
+      })
+    );
+
+    const projectId = createResponse.json().project.id;
+    const hierarchyResponse = await app.inject({ method: "GET", url: `/api/projects/${projectId}/hierarchy` });
+    expect(hierarchyResponse.statusCode).toBe(200);
+    const hierarchyText = JSON.stringify(hierarchyResponse.json());
+    expect(hierarchyText).toContain("Route Workspace Code Graph");
+    expect(hierarchyText).toContain("scanned.ts");
+
+    const scanResponse = await app.inject({
+      method: "POST",
+      url: "/api/agents/scanning",
+      payload: { projectId }
+    });
+    expect(scanResponse.statusCode).toBe(200);
+    const runsResponse = await app.inject({ method: "GET", url: `/api/projects/${projectId}/agent-runs` });
+    expect(JSON.stringify(runsResponse.json())).toContain("route-level project");
+    expect(JSON.stringify(runsResponse.json())).toContain("Group by API route");
+
+    const existingRootPath = path.join(os.tmpdir(), `graphcode-existing-${crypto.randomUUID()}`);
+    await fs.promises.mkdir(path.join(existingRootPath, ".graphcode"), { recursive: true });
+    const existingResponse = await app.inject({
+      method: "POST",
+      url: "/api/workspaces/open",
+      payload: { rootPath: existingRootPath }
+    });
+    expect(existingResponse.statusCode).toBe(409);
+    expect(existingResponse.json().status).toBe("empty_graphcode");
+
+    const blankResponse = await app.inject({
+      method: "POST",
+      url: "/api/workspaces/open",
+      payload: {
+        rootPath: existingRootPath,
+        createIfMissing: true,
+        creationMode: "blank",
+        initialization: {
+          projectName: "Blank Route Workspace",
+          projectDescription: "Blank workspace for manual graphing."
+        }
+      }
+    });
+    expect(blankResponse.statusCode).toBe(200);
+    expect(blankResponse.json().status).toBe("created");
+    expect(blankResponse.json().project).toEqual(
+      expect.objectContaining({
+        name: "Blank Route Workspace",
+        description: "Blank workspace for manual graphing.",
+        scanningInstructions: ""
+      })
+    );
+    const blankHierarchyResponse = await app.inject({ method: "GET", url: `/api/projects/${blankResponse.json().project.id}/hierarchy` });
+    expect(blankHierarchyResponse.statusCode).toBe(200);
+    expect(blankHierarchyResponse.json()).toEqual([]);
   });
 
-  it("recovers the self workspace graph when its .graphcode database is empty", async () => {
+  it("prompts before initializing an empty self workspace database", async () => {
     await app.close();
     const rootPath = path.join(os.tmpdir(), `graphcode-self-open-${crypto.randomUUID()}`);
     await fs.promises.mkdir(path.join(rootPath, ".graphcode"), { recursive: true });
@@ -468,12 +554,8 @@ describe("graph API routes", () => {
       url: "/api/workspaces/open",
       payload: { rootPath }
     });
-    expect(openResponse.statusCode).toBe(200);
-    expect(openResponse.json().project.id).toBe("graphcode-self");
-
-    const hierarchyResponse = await app.inject({ method: "GET", url: "/api/projects/graphcode-self/hierarchy" });
-    expect(hierarchyResponse.statusCode).toBe(200);
-    expect(JSON.stringify(hierarchyResponse.json())).toContain("Web Workspace");
+    expect(openResponse.statusCode).toBe(409);
+    expect(openResponse.json().status).toBe("empty_graphcode");
   });
 
   it("preserves existing database contents on normal startup", async () => {

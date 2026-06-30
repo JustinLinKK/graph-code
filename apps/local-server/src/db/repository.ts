@@ -74,6 +74,8 @@ type ProjectRow = {
   id: string;
   name: string;
   root_path: string;
+  description: string;
+  scanning_instructions: string;
   created_at: string;
   updated_at: string;
 };
@@ -922,15 +924,19 @@ export class GraphRepository {
     return mapNodeReuse(row);
   }
 
-  createProject(input: { id: string; name: string; rootPath: string }): Project {
+  createProject(input: { id: string; name: string; rootPath: string; description?: string; scanningInstructions?: string }): Project {
     this.db
       .prepare(
         `
-        INSERT INTO projects (id, name, root_path)
-        VALUES (@id, @name, @rootPath)
+        INSERT INTO projects (id, name, root_path, description, scanning_instructions)
+        VALUES (@id, @name, @rootPath, @description, @scanningInstructions)
       `
       )
-      .run(input);
+      .run({
+        ...input,
+        description: input.description ?? "",
+        scanningInstructions: input.scanningInstructions ?? ""
+      });
     return this.getProject(input.id);
   }
 
@@ -1522,7 +1528,7 @@ export class GraphRepository {
   }
 
   replaceScannedCodeGraph(projectId: string, snapshot: CodeGraphSnapshot): CodeGraphRefreshResult {
-    this.getProject(projectId);
+    const project = this.getProject(projectId);
     const save = this.db.transaction(() => {
       this.deleteGeneratedCodeGraph(projectId);
       const frameworkId = this.findOrCreateScanFramework(projectId);
@@ -1540,10 +1546,10 @@ export class GraphRepository {
           id: directory.id,
           projectId,
           kind: "module",
-          name: directory.name,
+          name: isRoot && project.name ? `${project.name} Code Graph` : directory.name,
           summary: isRoot ? "Generated bottom-up code graph" : `Directory ${directory.path}`,
           codeContext: isRoot
-            ? "Generated scanner root that decomposes repository code from directories into file modules and symbols."
+            ? this.scanRootContext(projectId, "Generated scanner root that decomposes repository code from directories into file modules and symbols.")
             : `Generated directory module for ${directory.path}.`,
           codeDirectory: directory.path,
           sourcePath: directory.path,
@@ -3432,7 +3438,7 @@ export class GraphRepository {
       kind: "module",
       name: "Repository Scan",
       summary: "Scanner-generated file map",
-      codeContext: "Container for scanner-generated file blocks.",
+      codeContext: this.scanRootContext(projectId, "Container for scanner-generated file blocks."),
       parentId: frameworkId,
       agentStatus: "implemented"
     }).id;
@@ -3461,9 +3467,20 @@ export class GraphRepository {
       kind: "framework",
       name: project.name || "Scanned Workspace",
       summary: "Scanned repository workspace",
-      codeContext: "Root created by the scanner for a blank workspace.",
+      codeContext: this.scanRootContext(projectId, "Root created by the scanner for a blank workspace."),
       agentStatus: "implemented"
     }).id;
+  }
+
+  private scanRootContext(projectId: string, fallback: string): string {
+    const project = this.getProject(projectId);
+    return [
+      fallback,
+      project.description ? `Project description: ${project.description}` : "",
+      project.scanningInstructions ? `Scanning instructions: ${project.scanningInstructions}` : ""
+    ]
+      .filter(Boolean)
+      .join("\n\n");
   }
 
   private ensureDefaultSettings(projectId: string): void {
@@ -4072,6 +4089,8 @@ function mapProject(row: ProjectRow): Project {
     id: row.id,
     name: row.name,
     rootPath: row.root_path,
+    description: row.description ?? "",
+    scanningInstructions: row.scanning_instructions ?? "",
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };

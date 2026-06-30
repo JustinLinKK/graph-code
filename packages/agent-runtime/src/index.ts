@@ -223,7 +223,7 @@ export async function runReviewAgent(input: ReviewAgentRequest & { diff?: string
 export async function runScanningAgent(input: ScanningAgentRequest, options: AgentRuntimeOptions): Promise<AgentResult> {
   return runLangGraphTask({
     kind: "scanning",
-    prompt: input.rootPath ?? input.projectId,
+    prompt: scanningPrompt(input),
     execute: async () => {
       const result = await options.toolbox.refreshCodeGraph(input.projectId, input.rootPath);
       return {
@@ -235,6 +235,18 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
       };
     }
   });
+}
+
+function scanningPrompt(input: ScanningAgentRequest): string {
+  return (
+    [
+      input.rootPath ? `Root path: ${input.rootPath}` : `Project: ${input.projectId}`,
+      input.projectDescription ? `Project description:\n${input.projectDescription}` : "",
+      input.scanningInstructions ? `Scanning instructions:\n${input.scanningInstructions}` : ""
+    ]
+      .filter(Boolean)
+      .join("\n\n") || input.projectId
+  );
 }
 
 export const graphDatabaseToolSchemas = {

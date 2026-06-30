@@ -18,6 +18,7 @@ import {
   type GitStatusInfo,
   type LanguageType,
   type OpenWorkspaceResult,
+  type OpenWorkspaceRequest,
   type PlanningChatRequest,
   type Project,
   type ReviewAgentRequest,
@@ -257,14 +258,22 @@ export class WorkspaceRuntime {
   }
 
   async runScanning(input: ScanningAgentRequest): Promise<AgentRun> {
+    const project = this.repository.getProject(input.projectId);
+    const enrichedInput = {
+      ...input,
+      projectDescription: input.projectDescription ?? project.description,
+      scanningInstructions: input.scanningInstructions ?? project.scanningInstructions
+    };
+    const prompt = scanningPrompt(enrichedInput);
     const run = this.repository.createAgentRun({
       projectId: input.projectId,
       agentKind: "scanning",
-      prompt: input.rootPath ?? "",
+      prompt,
       status: "running"
     });
+    this.repository.addAgentMessage({ runId: run.id, role: "user", content: prompt });
     return this.finishAgentRun(run, () =>
-      runScanningAgent(input, {
+      runScanningAgent(enrichedInput, {
         config: this.repository.getAgentConfig(input.projectId, "scanning"),
         runId: run.id,
         toolbox: this.createToolbox(input.projectId)
@@ -272,13 +281,14 @@ export class WorkspaceRuntime {
     );
   }
 
-  openWorkspace(input: { rootPath: string; createIfMissing?: boolean }): OpenWorkspaceResult {
+  openWorkspace(input: OpenWorkspaceRequest): OpenWorkspaceResult {
     const rootPath = path.resolve(input.rootPath);
     if (!fs.existsSync(rootPath) || !fs.statSync(rootPath).isDirectory()) {
       throw validationError(`Workspace directory does not exist: ${rootPath}`);
     }
 
     const graphcodePath = path.join(rootPath, ".graphcode");
+    const graphcodeWasMissing = !fs.existsSync(graphcodePath);
     if (!fs.existsSync(graphcodePath)) {
       if (!input.createIfMissing) {
         return {
@@ -293,42 +303,56 @@ export class WorkspaceRuntime {
 
     this.switchDatabase(path.join(graphcodePath, "graphcode.sqlite"));
     const existingProject = this.repository.listProjects()[0] ?? null;
-    const isSelfWorkspace = samePath(rootPath, this.selfRootPath);
-    const shouldSeedSelfGraph =
-      isSelfWorkspace && (!existingProject || this.repository.listProjectNodes(existingProject.id).length === 0);
-    if (shouldSeedSelfGraph) {
-      const project = this.seedSelfGraph();
-      this.writeWorkspaceManifest(graphcodePath, project.id, rootPath);
+
+    if (existingProject) {
+      this.writeWorkspaceManifest(graphcodePath, existingProject, rootPath);
       return {
-        status: existingProject ? "opened" : "created",
-        project,
+        status: "opened",
+        project: existingProject,
         graphcodePath
       };
     }
 
-    const project =
-      existingProject ??
-      this.repository.createProject({
-        id: workspaceProjectId(rootPath),
-        name: path.basename(rootPath) || "Untitled Workspace",
-        rootPath
-      });
+    if (!input.createIfMissing) {
+      return {
+        status: "empty_graphcode",
+        rootPath,
+        graphcodePath,
+        message: "This .graphcode workspace is empty."
+      };
+    }
 
-    this.writeWorkspaceManifest(graphcodePath, project.id, rootPath);
+    const creationMode = input.creationMode ?? "scan";
+    const initialization = normalizeCreationInitialization(input.initialization, creationMode);
+    const project = this.repository.createProject({
+      id: workspaceProjectId(rootPath),
+      name: initialization.projectName,
+      rootPath,
+      description: initialization.projectDescription,
+      scanningInstructions: initialization.scanningInstructions
+    });
+
+    this.writeWorkspaceManifest(graphcodePath, project, rootPath);
+    if (creationMode === "scan") {
+      this.refreshCodeGraph(project.id, rootPath);
+    }
 
     return {
-      status: existingProject ? "opened" : "created",
+      status: "created",
       project,
       graphcodePath
     };
   }
 
-  private writeWorkspaceManifest(graphcodePath: string, projectId: string, rootPath: string): void {
+  private writeWorkspaceManifest(graphcodePath: string, project: Project, rootPath: string): void {
     fs.writeFileSync(
       path.join(graphcodePath, "workspace.json"),
       JSON.stringify(
         {
-          projectId,
+          projectId: project.id,
+          projectName: project.name,
+          projectDescription: project.description,
+          scanningInstructions: project.scanningInstructions,
           rootPath,
           graphcodePath,
           updatedAt: new Date().toISOString()
@@ -501,6 +525,41 @@ export class WorkspaceRuntime {
 function workspaceProjectId(rootPath: string): string {
   const hash = crypto.createHash("sha1").update(rootPath).digest("hex").slice(0, 10);
   return `workspace-${hash}`;
+}
+
+function normalizeCreationInitialization(
+  initialization: OpenWorkspaceRequest["initialization"],
+  creationMode: NonNullable<OpenWorkspaceRequest["creationMode"]>
+): { projectName: string; projectDescription: string; scanningInstructions: string } {
+  if (!initialization?.projectName?.trim()) {
+    throw validationError("Project name is required to create a GraphCode workspace.");
+  }
+  if (creationMode === "scan") {
+    if (!("projectDescription" in initialization) || !initialization.projectDescription.trim() || !("scanningInstructions" in initialization) || !initialization.scanningInstructions.trim()) {
+      throw validationError("Project name, description, and scanning instructions are required to scan a GraphCode workspace.");
+    }
+    return {
+      projectName: initialization.projectName.trim(),
+      projectDescription: initialization.projectDescription.trim(),
+      scanningInstructions: initialization.scanningInstructions.trim()
+    };
+  }
+
+  return {
+    projectName: initialization.projectName.trim(),
+    projectDescription: initialization.projectDescription?.trim() ?? "",
+    scanningInstructions: ""
+  };
+}
+
+function scanningPrompt(input: ScanningAgentRequest): string {
+  return [
+    input.rootPath ? `Root path: ${input.rootPath}` : "",
+    input.projectDescription ? `Project description:\n${input.projectDescription}` : "",
+    input.scanningInstructions ? `Scanning instructions:\n${input.scanningInstructions}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 function hashPath(value: string): string {

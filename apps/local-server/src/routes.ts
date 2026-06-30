@@ -79,7 +79,7 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
   app.post("/api/workspaces/open", async (request, reply) => {
     const body = openWorkspaceSchema.parse(request.body);
     const result = runtime.openWorkspace(body);
-    if (result.status === "missing_graphcode") {
+    if (result.status === "missing_graphcode" || result.status === "empty_graphcode") {
       reply.status(409);
     }
     return result;

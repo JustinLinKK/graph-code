@@ -30,6 +30,9 @@ import type {
   Project,
   ReviewAgentRequest,
   ScanningAgentRequest,
+  BlankWorkspaceInitialization,
+  WorkspaceCreationMode,
+  WorkspaceInitialization,
   WorkspaceSettings,
   WorkspaceSettingsMutation,
   SettingsValidationResult,
@@ -58,13 +61,18 @@ export async function listProjects(): Promise<Project[]> {
   return request<Project[]>("/api/projects");
 }
 
-export async function openWorkspace(rootPath: string, createIfMissing = false): Promise<OpenWorkspaceResult> {
+export async function openWorkspace(
+  rootPath: string,
+  createIfMissing = false,
+  initialization?: WorkspaceInitialization | BlankWorkspaceInitialization,
+  creationMode?: WorkspaceCreationMode
+): Promise<OpenWorkspaceResult> {
   const response = await fetch(`${API_BASE}/api/workspaces/open`, {
     headers: {
       "Content-Type": "application/json"
     },
     method: "POST",
-    body: JSON.stringify({ rootPath, createIfMissing })
+    body: JSON.stringify({ rootPath, createIfMissing, initialization, creationMode })
   });
   if (response.status === 409) {
     return response.json() as Promise<OpenWorkspaceResult>;

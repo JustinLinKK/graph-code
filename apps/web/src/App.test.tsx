@@ -167,6 +167,8 @@ const project: Project = {
   id: "graphcode-self",
   name: "graph-code",
   rootPath: "/home/justin/graph-code",
+  description: "GraphCode self workspace.",
+  scanningInstructions: "Group by package and runtime boundary.",
   createdAt: "now",
   updatedAt: "now"
 };
@@ -620,6 +622,31 @@ describe("GraphCode app shell", () => {
         if (url === "/api/projects/graphcode-self/git-status") {
           return json({ status: "" });
         }
+        if (url === "/api/workspaces/open") {
+          const payload = JSON.parse(String(init?.body ?? "{}"));
+          if (!payload.createIfMissing) {
+            return json(
+              {
+                status: payload.rootPath.includes("empty-graphcode") ? "empty_graphcode" : "missing_graphcode",
+                rootPath: payload.rootPath,
+                graphcodePath: `${payload.rootPath}/.graphcode`,
+                message: payload.rootPath.includes("empty-graphcode") ? "This .graphcode workspace is empty." : "This directory does not contain a .graphcode workspace."
+              },
+              409
+            );
+          }
+          return json({
+            status: "created",
+            graphcodePath: `${payload.rootPath}/.graphcode`,
+            project: {
+              ...project,
+              name: payload.initialization?.projectName ?? "Created Workspace",
+              rootPath: payload.rootPath,
+              description: payload.initialization?.projectDescription ?? "",
+              scanningInstructions: payload.initialization?.scanningInstructions ?? ""
+            }
+          });
+        }
         if (url === "/api/projects/graphcode-self/github/device/start") {
           return json({
             deviceCode: "device-code",
@@ -971,6 +998,82 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     expect(await screen.findByText("Open a workspace to begin")).toBeInTheDocument();
+  });
+
+  it("collects first-run scanning context before creating a missing workspace", async () => {
+    render(<App />);
+
+    await screen.findByTestId("react-flow");
+    fireEvent.click(screen.getByText("Open workspace"));
+    fireEvent.change(screen.getByLabelText("Directory"), { target: { value: "/tmp/new-graphcode-project" } });
+    fireEvent.click(screen.getByText("Open"));
+
+    expect(await screen.findByText("Initialize Workspace")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project name")).toHaveValue("new-graphcode-project"));
+
+    fireEvent.click(screen.getByText("Create and scan"));
+    expect(await screen.findByText("Project name, description, and scanning instructions are required to scan.")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Project description"), {
+      target: { value: "A local project with a CLI, API server, and web UI." }
+    });
+    fireEvent.change(screen.getByLabelText("Scanning instructions"), {
+      target: { value: "Group by runtime boundary and emphasize request/data flow." }
+    });
+    fireEvent.click(screen.getByText("Create and scan"));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/workspaces/open",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            rootPath: "/tmp/new-graphcode-project",
+            createIfMissing: true,
+            initialization: {
+              projectName: "new-graphcode-project",
+              projectDescription: "A local project with a CLI, API server, and web UI.",
+              scanningInstructions: "Group by runtime boundary and emphasize request/data flow."
+            },
+            creationMode: "scan"
+          })
+        })
+      );
+    });
+    expect(await screen.findByText("new-graphcode-project")).toBeInTheDocument();
+  });
+
+  it("can create a blank workspace when .graphcode is empty", async () => {
+    render(<App />);
+
+    await screen.findByTestId("react-flow");
+    fireEvent.click(screen.getByText("Open workspace"));
+    fireEvent.change(screen.getByLabelText("Directory"), { target: { value: "/tmp/empty-graphcode-project" } });
+    fireEvent.click(screen.getByText("Open"));
+
+    expect(await screen.findByText("Initialize Workspace")).toBeInTheDocument();
+    expect(await screen.findByText(".graphcode is empty.")).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByLabelText("Project name")).toHaveValue("empty-graphcode-project"));
+
+    fireEvent.click(screen.getByText("Create blank"));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/workspaces/open",
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            rootPath: "/tmp/empty-graphcode-project",
+            createIfMissing: true,
+            initialization: {
+              projectName: "empty-graphcode-project",
+              projectDescription: ""
+            },
+            creationMode: "blank"
+          })
+        })
+      );
+    });
   });
 
   it("posts a new block from the add block dialog", async () => {
@@ -1369,9 +1472,9 @@ function boundary(input: Partial<GraphBoundary> & { id: string; scopeNodeId: str
   };
 }
 
-function json(body: unknown): Response {
+function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: {
       "Content-Type": "application/json"
     }

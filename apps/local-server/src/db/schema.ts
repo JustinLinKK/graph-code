@@ -179,16 +179,19 @@ const GRAPH_TABLES = [
 export function migrate(db: GraphDatabase): void {
   db.pragma("foreign_keys = ON");
   db.exec(`
-    CREATE TABLE IF NOT EXISTS projects (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL,
-      root_path TEXT NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-  `);
+	    CREATE TABLE IF NOT EXISTS projects (
+	      id TEXT PRIMARY KEY,
+	      name TEXT NOT NULL,
+	      root_path TEXT NOT NULL,
+	      description TEXT NOT NULL DEFAULT '',
+	      scanning_instructions TEXT NOT NULL DEFAULT '',
+	      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+	      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+	    );
+	  `);
+	  ensureProjectsTable(db);
 
-  ensureCustomBlockTypesTable(db);
+	  ensureCustomBlockTypesTable(db);
 
   if (hasBrokenGraphTableReferences(db)) {
     resetGraphStorage(db);
@@ -376,6 +379,18 @@ export function migrate(db: GraphDatabase): void {
   ensureWorkspaceSettingsTable(db);
   ensureGraphStatusHistoryTable(db);
   ensureProcessDetailsTable(db);
+	}
+
+function ensureProjectsTable(db: GraphDatabase): void {
+  if (!getTableSql(db, "projects")) {
+    return;
+  }
+  if (!tableHasColumn(db, "projects", "description")) {
+    db.exec("ALTER TABLE projects ADD COLUMN description TEXT NOT NULL DEFAULT '';");
+  }
+  if (!tableHasColumn(db, "projects", "scanning_instructions")) {
+    db.exec("ALTER TABLE projects ADD COLUMN scanning_instructions TEXT NOT NULL DEFAULT '';");
+  }
 }
 
 function ensureWorkspaceSettingsTable(db: GraphDatabase): void {

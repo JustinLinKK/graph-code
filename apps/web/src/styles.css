@@ -1476,6 +1476,10 @@ select {
   width: min(540px, calc(100vw - 44px));
 }
 
+.workspace-dialog-initialize {
+  width: min(840px, calc(100vw - 44px));
+}
+
 .dialog-title {
   display: flex;
   align-items: flex-start;
