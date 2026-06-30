@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import {
   AGENT_KINDS,
+  AVAILABLE_EXTENSION_PACKAGES,
   type AgentConfig,
   type AgentConfigView,
   type AgentKind,
@@ -36,6 +37,10 @@ import {
   type EdgeMutation,
   type EdgePointingDirection,
   type EdgeUpdate,
+  type ExtensionFieldDefinition,
+  type ExtensionNodeDetails,
+  type ExtensionNodeDetailsMutation,
+  type ExtensionPackageId,
   boundaryMutationSchema,
   boundaryUpdateSchema,
   edgeMutationSchema,
@@ -77,6 +82,10 @@ import {
   type ProcessDetails,
   type ProcessKind,
   type Project,
+  REVIEW_AGENT_MODES,
+  type ReviewAgentConfig,
+  type ReviewAgentConfigView,
+  type ReviewAgentMode,
   SCANNING_AGENT_MODES,
   type ScanningAgentConfig,
   type ScanningAgentConfigView,
@@ -88,15 +97,18 @@ import {
   type WorkspaceSettingsMutation,
   blockExecutionMetadataSchema,
   codeProposalArtifactManifestSchema,
+  extensionNodeDefinitionForKind,
+  extensionPackageForNodeKind,
   isAttachmentNodeKind,
-  isDomainNodeKind
+  isDomainNodeKind,
+  isExtensionNodeKind
 } from "@graphcode/graph-model";
 import type { ScanEdgeDraft, ScanNodeDraft, ScanPipelineResult } from "@graphcode/agent-runtime";
 import { codeGraphId, type CodeGraphSnapshot, type CodeGraphSymbol, type CodeGraphWorkflowNode } from "@graphcode/parser";
 import type { GraphDatabase } from "./connection";
 import { layoutCanvasWithBoundaryGroups } from "../layout/elk";
 
-const ROLE_AGENT_KINDS: AgentKind[] = ["planning", "review", "scanning"];
+const ROLE_AGENT_KINDS: AgentKind[] = ["planning", "scanning"];
 
 type ProjectRow = {
   id: string;
@@ -207,6 +219,18 @@ type CodingAgentSettingsRow = {
   system_prompt_source_value: string;
 };
 
+type ReviewAgentSettingsRow = {
+  project_id: string;
+  review_mode: ReviewAgentMode;
+  provider: ReviewAgentConfig["provider"];
+  model: string;
+  parallel_limit: number;
+  api_key_source_type: ReviewAgentConfig["apiKeySource"]["type"];
+  api_key_source_value: string;
+  system_prompt_source_type: ReviewAgentConfig["systemPromptSource"]["type"];
+  system_prompt_source_value: string;
+};
+
 type ScanningAgentSettingsRow = {
   project_id: string;
   scanning_mode: ScanningAgentMode;
@@ -218,6 +242,9 @@ type ScanningAgentSettingsRow = {
   system_prompt_source_type: ScanningAgentConfig["systemPromptSource"]["type"];
   system_prompt_source_value: string;
 };
+
+type ExtensionScalar = string | number | boolean | null;
+type ExtensionConfig = Record<string, ExtensionScalar>;
 
 export type ScanFileState = {
   projectId: string;
@@ -240,6 +267,7 @@ type AgentRunRow = {
   project_id: string;
   agent_kind: AgentKind;
   coding_mode: CodingAgentMode | null;
+  review_mode: ReviewAgentMode | null;
   status: AgentRunStatus;
   base_graph_revision: number;
   applied_graph_revision: number | null;
@@ -426,6 +454,24 @@ type BasicBlockRow = {
   notes: string;
 };
 
+type ExtensionSettingsRow = {
+  project_id: string;
+  package_id: ExtensionPackageId;
+  enabled: 0 | 1;
+  config_json: string;
+  created_at: string;
+  updated_at: string;
+};
+
+type ExtensionNodeDetailsRow = {
+  node_id: string;
+  package_id: ExtensionPackageId;
+  schema_id: string;
+  payload_json: string;
+  created_at: string;
+  updated_at: string;
+};
+
 type LayoutRow = {
   node_id: string;
   ui_x: number;
@@ -448,6 +494,7 @@ export type NewGraphNode = {
   parentId?: string | null;
   attachedToId?: string | null;
   customTypeId?: string | null;
+  extensionDetails?: ExtensionNodeDetailsMutation | null;
   sourcePath?: string | null;
   sourceStartLine?: number | null;
   sourceEndLine?: number | null;
@@ -588,16 +635,20 @@ export class GraphRepository {
     this.ensureDefaultSettings(projectId);
     const row = this.db.prepare("SELECT * FROM workspace_settings WHERE project_id = ?").get(projectId) as WorkspaceSettingsRow;
     const agentRows = this.db
-      .prepare("SELECT * FROM agent_settings WHERE project_id = ? AND agent_kind != 'coding' ORDER BY agent_kind ASC")
+      .prepare("SELECT * FROM agent_settings WHERE project_id = ? AND agent_kind NOT IN ('coding', 'review') ORDER BY agent_kind ASC")
       .all(projectId) as AgentSettingsRow[];
     const codingAgentRows = this.db
       .prepare("SELECT * FROM coding_agent_settings WHERE project_id = ? ORDER BY CASE coding_mode WHEN 'small' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END")
       .all(projectId) as CodingAgentSettingsRow[];
+    const reviewAgentRows = this.db
+      .prepare("SELECT * FROM review_agent_settings WHERE project_id = ? ORDER BY CASE review_mode WHEN 'small' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END")
+      .all(projectId) as ReviewAgentSettingsRow[];
     const scanningAgentRows = this.db
       .prepare(
         "SELECT * FROM scanning_agent_settings WHERE project_id = ? ORDER BY CASE scanning_mode WHEN 'local' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END"
       )
       .all(projectId) as ScanningAgentSettingsRow[];
+    const extensionRows = this.listWorkspaceExtensionRows(projectId);
     return {
       general: {
         theme: row.theme
@@ -618,8 +669,14 @@ export class GraphRepository {
       automation: {
         autoReviewAfterCoding: row.auto_review_after_coding !== 0
       },
+      extensions: {
+        availablePackages: AVAILABLE_EXTENSION_PACKAGES,
+        enabledPackageIds: extensionRows.filter((extension) => extension.enabled === 1).map((extension) => extension.package_id),
+        configs: Object.fromEntries(extensionRows.map((extension) => [extension.package_id, parseExtensionConfig(extension.config_json)]))
+      },
       agents: agentRows.map(mapAgentSettingsView),
       codingAgents: codingAgentRows.map(mapCodingAgentSettingsView),
+      reviewAgents: reviewAgentRows.map(mapReviewAgentSettingsView),
       scanningAgents: scanningAgentRows.map(mapScanningAgentSettingsView)
     };
   }
@@ -646,6 +703,17 @@ export class GraphRepository {
     return mapCodingAgentSettings(row);
   }
 
+  getReviewAgentConfig(projectId: string, mode: ReviewAgentMode): ReviewAgentConfig {
+    this.ensureDefaultSettings(projectId);
+    const row = this.db
+      .prepare("SELECT * FROM review_agent_settings WHERE project_id = ? AND review_mode = ?")
+      .get(projectId, mode) as ReviewAgentSettingsRow | undefined;
+    if (!row) {
+      return defaultReviewAgentConfig(mode);
+    }
+    return mapReviewAgentSettings(row);
+  }
+
   getScanningAgentConfig(projectId: string, mode: ScanningAgentMode): ScanningAgentConfig {
     this.ensureDefaultSettings(projectId);
     const row = this.db
@@ -660,7 +728,12 @@ export class GraphRepository {
   saveWorkspaceSettings(projectId: string, input: WorkspaceSettingsMutation): WorkspaceSettings {
     this.getProject(projectId);
     const codingAgents = input.codingAgents ?? [];
+    const reviewAgents = input.reviewAgents ?? [];
     const scanningAgents = input.scanningAgents ?? [];
+    const extensionSettings = {
+      enabledPackageIds: input.extensions?.enabledPackageIds ?? [],
+      configs: input.extensions?.configs ?? {}
+    };
     const write = this.db.transaction(() => {
       this.db
         .prepare(
@@ -686,7 +759,17 @@ export class GraphRepository {
           autoReviewAfterCoding: input.automation.autoReviewAfterCoding ? 1 : 0
         });
 
+      const enabledPackageIds = new Set(extensionSettings.enabledPackageIds);
+      for (const extensionPackage of AVAILABLE_EXTENSION_PACKAGES) {
+        this.upsertWorkspaceExtensionSettings(projectId, {
+          packageId: extensionPackage.id,
+          enabled: enabledPackageIds.has(extensionPackage.id),
+          config: extensionSettings.configs[extensionPackage.id] ?? {}
+        });
+      }
+
       let legacyCodingAgent: AgentConfig | null = null;
+      let legacyReviewAgent: AgentConfig | null = null;
       for (const agent of input.agents) {
         if (agent.agentKind === "coding") {
           const existing = this.getAgentConfig(projectId, agent.agentKind);
@@ -712,6 +795,32 @@ export class GraphRepository {
             }
           };
           this.upsertAgentSettings(projectId, legacyCodingAgent);
+          continue;
+        }
+        if (agent.agentKind === "review") {
+          const existing = this.getAgentConfig(projectId, agent.agentKind);
+          const apiKeyValue = agent.apiKeySource.value?.trim()
+            ? agent.apiKeySource.value
+            : agent.apiKeySource.type === existing.apiKeySource.type
+              ? existing.apiKeySource.value
+              : "";
+          const systemPromptValue = agent.systemPromptSource.value?.trim()
+            ? agent.systemPromptSource.value
+            : agent.systemPromptSource.type === existing.systemPromptSource.type
+              ? existing.systemPromptSource.value
+              : "";
+          legacyReviewAgent = {
+            ...agent,
+            apiKeySource: {
+              ...agent.apiKeySource,
+              value: apiKeyValue
+            },
+            systemPromptSource: {
+              ...agent.systemPromptSource,
+              value: systemPromptValue
+            }
+          };
+          this.upsertAgentSettings(projectId, legacyReviewAgent);
           continue;
         }
         const existing = this.getAgentConfig(projectId, agent.agentKind);
@@ -782,6 +891,48 @@ export class GraphRepository {
       for (const mode of CODING_AGENT_MODES) {
         if (!this.hasCodingAgentSettings(projectId, mode)) {
           this.upsertCodingAgentSettings(projectId, defaultCodingAgentConfig(mode));
+        }
+      }
+      if (reviewAgents.length > 0) {
+        for (const reviewAgent of reviewAgents) {
+          const existing = this.getReviewAgentConfig(projectId, reviewAgent.mode);
+          const apiKeyValue = reviewAgent.apiKeySource.value?.trim()
+            ? reviewAgent.apiKeySource.value
+            : reviewAgent.apiKeySource.type === existing.apiKeySource.type
+              ? existing.apiKeySource.value
+              : "";
+          const systemPromptValue = reviewAgent.systemPromptSource.value?.trim()
+            ? reviewAgent.systemPromptSource.value
+            : reviewAgent.systemPromptSource.type === existing.systemPromptSource.type
+              ? existing.systemPromptSource.value
+              : "";
+          this.upsertReviewAgentSettings(projectId, {
+            ...reviewAgent,
+            apiKeySource: {
+              ...reviewAgent.apiKeySource,
+              value: apiKeyValue
+            },
+            systemPromptSource: {
+              ...reviewAgent.systemPromptSource,
+              value: systemPromptValue
+            }
+          });
+        }
+      } else if (legacyReviewAgent) {
+        for (const mode of REVIEW_AGENT_MODES) {
+          this.upsertReviewAgentSettings(projectId, {
+            mode,
+            provider: legacyReviewAgent.provider,
+            model: legacyReviewAgent.model,
+            parallelLimit: legacyReviewAgent.parallelLimit,
+            apiKeySource: legacyReviewAgent.apiKeySource,
+            systemPromptSource: legacyReviewAgent.systemPromptSource
+          });
+        }
+      }
+      for (const mode of REVIEW_AGENT_MODES) {
+        if (!this.hasReviewAgentSettings(projectId, mode)) {
+          this.upsertReviewAgentSettings(projectId, defaultReviewAgentConfig(mode));
         }
       }
       if (scanningAgents.length > 0) {
@@ -878,7 +1029,12 @@ export class GraphRepository {
     const fieldErrors: Record<string, string> = {};
     const seen = new Set<AgentKind>();
     const codingAgents = input.codingAgents ?? [];
+    const reviewAgents = input.reviewAgents ?? [];
     const scanningAgents = input.scanningAgents ?? [];
+    const extensionSettings = {
+      enabledPackageIds: input.extensions?.enabledPackageIds ?? [],
+      configs: input.extensions?.configs ?? {}
+    };
     if (input.github.enabled) {
       if (!input.github.repository.trim()) {
         fieldErrors["github.repository"] = "Repository is required when GitHub integration is enabled.";
@@ -915,6 +1071,22 @@ export class GraphRepository {
         fieldErrors[`agents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
       }
     });
+    const knownExtensionPackageIds = new Set(AVAILABLE_EXTENSION_PACKAGES.map((extensionPackage) => extensionPackage.id));
+    const seenExtensionPackageIds = new Set<ExtensionPackageId>();
+    extensionSettings.enabledPackageIds.forEach((packageId, index) => {
+      if (!knownExtensionPackageIds.has(packageId)) {
+        fieldErrors[`extensions.enabledPackageIds.${index}`] = "Unknown extension package.";
+      }
+      if (seenExtensionPackageIds.has(packageId)) {
+        fieldErrors[`extensions.enabledPackageIds.${index}`] = "Extension package can only be enabled once.";
+      }
+      seenExtensionPackageIds.add(packageId);
+    });
+    Object.keys(extensionSettings.configs).forEach((packageId) => {
+      if (!knownExtensionPackageIds.has(packageId as ExtensionPackageId)) {
+        fieldErrors[`extensions.configs.${packageId}`] = "Unknown extension package config.";
+      }
+    });
     const seenCodingModes = new Set<CodingAgentMode>();
     codingAgents.forEach((agent, index) => {
       const existing = this.getCodingAgentConfig(projectId, agent.mode);
@@ -942,6 +1114,35 @@ export class GraphRepository {
       }
       if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
         fieldErrors[`codingAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
+      }
+    });
+    const seenReviewModes = new Set<ReviewAgentMode>();
+    reviewAgents.forEach((agent, index) => {
+      const existing = this.getReviewAgentConfig(projectId, agent.mode);
+      const effectiveApiKeyValue =
+        agent.apiKeySource.value?.trim() || (agent.apiKeySource.type === existing.apiKeySource.type ? (existing.apiKeySource.value ?? "").trim() : "");
+      const effectiveSystemPromptValue =
+        agent.systemPromptSource.value?.trim() ||
+        (agent.systemPromptSource.type === existing.systemPromptSource.type ? (existing.systemPromptSource.value ?? "").trim() : "");
+      if (seenReviewModes.has(agent.mode)) {
+        fieldErrors[`reviewAgents.${index}.mode`] = "Each review mode can only be configured once.";
+      }
+      seenReviewModes.add(agent.mode);
+      if (!agent.model.trim()) {
+        fieldErrors[`reviewAgents.${index}.model`] = "Model is required.";
+      }
+      if (agent.provider !== "fake" && agent.provider !== "claudecode") {
+        if (!effectiveApiKeyValue) {
+          fieldErrors[`reviewAgents.${index}.apiKeySource.value`] = "API key source is required for hosted providers.";
+        } else if (agent.apiKeySource.type === "env" && !process.env[effectiveApiKeyValue]?.trim()) {
+          fieldErrors[`reviewAgents.${index}.apiKeySource.value`] = `Environment variable ${effectiveApiKeyValue} is not set.`;
+        }
+      }
+      if (agent.provider === "claudecode" && !agent.model.trim()) {
+        fieldErrors[`reviewAgents.${index}.model`] = "Claude Code command or model label is required.";
+      }
+      if (agent.systemPromptSource.type === "file" && !effectiveSystemPromptValue) {
+        fieldErrors[`reviewAgents.${index}.systemPromptSource.value`] = "System prompt file content is required.";
       }
     });
     const seenScanningModes = new Set<ScanningAgentMode>();
@@ -1001,6 +1202,7 @@ export class GraphRepository {
     projectId: string;
     agentKind: AgentKind;
     codingMode?: CodingAgentMode | null;
+    reviewMode?: ReviewAgentMode | null;
     targetNodeId?: string | null;
     prompt?: string;
     status?: AgentRunStatus;
@@ -1018,12 +1220,12 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO agent_runs (
-          id, project_id, agent_kind, coding_mode, status,
+          id, project_id, agent_kind, coding_mode, review_mode, status,
           base_graph_revision, applied_graph_revision, conflict_reason, target_node_id,
           prompt, response, diff, graph_patch_json, error
         )
         VALUES (
-          @id, @projectId, @agentKind, @codingMode, @status,
+          @id, @projectId, @agentKind, @codingMode, @reviewMode, @status,
           @baseGraphRevision, @appliedGraphRevision, @conflictReason, @targetNodeId,
           @prompt, @response, @diff, @graphPatchJson, @error
         )
@@ -1034,6 +1236,7 @@ export class GraphRepository {
         projectId: input.projectId,
         agentKind: input.agentKind,
         codingMode: input.agentKind === "coding" ? (input.codingMode ?? "medium") : null,
+        reviewMode: input.agentKind === "review" ? (input.reviewMode ?? "medium") : null,
         status: input.status ?? "queued",
         baseGraphRevision: this.currentGraphRevision(input.projectId),
         appliedGraphRevision: null,
@@ -1933,33 +2136,34 @@ export class GraphRepository {
     return mapProject(row);
   }
 
-	  createNode(input: NewGraphNode): GraphNode {
-	    this.assertValidNode(input);
-	    const codeDirectory = input.codeDirectory ?? input.sourcePath ?? null;
-	    const codeStartLine = input.codeStartLine ?? input.sourceStartLine ?? null;
-	    const codeEndLine = input.codeEndLine ?? input.sourceEndLine ?? null;
-	    const execution = blockExecutionMetadataSchema.parse(input.execution ?? {});
-	    this.db
-	      .prepare(
-	        `
-	        INSERT INTO graph_nodes (
-	          id, project_id, kind, name, summary,
-	          code_context, code_directory, code_start_line, code_end_line, language,
-	          parent_id, attached_to_id, custom_type_id,
-	          source_path, source_start_line, source_end_line,
-	          test_script_directory, virtual_environment, working_directory, setup_command, test_command,
-	          ui_x, ui_y,
-	          ui_width, ui_height, agent_status
-	        )
-	        VALUES (
-	          @id, @projectId, @kind, @name, @summary,
-	          @codeContext, @codeDirectory, @codeStartLine, @codeEndLine, @language,
-	          @parentId, @attachedToId, @customTypeId,
-	          @sourcePath, @sourceStartLine, @sourceEndLine,
-	          @testScriptDirectory, @virtualEnvironment, @workingDirectory, @setupCommand, @testCommand,
-	          @uiX, @uiY,
-	          @uiWidth, @uiHeight, @agentStatus
-	        )
+    createNode(input: NewGraphNode): GraphNode {
+      this.assertValidNode(input);
+      const codeDirectory = input.codeDirectory ?? input.sourcePath ?? null;
+      const codeStartLine = input.codeStartLine ?? input.sourceStartLine ?? null;
+      const codeEndLine = input.codeEndLine ?? input.sourceEndLine ?? null;
+      const execution = blockExecutionMetadataSchema.parse(input.execution ?? {});
+    const extensionDetails = input.extensionDetails ? this.normalizeExtensionNodeDetailsForKind(input.kind, input.extensionDetails) : null;
+      this.db
+        .prepare(
+          `
+          INSERT INTO graph_nodes (
+            id, project_id, kind, name, summary,
+            code_context, code_directory, code_start_line, code_end_line, language,
+            parent_id, attached_to_id, custom_type_id,
+            source_path, source_start_line, source_end_line,
+            test_script_directory, virtual_environment, working_directory, setup_command, test_command,
+            ui_x, ui_y,
+            ui_width, ui_height, agent_status
+          )
+          VALUES (
+            @id, @projectId, @kind, @name, @summary,
+            @codeContext, @codeDirectory, @codeStartLine, @codeEndLine, @language,
+            @parentId, @attachedToId, @customTypeId,
+            @sourcePath, @sourceStartLine, @sourceEndLine,
+            @testScriptDirectory, @virtualEnvironment, @workingDirectory, @setupCommand, @testCommand,
+            @uiX, @uiY,
+            @uiWidth, @uiHeight, @agentStatus
+          )
       `
       )
       .run({
@@ -1976,20 +2180,23 @@ export class GraphRepository {
         parentId: input.parentId ?? null,
         attachedToId: input.attachedToId ?? null,
         customTypeId: input.customTypeId ?? null,
-	        sourcePath: input.sourcePath ?? codeDirectory,
-	        sourceStartLine: input.sourceStartLine ?? codeStartLine,
-	        sourceEndLine: input.sourceEndLine ?? codeEndLine,
-	        testScriptDirectory: blankToNull(execution.testScriptDirectory),
-	        virtualEnvironment: blankToNull(execution.virtualEnvironment),
-	        workingDirectory: blankToNull(execution.workingDirectory),
-	        setupCommand: blankToNull(execution.setupCommand),
-	        testCommand: blankToNull(execution.testCommand),
-	        uiX: input.position?.x ?? 0,
+          sourcePath: input.sourcePath ?? codeDirectory,
+          sourceStartLine: input.sourceStartLine ?? codeStartLine,
+          sourceEndLine: input.sourceEndLine ?? codeEndLine,
+          testScriptDirectory: blankToNull(execution.testScriptDirectory),
+          virtualEnvironment: blankToNull(execution.virtualEnvironment),
+          workingDirectory: blankToNull(execution.workingDirectory),
+          setupCommand: blankToNull(execution.setupCommand),
+          testCommand: blankToNull(execution.testCommand),
+          uiX: input.position?.x ?? 0,
         uiY: input.position?.y ?? 0,
         uiWidth: input.size?.width ?? defaultSizeForKind(input.kind).width,
         uiHeight: input.size?.height ?? defaultSizeForKind(input.kind).height,
         agentStatus: input.agentStatus ?? "none"
       });
+    if (extensionDetails) {
+      this.writeExtensionNodeDetails(input.id, extensionDetails);
+    }
     return this.getNode(input.id);
   }
 
@@ -2008,12 +2215,13 @@ export class GraphRepository {
       parentId: input.parentId ?? null,
       attachedToId: input.attachedToId ?? null,
       customTypeId: input.customTypeId ?? null,
-	      sourcePath: input.codeDirectory ?? null,
-	      sourceStartLine: input.codeStartLine ?? null,
-	      sourceEndLine: input.codeEndLine ?? null,
-	      execution: input.execution,
-	      position: input.position,
+        sourcePath: input.codeDirectory ?? null,
+        sourceStartLine: input.codeStartLine ?? null,
+        sourceEndLine: input.codeEndLine ?? null,
+        execution: input.execution,
+        position: input.position,
       size: input.size,
+      extensionDetails: input.extensionDetails ?? null,
       agentStatus: "implemented"
     });
     this.bumpGraphEntities(projectId, [{ entityType: "node", entityId: node.id, deleted: false }], "Created graph node.");
@@ -2034,17 +2242,18 @@ export class GraphRepository {
       codeEndLine: input.codeEndLine === undefined ? existing.code.endLine : input.codeEndLine,
       language: input.language ?? existing.code.language,
       parentId: input.parentId === undefined ? existing.parentId : input.parentId,
-	      attachedToId: input.attachedToId === undefined ? existing.attachedToId : input.attachedToId,
-	      customTypeId: input.customTypeId === undefined ? existing.customTypeId : input.customTypeId,
-	      execution: {
-	        ...existing.execution,
-	        ...(input.execution ?? {})
-	      },
-	      position: input.position ?? existing.position,
+        attachedToId: input.attachedToId === undefined ? existing.attachedToId : input.attachedToId,
+        customTypeId: input.customTypeId === undefined ? existing.customTypeId : input.customTypeId,
+        execution: {
+          ...existing.execution,
+          ...(input.execution ?? {})
+        },
+        position: input.position ?? existing.position,
       size: input.size ?? existing.size,
       agentStatus: existing.agentStatus
     };
     this.assertValidNode(next, nodeId);
+    const nextExtensionDetails = input.extensionDetails ? this.normalizeExtensionNodeDetailsForKind(next.kind, input.extensionDetails) : null;
     const semanticChanged =
       next.kind !== existing.kind ||
       next.name !== existing.name ||
@@ -2053,11 +2262,12 @@ export class GraphRepository {
       (next.codeDirectory ?? null) !== existing.code.directory ||
       (next.codeStartLine ?? null) !== existing.code.startLine ||
       (next.codeEndLine ?? null) !== existing.code.endLine ||
-	      (next.language ?? "unknown") !== existing.code.language ||
-	      (next.parentId ?? null) !== existing.parentId ||
-	      (next.attachedToId ?? null) !== existing.attachedToId ||
-	      (next.customTypeId ?? null) !== existing.customTypeId ||
-	      !sameExecutionMetadata(blockExecutionMetadataSchema.parse(next.execution ?? {}), existing.execution);
+        (next.language ?? "unknown") !== existing.code.language ||
+        (next.parentId ?? null) !== existing.parentId ||
+        (next.attachedToId ?? null) !== existing.attachedToId ||
+        (next.customTypeId ?? null) !== existing.customTypeId ||
+      input.extensionDetails !== undefined ||
+        !sameExecutionMetadata(blockExecutionMetadataSchema.parse(next.execution ?? {}), existing.execution);
     const agentStatus =
       this.statusAfterSemanticEdit({
         projectId: existing.projectId,
@@ -2083,16 +2293,16 @@ export class GraphRepository {
           language = @language,
           parent_id = @parentId,
           attached_to_id = @attachedToId,
-	          custom_type_id = @customTypeId,
-	          source_path = @codeDirectory,
-	          source_start_line = @codeStartLine,
-	          source_end_line = @codeEndLine,
-	          test_script_directory = @testScriptDirectory,
-	          virtual_environment = @virtualEnvironment,
-	          working_directory = @workingDirectory,
-	          setup_command = @setupCommand,
-	          test_command = @testCommand,
-	          ui_x = @uiX,
+            custom_type_id = @customTypeId,
+            source_path = @codeDirectory,
+            source_start_line = @codeStartLine,
+            source_end_line = @codeEndLine,
+            test_script_directory = @testScriptDirectory,
+            virtual_environment = @virtualEnvironment,
+            working_directory = @workingDirectory,
+            setup_command = @setupCommand,
+            test_command = @testCommand,
+            ui_x = @uiX,
           ui_y = @uiY,
           ui_width = @uiWidth,
           ui_height = @uiHeight,
@@ -2113,18 +2323,28 @@ export class GraphRepository {
         language: next.language ?? "unknown",
         parentId: next.parentId ?? null,
         attachedToId: next.attachedToId ?? null,
-	        customTypeId: next.customTypeId ?? null,
-	        testScriptDirectory: blankToNull(next.execution?.testScriptDirectory ?? null),
-	        virtualEnvironment: blankToNull(next.execution?.virtualEnvironment ?? null),
-	        workingDirectory: blankToNull(next.execution?.workingDirectory ?? null),
-	        setupCommand: blankToNull(next.execution?.setupCommand ?? null),
-	        testCommand: blankToNull(next.execution?.testCommand ?? null),
-	        uiX: next.position?.x ?? existing.position.x,
+          customTypeId: next.customTypeId ?? null,
+          testScriptDirectory: blankToNull(next.execution?.testScriptDirectory ?? null),
+          virtualEnvironment: blankToNull(next.execution?.virtualEnvironment ?? null),
+          workingDirectory: blankToNull(next.execution?.workingDirectory ?? null),
+          setupCommand: blankToNull(next.execution?.setupCommand ?? null),
+          testCommand: blankToNull(next.execution?.testCommand ?? null),
+          uiX: next.position?.x ?? existing.position.x,
         uiY: next.position?.y ?? existing.position.y,
         uiWidth: next.size?.width ?? existing.size.width,
         uiHeight: next.size?.height ?? existing.size.height,
         agentStatus
       });
+
+    if (input.extensionDetails !== undefined) {
+      if (input.extensionDetails === null) {
+        this.deleteExtensionNodeDetails(existing.id);
+      } else {
+        this.writeExtensionNodeDetails(existing.id, nextExtensionDetails!);
+      }
+    } else if (next.kind !== existing.kind) {
+      this.deleteExtensionNodeDetails(existing.id);
+    }
 
     if (semanticChanged) {
       this.bumpGraphEntities(existing.projectId, [{ entityType: "node", entityId: existing.id, deleted: false }], "Updated graph node.");
@@ -2560,8 +2780,64 @@ export class GraphRepository {
         valueHint: input.valueHint ?? null,
         required: input.required === true ? 1 : 0,
         notes: input.notes ?? ""
-      });
+    });
     return this.getBasicBlockDetail(input.nodeId);
+  }
+
+  upsertExtensionNodeDetails(nodeId: string, input: ExtensionNodeDetailsMutation): ExtensionNodeDetails {
+    const node = this.getNode(nodeId);
+    const details = this.normalizeExtensionNodeDetailsForKind(node.kind, input);
+    this.writeExtensionNodeDetails(nodeId, details);
+    return this.getExtensionNodeDetail(nodeId);
+  }
+
+  private normalizeExtensionNodeDetailsForKind(kind: GraphNodeKind, input: ExtensionNodeDetailsMutation): ExtensionNodeDetailsMutation {
+    const definition = extensionNodeDefinitionForKind(kind);
+    if (!definition) {
+      throw validationError("Extension details can only be stored on extension nodes.");
+    }
+    if (definition.packageId !== input.packageId || definition.detailSchemaId !== input.schemaId) {
+      throw validationError("Extension details must match the node kind's extension schema.");
+    }
+    return {
+      packageId: input.packageId,
+      schemaId: input.schemaId,
+      payload: normalizeExtensionDetailPayload(definition.fields, input.payload ?? {})
+    };
+  }
+
+  private writeExtensionNodeDetails(nodeId: string, input: ExtensionNodeDetailsMutation): void {
+    const node = this.getNode(nodeId);
+    const definition = extensionNodeDefinitionForKind(node.kind);
+    if (!definition) {
+      throw validationError("Extension details can only be stored on extension nodes.");
+    }
+    if (definition.packageId !== input.packageId || definition.detailSchemaId !== input.schemaId) {
+      throw validationError("Extension details must match the node kind's extension schema.");
+    }
+    this.db
+      .prepare(
+        `
+        INSERT INTO extension_node_details (node_id, package_id, schema_id, payload_json, created_at, updated_at)
+        VALUES (@nodeId, @packageId, @schemaId, @payloadJson, datetime('now'), datetime('now'))
+        ON CONFLICT(node_id)
+        DO UPDATE SET
+          package_id = excluded.package_id,
+          schema_id = excluded.schema_id,
+          payload_json = excluded.payload_json,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        nodeId,
+        packageId: input.packageId,
+        schemaId: input.schemaId,
+        payloadJson: JSON.stringify(input.payload ?? {})
+      });
+  }
+
+  deleteExtensionNodeDetails(nodeId: string): void {
+    this.db.prepare("DELETE FROM extension_node_details WHERE node_id = ?").run(nodeId);
   }
 
   getNode(nodeId: string): GraphNode {
@@ -2893,6 +3169,12 @@ export class GraphRepository {
   }
 
   private upsertScanNode(projectId: string, draft: ScanNodeDraft, id: string, parentId: string | null, attachedToId: string | null): void {
+    if (isExtensionNodeKind(draft.kind)) {
+      const extensionPackage = extensionPackageForNodeKind(draft.kind);
+      if (!extensionPackage || !this.isExtensionPackageEnabled(projectId, extensionPackage.id)) {
+        throw validationError(`Scanner emitted ${draft.kind}, but its extension package is disabled.`);
+      }
+    }
     const input: NewGraphNode = {
       id,
       projectId,
@@ -2959,6 +3241,7 @@ export class GraphRepository {
     this.db.prepare("DELETE FROM process_details WHERE node_id = ?").run(nodeId);
     this.db.prepare("DELETE FROM format_details WHERE node_id = ?").run(nodeId);
     this.db.prepare("DELETE FROM basic_block_details WHERE node_id = ?").run(nodeId);
+    this.db.prepare("DELETE FROM extension_node_details WHERE node_id = ?").run(nodeId);
     const detail = draft.detail;
     if ((draft.kind === "input" || draft.kind === "output") && detail) {
       this.createIoDetails({
@@ -2984,6 +3267,9 @@ export class GraphRepository {
         spec: detail.spec ?? draft.name,
         notes: detail.notes ?? draft.codeContext
       });
+    }
+    if (detail?.extensionDetails) {
+      this.upsertExtensionNodeDetails(nodeId, detail.extensionDetails);
     }
   }
 
@@ -3523,6 +3809,7 @@ export class GraphRepository {
     const processRows = this.getProcessDetailsForNodes(detailNodeIds);
     const formatRows = this.getFormatDetailsForNodes(detailNodeIds);
     const basicRows = this.getBasicBlockDetailsForNodes(detailNodeIds);
+    const extensionRows = this.getExtensionNodeDetailsForNodes(detailNodeIds);
 
     const incomingEdges = this.db
       .prepare("SELECT * FROM graph_edges WHERE target_node_id = ? ORDER BY kind ASC")
@@ -3549,6 +3836,7 @@ export class GraphRepository {
       processes: processRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
       formats: formatRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
       basicDetails: basicRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
+      extensionDetails: extensionRows.map((details) => ({ node: detailNodeById.get(details.nodeId)!, details })),
       incomingEdges: incomingEdges.map((edge) => mapEdge(edge, edgeTags.get(edge.id) ?? [])),
       outgoingEdges: outgoingEdges.map((edge) => mapEdge(edge, edgeTags.get(edge.id) ?? [])),
       relatedNodes: [...relatedIds].map((id) => this.getNode(id)),
@@ -4760,6 +5048,7 @@ export class GraphRepository {
       processes: this.getProcessDetailsForNodes(nodeIds),
       formats: this.getFormatDetailsForNodes(nodeIds),
       basicDetails: this.getBasicBlockDetailsForNodes(nodeIds),
+      extensionDetails: this.getExtensionNodeDetailsForNodes(nodeIds),
       customTypes: this.listCustomBlockTypes(project.id),
       nodeTypeStyles: this.listNodeTypeStyles(project.id),
       reuses
@@ -4787,14 +5076,12 @@ export class GraphRepository {
       return included;
     }
 
-    const expandableAttachmentIds = new Set<string>();
-    for (const node of allNodes) {
-      if (node.attachedToId === scopeNode.id && isAttachmentNodeKind(node.kind)) {
-        included.add(node.id);
+    const expandableAttachmentIds = new Set<string>([scopeNode.id]);
+    for (const node of primaryNodes) {
+      if (isExtensionNodeKind(node.kind)) {
         expandableAttachmentIds.add(node.id);
       }
     }
-
     let changed = true;
     while (changed) {
       changed = false;
@@ -4927,6 +5214,18 @@ export class GraphRepository {
         )
         .run(projectId);
     }
+    for (const extensionPackage of AVAILABLE_EXTENSION_PACKAGES) {
+      const row = this.db
+        .prepare("SELECT package_id FROM workspace_extension_settings WHERE project_id = ? AND package_id = ?")
+        .get(projectId, extensionPackage.id);
+      if (!row) {
+        this.upsertWorkspaceExtensionSettings(projectId, {
+          packageId: extensionPackage.id,
+          enabled: false,
+          config: {}
+        });
+      }
+    }
     for (const agentKind of AGENT_KINDS) {
       const row = this.db
         .prepare("SELECT agent_kind FROM agent_settings WHERE project_id = ? AND agent_kind = ?")
@@ -4951,11 +5250,54 @@ export class GraphRepository {
         });
       }
     }
+    const legacyReviewRow = this.db
+      .prepare("SELECT * FROM agent_settings WHERE project_id = ? AND agent_kind = 'review'")
+      .get(projectId) as AgentSettingsRow | undefined;
+    const legacyReviewConfig = legacyReviewRow ? mapAgentSettings(legacyReviewRow) : defaultAgentConfig("review");
+    for (const mode of REVIEW_AGENT_MODES) {
+      if (!this.hasReviewAgentSettings(projectId, mode)) {
+        this.upsertReviewAgentSettings(projectId, {
+          mode,
+          provider: legacyReviewConfig.provider,
+          model: legacyReviewConfig.model,
+          parallelLimit: legacyReviewConfig.parallelLimit,
+          apiKeySource: legacyReviewConfig.apiKeySource,
+          systemPromptSource: legacyReviewConfig.systemPromptSource
+        });
+      }
+    }
     for (const mode of SCANNING_AGENT_MODES) {
       if (!this.hasScanningAgentSettings(projectId, mode)) {
         this.upsertScanningAgentSettings(projectId, defaultScanningAgentConfig(mode));
       }
     }
+  }
+
+  private listWorkspaceExtensionRows(projectId: string): ExtensionSettingsRow[] {
+    return this.db
+      .prepare("SELECT * FROM workspace_extension_settings WHERE project_id = ? ORDER BY package_id ASC")
+      .all(projectId) as ExtensionSettingsRow[];
+  }
+
+  private upsertWorkspaceExtensionSettings(projectId: string, input: { packageId: ExtensionPackageId; enabled: boolean; config: Record<string, unknown> }): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO workspace_extension_settings (project_id, package_id, enabled, config_json, created_at, updated_at)
+        VALUES (@projectId, @packageId, @enabled, @configJson, datetime('now'), datetime('now'))
+        ON CONFLICT(project_id, package_id)
+        DO UPDATE SET
+          enabled = excluded.enabled,
+          config_json = excluded.config_json,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        projectId,
+        packageId: input.packageId,
+        enabled: input.enabled ? 1 : 0,
+        configJson: JSON.stringify(input.config ?? {})
+      });
   }
 
   private upsertAgentSettings(projectId: string, agent: AgentConfig): void {
@@ -5038,6 +5380,55 @@ export class GraphRepository {
       .run({
         projectId,
         codingMode: agent.mode,
+        provider: agent.provider,
+        model: agent.model,
+        parallelLimit: agent.parallelLimit,
+        apiKeySourceType: agent.apiKeySource.type,
+        apiKeySourceValue: agent.apiKeySource.value ?? "",
+        systemPromptSourceType: agent.systemPromptSource.type,
+        systemPromptSourceValue: agent.systemPromptSource.value ?? ""
+      });
+  }
+
+  private hasReviewAgentSettings(projectId: string, mode: ReviewAgentMode): boolean {
+    return Boolean(
+      this.db
+        .prepare("SELECT review_mode FROM review_agent_settings WHERE project_id = ? AND review_mode = ?")
+        .get(projectId, mode)
+    );
+  }
+
+  private upsertReviewAgentSettings(projectId: string, agent: ReviewAgentConfig): void {
+    this.db
+      .prepare(
+        `
+        INSERT INTO review_agent_settings (
+          project_id, review_mode, provider, model, parallel_limit,
+          api_key_source_type, api_key_source_value,
+          system_prompt_source_type, system_prompt_source_value,
+          created_at, updated_at
+        )
+        VALUES (
+          @projectId, @reviewMode, @provider, @model, @parallelLimit,
+          @apiKeySourceType, @apiKeySourceValue,
+          @systemPromptSourceType, @systemPromptSourceValue,
+          datetime('now'), datetime('now')
+        )
+        ON CONFLICT(project_id, review_mode)
+        DO UPDATE SET
+          provider = excluded.provider,
+          model = excluded.model,
+          parallel_limit = excluded.parallel_limit,
+          api_key_source_type = excluded.api_key_source_type,
+          api_key_source_value = excluded.api_key_source_value,
+          system_prompt_source_type = excluded.system_prompt_source_type,
+          system_prompt_source_value = excluded.system_prompt_source_value,
+          updated_at = datetime('now')
+      `
+      )
+      .run({
+        projectId,
+        reviewMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
         parallelLimit: agent.parallelLimit,
@@ -5418,6 +5809,14 @@ export class GraphRepository {
     return mapBasicBlockDetails(row);
   }
 
+  private getExtensionNodeDetail(nodeId: string): ExtensionNodeDetails {
+    const row = this.db.prepare("SELECT * FROM extension_node_details WHERE node_id = ?").get(nodeId) as ExtensionNodeDetailsRow | undefined;
+    if (!row) {
+      throw notFound(`Extension node details not found: ${nodeId}`);
+    }
+    return mapExtensionNodeDetails(row);
+  }
+
   private getDependencyDetailsForNodes(nodeIds: string[]): DependencyDetails[] {
     if (nodeIds.length === 0) {
       return [];
@@ -5470,6 +5869,18 @@ export class GraphRepository {
     return rows.map(mapBasicBlockDetails);
   }
 
+  private getExtensionNodeDetailsForNodes(nodeIds: string[]): ExtensionNodeDetails[] {
+    if (nodeIds.length === 0) {
+      return [];
+    }
+
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(`SELECT * FROM extension_node_details WHERE node_id IN (${placeholders}) ORDER BY package_id ASC, schema_id ASC`)
+      .all(...nodeIds) as ExtensionNodeDetailsRow[];
+    return rows.map(mapExtensionNodeDetails);
+  }
+
   private getChildCount(nodeId: string): number {
     const row = this.db.prepare("SELECT COUNT(*) AS count FROM graph_nodes WHERE parent_id = ?").get(nodeId) as { count: number } | undefined;
     return row?.count ?? 0;
@@ -5502,6 +5913,29 @@ export class GraphRepository {
       if (!customType || customType.project_id !== input.projectId) {
         throw validationError("Custom node type must belong to the same project.");
       }
+    }
+
+    const extensionDefinition = extensionNodeDefinitionForKind(input.kind);
+    if (extensionDefinition) {
+      this.assertExtensionPackageEnabledForNode(input.projectId, input.kind, updatingNodeId);
+      if (extensionDefinition.category === "domain") {
+        if (!parentId || attachedToId) {
+          throw validationError(`${extensionDefinition.label} nodes must use parent_id and no attached_to_id.`);
+        }
+        const parent = this.getNode(parentId);
+        if (parent.projectId !== input.projectId || !extensionDefinition.parentKinds.includes(parent.kind)) {
+          throw validationError(`${extensionDefinition.label} parent must be one of: ${extensionDefinition.parentKinds.join(", ")}.`);
+        }
+        return;
+      }
+      if (!attachedToId || parentId) {
+        throw validationError(`${extensionDefinition.label} nodes must use attached_to_id and no parent_id.`);
+      }
+      const owner = this.getNode(attachedToId);
+      if (owner.projectId !== input.projectId || !extensionDefinition.attachableToKinds.includes(owner.kind)) {
+        throw validationError(`${extensionDefinition.label} must attach to one of: ${extensionDefinition.attachableToKinds.join(", ")}.`);
+      }
+      return;
     }
 
     if (input.kind === "framework") {
@@ -5581,6 +6015,32 @@ export class GraphRepository {
     if (owner.kind === "format") {
       throw validationError("Format nodes cannot attach to another format node.");
     }
+  }
+
+  private assertExtensionPackageEnabledForNode(projectId: string, kind: GraphNodeKind, updatingNodeId?: string): void {
+    const extensionPackage = extensionPackageForNodeKind(kind);
+    if (!extensionPackage) {
+      return;
+    }
+    if (this.isExtensionPackageEnabled(projectId, extensionPackage.id)) {
+      return;
+    }
+    if (updatingNodeId) {
+      const existing = this.db.prepare("SELECT kind FROM graph_nodes WHERE id = ? AND project_id = ?").get(updatingNodeId, projectId) as
+        | { kind: GraphNodeKind }
+        | undefined;
+      if (existing?.kind === kind) {
+        return;
+      }
+    }
+    throw validationError(`Enable ${extensionPackage.name} in workspace settings before creating ${kind} blocks.`);
+  }
+
+  private isExtensionPackageEnabled(projectId: string, packageId: ExtensionPackageId): boolean {
+    const row = this.db
+      .prepare("SELECT enabled FROM workspace_extension_settings WHERE project_id = ? AND package_id = ?")
+      .get(projectId, packageId) as { enabled: 0 | 1 } | undefined;
+    return row?.enabled === 1;
   }
 
   private assertNoParentCycle(parentId: string | null, projectId: string, nodeId: string): void {
@@ -5708,6 +6168,23 @@ function defaultCodingAgentConfig(mode: CodingAgentMode): CodingAgentConfig {
   };
 }
 
+function defaultReviewAgentConfig(mode: ReviewAgentMode): ReviewAgentConfig {
+  return {
+    mode,
+    provider: "fake",
+    model: "graphcode-fake-v1",
+    parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
+    apiKeySource: {
+      type: "env",
+      value: "OPENAI_API_KEY"
+    },
+    systemPromptSource: {
+      type: "manual",
+      value: defaultReviewSystemPrompt(mode)
+    }
+  };
+}
+
 function defaultScanningAgentConfig(mode: ScanningAgentMode): ScanningAgentConfig {
   return {
     mode,
@@ -5786,7 +6263,25 @@ Produce a coordinated unified diff for a larger graph-scoped change. Use descend
 Large mode gives more context, not unlimited scope. Touch only files required by the selected graph scope and user request. Keep generated graph/database artifacts out of source diffs unless the task explicitly asks for generated-state refresh. Update tests and docs when the behavioral surface changes.
 
 Return a clean unified diff plus any required test artifact manifest. Do not include unrelated commentary.`
-} satisfies Record<CodingAgentMode, string>;
+  } satisfies Record<CodingAgentMode, string>;
+
+const DEFAULT_REVIEW_SYSTEM_PROMPTS = {
+  small: `You are the GraphCode Review Small agent.
+
+Review the selected coding proposal for concrete correctness, source-range scope, and obvious missing tests. Use the selected graph block, direct workflow attachments, diff, source excerpt, execution metadata, and git status.
+
+Start with findings ordered by severity. End with exactly one verdict line: GRAPHCODE_REVIEW_VERDICT: reviewed or GRAPHCODE_REVIEW_VERDICT: bugged.`,
+  medium: `You are the GraphCode Review Medium agent.
+
+Review the coding proposal with the selected block plus its containing function, object, or file workflow. Check input/process/output/format flow, branch-labeled edges, related callers/importers, allowed source path, execution metadata, and git status.
+
+Start with findings ordered by severity. Mark bugged for correctness issues, scope leaks, broken contracts, or missing verification that matters. End with exactly one verdict line: GRAPHCODE_REVIEW_VERDICT: reviewed or GRAPHCODE_REVIEW_VERDICT: bugged.`,
+  large: `You are the GraphCode Review Large agent.
+
+Review the coding proposal across the broader graph scope. Use descendant graph context, one-hop related edges, module boundaries, workflow blocks, source ranges, execution metadata, git status, and the proposed diff to catch integration bugs and contract regressions.
+
+Large review gives more context, not permission to invent requirements. Start with findings ordered by severity and explain residual test gaps. End with exactly one verdict line: GRAPHCODE_REVIEW_VERDICT: reviewed or GRAPHCODE_REVIEW_VERDICT: bugged.`
+} satisfies Record<ReviewAgentMode, string>;
 
 const DEFAULT_ROLE_SYSTEM_PROMPTS = {
   planning: `You are the GraphCode Planning agent.
@@ -5795,11 +6290,7 @@ Convert user intent into small, reviewable graph and implementation plans. Use f
 
 Name the smallest source-linked blocks involved, the relevant callers/importers, affected line ranges when known, likely tests, and any graph patch operations needed. Prefer scoped plans over broad rewrites. Preserve explicit workspace-opening behavior and reproducible .graphcode state.`,
   coding: DEFAULT_CODING_SYSTEM_PROMPTS.medium,
-  review: `You are the GraphCode Review agent.
-
-Review proposed diffs for correctness, scope, graph consistency, source evidence, and missing verification. Start with concrete findings ordered by severity. Check that the diff stays inside the selected graph scope, preserves API/DTO/database/UI contracts, and updates tests when behavior changes.
-
-For scanner or graph-schema changes, verify stable IDs, source ranges, scan state, generated-row cleanup, branch workflow blocks, and canvas/detail payloads. Mark a block reviewed only when the change is scoped, behaviorally sound, and adequately verified or has an explicit test-gap note.`,
+  review: DEFAULT_REVIEW_SYSTEM_PROMPTS.medium,
   scanning: `You are the GraphCode Scanning coordinator.
 
 Coordinate local, medium, and global scanner modes into a generated, source-linked GraphCode graph. Inventory scannable files, run local file analysis in parallel, consolidate affected directories, run one global synthesis pass, and merge generated rows while preserving manual graph data.
@@ -5809,6 +6300,10 @@ Use content hashes for incremental scans. Re-analyze only added or modified file
 
 function defaultCodingSystemPrompt(mode: CodingAgentMode): string {
   return DEFAULT_CODING_SYSTEM_PROMPTS[mode] ?? "";
+}
+
+function defaultReviewSystemPrompt(mode: ReviewAgentMode): string {
+  return DEFAULT_REVIEW_SYSTEM_PROMPTS[mode] ?? "";
 }
 
 function defaultScanningSystemPrompt(mode: ScanningAgentMode): string {
@@ -5878,6 +6373,27 @@ function mapCodingAgentSettingsView(row: CodingAgentSettingsRow): CodingAgentCon
   };
 }
 
+function mapReviewAgentSettingsView(row: ReviewAgentSettingsRow): ReviewAgentConfigView {
+  const apiValue = row.api_key_source_value ?? "";
+  const promptValue = row.system_prompt_source_value ?? "";
+  return {
+    mode: row.review_mode,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: ""
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_type === "manual" ? promptValue : ""
+    },
+    apiKeyConfigured: apiValue.trim().length > 0,
+    systemPromptConfigured: promptValue.trim().length > 0
+  };
+}
+
 function mapScanningAgentSettingsView(row: ScanningAgentSettingsRow): ScanningAgentConfigView {
   const apiValue = row.api_key_source_value ?? "";
   const promptValue = row.system_prompt_source_value ?? "";
@@ -5916,6 +6432,23 @@ function mapCodingAgentSettings(row: CodingAgentSettingsRow): CodingAgentConfig 
   };
 }
 
+function mapReviewAgentSettings(row: ReviewAgentSettingsRow): ReviewAgentConfig {
+  return {
+    mode: row.review_mode,
+    provider: row.provider,
+    model: row.model,
+    parallelLimit: row.parallel_limit,
+    apiKeySource: {
+      type: row.api_key_source_type,
+      value: row.api_key_source_value
+    },
+    systemPromptSource: {
+      type: row.system_prompt_source_type,
+      value: row.system_prompt_source_value
+    }
+  };
+}
+
 function mapScanningAgentSettings(row: ScanningAgentSettingsRow): ScanningAgentConfig {
   return {
     mode: row.scanning_mode,
@@ -5939,6 +6472,7 @@ function mapAgentRun(row: AgentRunRow): AgentRun {
     projectId: row.project_id,
     agentKind: row.agent_kind,
     codingMode: row.agent_kind === "coding" ? (row.coding_mode ?? "medium") : null,
+    reviewMode: row.agent_kind === "review" ? (row.review_mode ?? "medium") : null,
     status: row.status,
     baseGraphRevision: row.base_graph_revision ?? 0,
     appliedGraphRevision: row.applied_graph_revision ?? null,
@@ -5962,6 +6496,26 @@ function parseGraphPatch(value: string | null): GraphPatch | null {
     return graphPatchSchema.parse(JSON.parse(value));
   } catch {
     return null;
+  }
+}
+
+function parseExtensionConfig(value: string | null): Record<string, string | number | boolean | null> {
+  if (!value) {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return Object.fromEntries(
+      Object.entries(parsed as Record<string, unknown>).filter((entry): entry is [string, string | number | boolean | null] => {
+        const value = entry[1];
+        return value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+      })
+    );
+  } catch {
+    return {};
   }
 }
 
@@ -6127,19 +6681,19 @@ function mapNode(row: NodeRow, childCount: number, tags: GraphTag[] = []): Graph
     parentId: row.parent_id,
     attachedToId: row.attached_to_id,
     customTypeId: row.custom_type_id,
-	    source: {
-	      path: row.source_path ?? row.code_directory,
-	      startLine: row.source_start_line ?? row.code_start_line,
-	      endLine: row.source_end_line ?? row.code_end_line
-	    },
-	    execution: {
-	      testScriptDirectory: blankToNull(row.test_script_directory),
-	      virtualEnvironment: blankToNull(row.virtual_environment),
-	      workingDirectory: blankToNull(row.working_directory),
-	      setupCommand: blankToNull(row.setup_command),
-	      testCommand: blankToNull(row.test_command)
-	    },
-	    position: {
+      source: {
+        path: row.source_path ?? row.code_directory,
+        startLine: row.source_start_line ?? row.code_start_line,
+        endLine: row.source_end_line ?? row.code_end_line
+      },
+      execution: {
+        testScriptDirectory: blankToNull(row.test_script_directory),
+        virtualEnvironment: blankToNull(row.virtual_environment),
+        workingDirectory: blankToNull(row.working_directory),
+        setupCommand: blankToNull(row.setup_command),
+        testCommand: blankToNull(row.test_command)
+      },
+      position: {
       x: row.ui_x,
       y: row.ui_y
     },
@@ -6233,6 +6787,15 @@ function mapBasicBlockDetails(row: BasicBlockRow): BasicBlockDetails {
   };
 }
 
+function mapExtensionNodeDetails(row: ExtensionNodeDetailsRow): ExtensionNodeDetails {
+  return {
+    nodeId: row.node_id,
+    packageId: row.package_id,
+    schemaId: row.schema_id,
+    payload: parseExtensionConfig(row.payload_json)
+  };
+}
+
 function buildChildCountMap(rows: NodeRow[]): Map<string, number> {
   const counts = new Map<string, number>();
   for (const row of rows) {
@@ -6267,10 +6830,15 @@ function sortHierarchyNodes(a: HierarchyNode, b: HierarchyNode): number {
     ["artifact", 19],
     ["custom", 20]
   ]);
-  return (kindOrder.get(a.kind) ?? 10) - (kindOrder.get(b.kind) ?? 10) || a.name.localeCompare(b.name);
+  const orderFor = (kind: GraphNodeKind) => kindOrder.get(kind) ?? extensionNodeDefinitionForKind(kind)?.sortOrder ?? 100;
+  return orderFor(a.kind) - orderFor(b.kind) || a.name.localeCompare(b.name);
 }
 
 function defaultSizeForKind(kind: GraphNodeKind): { width: number; height: number } {
+  const extensionDefinition = extensionNodeDefinitionForKind(kind);
+  if (extensionDefinition) {
+    return extensionDefinition.defaultSize;
+  }
   if (kind === "website") {
     return { width: 280, height: 144 };
   }
@@ -6607,6 +7175,52 @@ function nodeCenterInsideBoundary(node: GraphNode, boundary: BoundaryRow): boole
   const maxX = boundary.ui_x + boundary.ui_width;
   const maxY = boundary.ui_y + boundary.ui_height;
   return centerX >= minX && centerX <= maxX && centerY >= minY && centerY <= maxY;
+}
+
+function normalizeExtensionDetailPayload(
+  fields: ExtensionFieldDefinition[],
+  payload: Record<string, string | number | boolean | null>
+): Record<string, string | number | boolean | null> {
+  const normalized: Record<string, string | number | boolean | null> = {};
+  for (const field of fields) {
+    const rawValue = payload[field.key];
+    const hasValue = rawValue !== undefined && rawValue !== null && rawValue !== "";
+    if (field.required && !hasValue) {
+      throw validationError(`${field.label} is required.`);
+    }
+    if (!hasValue) {
+      continue;
+    }
+    if (field.type === "number") {
+      const parsed = typeof rawValue === "number" ? rawValue : typeof rawValue === "string" ? Number(rawValue) : Number.NaN;
+      if (!Number.isFinite(parsed)) {
+        throw validationError(`${field.label} must be a number.`);
+      }
+      normalized[field.key] = parsed;
+      continue;
+    }
+    if (field.type === "boolean") {
+      if (typeof rawValue === "boolean") {
+        normalized[field.key] = rawValue;
+        continue;
+      }
+      if (rawValue === "true" || rawValue === "false") {
+        normalized[field.key] = rawValue === "true";
+        continue;
+      }
+      throw validationError(`${field.label} must be true or false.`);
+    }
+    if (field.type === "enum") {
+      const value = String(rawValue);
+      if (field.options && field.options.length > 0 && !field.options.includes(value)) {
+        throw validationError(`${field.label} must be one of: ${field.options.join(", ")}.`);
+      }
+      normalized[field.key] = value;
+      continue;
+    }
+    normalized[field.key] = String(rawValue);
+  }
+  return normalized;
 }
 
 function hashId(value: string): string {

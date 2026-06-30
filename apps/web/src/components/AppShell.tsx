@@ -27,7 +27,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { CanvasViewport } from "../canvasSession";
-import { agentKindLabel, codingAgentModeLabel } from "../displayLabels";
+import { agentKindLabel, codingAgentModeLabel, reviewAgentModeLabel } from "../displayLabels";
 import { HierarchyTree } from "./HierarchyTree";
 import { Inspector } from "./Inspector";
 import { WorkspaceCanvas, type MemberLayout } from "./WorkspaceCanvas";
@@ -750,7 +750,7 @@ function PlanningPanel({
         {activityRuns.slice(0, 6).map((run) => (
           <div className={`agent-activity-row ${run.status}`} key={run.id}>
             <div>
-              <strong>{run.agentKind === "coding" && run.codingMode ? `${agentKindLabel(run.agentKind)} ${codingAgentModeLabel(run.codingMode)}` : agentKindLabel(run.agentKind)}</strong>
+                <strong>{agentRunTitle(run)}</strong>
               <span className={`run-status-badge ${ticketStatusClass(run)}`}>
                 {ticketStatusIcon(run)}
                 {ticketStatusLabel(run)}
@@ -801,6 +801,16 @@ function ticketStatusLabel(run: AgentRun): string {
     default:
       return run.status;
   }
+}
+
+function agentRunTitle(run: AgentRun): string {
+  if (run.agentKind === "coding" && run.codingMode) {
+    return `${agentKindLabel(run.agentKind)} ${codingAgentModeLabel(run.codingMode)}`;
+  }
+  if (run.agentKind === "review" && run.reviewMode) {
+    return `${agentKindLabel(run.agentKind)} ${reviewAgentModeLabel(run.reviewMode)}`;
+  }
+  return agentKindLabel(run.agentKind);
 }
 
 function ticketStatusClass(run: AgentRun): string {

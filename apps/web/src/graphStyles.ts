@@ -1,13 +1,12 @@
-import type { GraphNodeKind } from "@graphcode/graph-model";
+import { EXTENSION_NODE_KIND_DEFINITIONS, type GraphNodeKind } from "@graphcode/graph-model";
 
-export const nodePalette: Record<
-  GraphNodeKind,
-  {
-    label: string;
-    className: string;
-    accent: string;
-  }
-> = {
+type NodePaletteEntry = {
+  label: string;
+  className: string;
+  accent: string;
+};
+
+const builtInNodePalette = {
   framework: {
     label: "Framework",
     className: "node-framework",
@@ -113,4 +112,20 @@ export const nodePalette: Record<
     className: "node-custom",
     accent: "#475569"
   }
-};
+} satisfies Partial<Record<GraphNodeKind, NodePaletteEntry>>;
+
+const extensionNodePalette = Object.fromEntries(
+  EXTENSION_NODE_KIND_DEFINITIONS.map((definition) => [
+    definition.kind,
+    {
+      label: definition.label,
+      className: `node-${definition.kind.replaceAll("_", "-")}`,
+      accent: definition.color
+    }
+  ])
+) as Partial<Record<GraphNodeKind, NodePaletteEntry>>;
+
+export const nodePalette = {
+  ...builtInNodePalette,
+  ...extensionNodePalette
+} as Record<GraphNodeKind, NodePaletteEntry>;

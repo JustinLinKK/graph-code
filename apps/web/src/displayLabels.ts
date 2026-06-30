@@ -1,4 +1,4 @@
-import type { AgentKind, AgentProvider, AgentStatus, CodingAgentMode, GitChangeStatus, GitWorktreeStatus, ScanningAgentMode } from "@graphcode/graph-model";
+import type { AgentKind, AgentProvider, AgentStatus, CodingAgentMode, GitChangeStatus, GitWorktreeStatus, ReviewAgentMode, ScanningAgentMode } from "@graphcode/graph-model";
 
 export function agentKindLabel(agentKind: AgentKind): string {
   switch (agentKind) {
@@ -33,6 +33,19 @@ export function providerLabel(provider: AgentProvider): string {
 }
 
 export function codingAgentModeLabel(mode: CodingAgentMode): string {
+  switch (mode) {
+    case "small":
+      return "Small";
+    case "medium":
+      return "Medium";
+    case "large":
+      return "Large";
+    default:
+      return mode;
+  }
+}
+
+export function reviewAgentModeLabel(mode: ReviewAgentMode): string {
   switch (mode) {
     case "small":
       return "Small";

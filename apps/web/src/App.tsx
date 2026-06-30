@@ -1528,8 +1528,10 @@ export default function App() {
         open={blockDialogOpen}
         mode={blockDialogMode}
         node={editingDetail?.node ?? null}
+        detail={editingDetail}
         hierarchy={hierarchy}
         canvas={canvas}
+        settings={settings}
         selectedNodeId={selectedNodeId}
         loading={loading}
         error={blockError}

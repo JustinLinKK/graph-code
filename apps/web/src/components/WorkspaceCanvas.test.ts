@@ -189,16 +189,16 @@ function node(input: Partial<GraphNode> & Pick<GraphNode, "id" | "kind" | "name"
     code: { context: "", directory: null, startLine: null, endLine: null, language: "typescript" },
     parentId: null,
     attachedToId: null,
-	    customTypeId: null,
-	    source: { path: null, startLine: null, endLine: null },
-	    execution: {
-	      testScriptDirectory: null,
-	      virtualEnvironment: null,
-	      workingDirectory: null,
-	      setupCommand: null,
-	      testCommand: null
-	    },
-	    position: { x: 0, y: 0 },
+      customTypeId: null,
+      source: { path: null, startLine: null, endLine: null },
+      execution: {
+        testScriptDirectory: null,
+        virtualEnvironment: null,
+        workingDirectory: null,
+        setupCommand: null,
+        testCommand: null
+      },
+      position: { x: 0, y: 0 },
     size: { width: 224, height: 120 },
     childCount: 0,
     hasChildren: false,
@@ -207,8 +207,8 @@ function node(input: Partial<GraphNode> & Pick<GraphNode, "id" | "kind" | "name"
     tags: [],
     createdAt: "now",
     updatedAt: "now",
-	    ...input
-	  };
+      ...input
+    };
 }
 
 function edge(input: Partial<GraphEdge> & Pick<GraphEdge, "id" | "label">): GraphEdge {
@@ -246,9 +246,10 @@ function canvas(edges: GraphEdge[]): CanvasGraph {
     dependencies: [],
     io: [],
     processes: [],
-    formats: [],
-    basicDetails: [],
-    customTypes: [],
+      formats: [],
+      basicDetails: [],
+      extensionDetails: [],
+      customTypes: [],
     nodeTypeStyles: [],
     reuses: []
   };

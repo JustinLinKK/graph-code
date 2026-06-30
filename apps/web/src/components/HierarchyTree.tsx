@@ -1,7 +1,8 @@
-import type { GraphNodeKind, HierarchyBoundaryGroup, HierarchyNode, NodeTypeStyle } from "@graphcode/graph-model";
-import { Box, Boxes, Braces, ChevronDown, ChevronRight, FolderTree, Globe2, LayoutDashboard, Maximize2, PanelsTopLeft } from "lucide-react";
+import { isExtensionDomainNodeKind, type HierarchyBoundaryGroup, type HierarchyNode, type NodeTypeStyle } from "@graphcode/graph-model";
+import { Boxes, ChevronDown, ChevronRight, Maximize2 } from "lucide-react";
 import { useState } from "react";
 import { nodePalette } from "../graphStyles";
+import { iconForNodeKind } from "../nodeIcons";
 
 type HierarchyTreeProps = {
   nodes: HierarchyNode[];
@@ -51,8 +52,8 @@ type HierarchyItemProps = {
 function HierarchyItem({ node, depth, selectedNodeId, selectedBoundaryId, nodeTypeStyles, onSelectNode, onOpenNode, onSelectBoundary }: HierarchyItemProps) {
   const [open, setOpen] = useState(true);
   const hasChildren = node.children.length > 0 || node.boundaryGroups.length > 0;
-  const canOpenScope = hasChildren || node.kind === "function" || node.kind === "object";
-  const Icon = iconForKind(node.kind);
+  const canOpenScope = hasChildren || node.kind === "function" || node.kind === "object" || isExtensionDomainNodeKind(node.kind);
+  const Icon = iconForNodeKind(node.kind);
   const selected = selectedNodeId === node.id;
   const accentColor = nodeTypeStyles.find((style) => style.nodeKind === node.kind)?.color ?? nodePalette[node.kind].accent;
 
@@ -145,23 +146,4 @@ function BoundaryGroupRow({
       </button>
     </div>
   );
-}
-
-function iconForKind(kind: GraphNodeKind) {
-  switch (kind) {
-    case "framework":
-      return LayoutDashboard;
-    case "module":
-      return FolderTree;
-    case "website":
-      return Globe2;
-    case "ui_component":
-      return PanelsTopLeft;
-    case "function":
-      return Braces;
-    case "object":
-      return Box;
-    default:
-      return FolderTree;
-  }
 }

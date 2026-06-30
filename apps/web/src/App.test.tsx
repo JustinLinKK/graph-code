@@ -1,4 +1,4 @@
-import type { AgentRun, CanvasGraph, GraphBoundary, GraphEdge, GraphNode, HierarchyNode, NodeDetail, Project } from "@graphcode/graph-model";
+import { AVAILABLE_EXTENSION_PACKAGES, type AgentRun, type CanvasGraph, type GraphBoundary, type GraphEdge, type GraphNode, type HierarchyNode, type NodeDetail, type Project } from "@graphcode/graph-model";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -35,9 +35,9 @@ vi.mock("@xyflow/react", async () => ({
     onPaneClick,
     onMouseMove,
       onMoveEnd,
-	    className,
-	    colorMode,
-	    nodesDraggable,
+      className,
+      colorMode,
+      nodesDraggable,
     nodesConnectable,
     elementsSelectable,
     panOnDrag,
@@ -71,11 +71,11 @@ vi.mock("@xyflow/react", async () => ({
       node: { id: string; position: { x: number; y: number }; style?: { width?: number; height?: number }; data: { node?: GraphNode; boundary?: GraphBoundary } }
     ) => void;
     onEdgeClick?: (event: unknown, edge: GraphEdge) => void;
-	    onConnect?: (connection: { source: string; target: string }) => void;
+      onConnect?: (connection: { source: string; target: string }) => void;
     onPaneClick?: (event: { button: number; clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
     onMouseMove?: (event: { clientX: number; clientY: number; preventDefault: () => void; stopPropagation: () => void }) => void;
       onMoveEnd?: (event: null, viewport: { x: number; y: number; zoom: number }) => void;
-	    className?: string;
+      className?: string;
     colorMode?: string;
     nodesDraggable?: boolean;
     nodesConnectable?: boolean;
@@ -371,11 +371,12 @@ const frameworkCanvas: CanvasGraph = {
   dependencies: [],
   io: [],
   processes: [],
-  formats: [],
-  basicDetails: [],
-  customTypes: [],
-  nodeTypeStyles: [],
-  reuses: []
+    formats: [],
+    basicDetails: [],
+    extensionDetails: [],
+    customTypes: [],
+    nodeTypeStyles: [],
+    reuses: []
 };
 
 const moduleCanvasGraph: CanvasGraph = {
@@ -456,11 +457,12 @@ const moduleCanvasGraph: CanvasGraph = {
       example: "module-web",
       notes: ""
     }
-  ],
-  basicDetails: [],
-  customTypes: [],
-  nodeTypeStyles: [],
-  reuses: []
+    ],
+    basicDetails: [],
+    extensionDetails: [],
+    customTypes: [],
+    nodeTypeStyles: [],
+    reuses: []
 };
 
 const functionCanvasGraph: CanvasGraph = {
@@ -559,11 +561,12 @@ const functionCanvasGraph: CanvasGraph = {
       example: null,
       notes: ""
     }
-  ],
-  basicDetails: [],
-  customTypes: [],
-  nodeTypeStyles: [],
-  reuses: []
+    ],
+    basicDetails: [],
+    extensionDetails: [],
+    customTypes: [],
+    nodeTypeStyles: [],
+    reuses: []
 };
 
 const frameworkDetail = detail(framework);
@@ -595,6 +598,11 @@ const defaultSettings = {
     }
   },
   automation: { autoReviewAfterCoding: true },
+  extensions: {
+    availablePackages: AVAILABLE_EXTENSION_PACKAGES,
+    enabledPackageIds: ["@graphcode/extension-ml-pipeline"],
+    configs: {}
+  },
   agents: ["planning", "review", "scanning"].map((agentKind) => ({
     agentKind,
     provider: "fake",
@@ -605,17 +613,27 @@ const defaultSettings = {
     apiKeyConfigured: false,
     systemPromptConfigured: true
   })),
-  codingAgents: ["small", "medium", "large"].map((mode) => ({
-    mode,
+    codingAgents: ["small", "medium", "large"].map((mode) => ({
+      mode,
     provider: "fake",
     model: `fake-${mode}`,
     parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${mode} coding prompt` },
-    apiKeyConfigured: false,
-    systemPromptConfigured: true
-  })),
-  scanningAgents: ["local", "medium", "global"].map((mode) => ({
+      apiKeyConfigured: false,
+      systemPromptConfigured: true
+    })),
+    reviewAgents: ["small", "medium", "large"].map((mode) => ({
+      mode,
+      provider: "fake",
+      model: `fake-review-${mode}`,
+      parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
+      apiKeySource: { type: "env", value: "" },
+      systemPromptSource: { type: "manual", value: `${mode} review prompt` },
+      apiKeyConfigured: false,
+      systemPromptConfigured: true
+    })),
+    scanningAgents: ["local", "medium", "global"].map((mode) => ({
     mode,
     provider: "fake",
     model: `fake-${mode}`,
@@ -637,6 +655,7 @@ function settingsViewFromMutation(input: any) {
       auth: defaultSettings.github.auth
     },
     automation: input.automation ?? defaultSettings.automation,
+    extensions: input.extensions ?? defaultSettings.extensions,
     agents: defaultSettings.agents.map((agent) => {
       const next = input.agents?.find((item: { agentKind: string }) => item.agentKind === agent.agentKind);
       return {
@@ -646,16 +665,25 @@ function settingsViewFromMutation(input: any) {
         systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
       };
     }),
-    codingAgents: defaultSettings.codingAgents.map((agent) => {
-      const next = input.codingAgents?.find((item: { mode: string }) => item.mode === agent.mode);
+      codingAgents: defaultSettings.codingAgents.map((agent) => {
+        const next = input.codingAgents?.find((item: { mode: string }) => item.mode === agent.mode);
       return {
         ...agent,
         ...(next ?? {}),
         apiKeyConfigured: Boolean(next?.apiKeySource?.value) || agent.apiKeyConfigured,
-        systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
-      };
-    }),
-    scanningAgents: defaultSettings.scanningAgents.map((agent) => {
+          systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
+        };
+      }),
+      reviewAgents: defaultSettings.reviewAgents.map((agent) => {
+        const next = input.reviewAgents?.find((item: { mode: string }) => item.mode === agent.mode);
+        return {
+          ...agent,
+          ...(next ?? {}),
+          apiKeyConfigured: Boolean(next?.apiKeySource?.value) || agent.apiKeyConfigured,
+          systemPromptConfigured: Boolean(next?.systemPromptSource?.value) || agent.systemPromptConfigured
+        };
+      }),
+      scanningAgents: defaultSettings.scanningAgents.map((agent) => {
       const next = input.scanningAgents?.find((item: { mode: string }) => item.mode === agent.mode);
       return {
         ...agent,
@@ -668,48 +696,48 @@ function settingsViewFromMutation(input: any) {
 }
 
 describe("GraphCode app shell", () => {
-	  beforeEach(() => {
-		    vi.restoreAllMocks();
+    beforeEach(() => {
+        vi.restoreAllMocks();
         reactFlowMock.fitView.mockClear();
         reactFlowMock.setCenter.mockClear();
         reactFlowMock.setViewport.mockClear();
         window.localStorage.clear();
-		    document.documentElement.dataset.theme = "system";
-	    const agentRuns: AgentRun[] = [];
-	    let planningRunCount = 0;
-	    const workflowResponse = {
-	      id: "workflow-1",
-	      projectId: project.id,
-	      scopeNodeId: "module-web",
-	      scopeName: "Web Workspace",
-	      status: "preview",
-	      currentLayer: 0,
-	      summary: "1 coding item planned under Web Workspace.",
-	      createdAt: "now",
-	      updatedAt: "now",
-	      items: [
-	        {
-	          id: "workflow-item-1",
-	          workflowId: "workflow-1",
-	          projectId: project.id,
-	          nodeId: "function-render-widget",
-	          nodeName: "renderWidget",
-	          nodeKind: "function",
-	          layerIndex: 0,
-	          recommendedMode: "small",
-	          selectedMode: "small",
-	          modeReason: "Leaf-local block.",
-	          status: "pending",
-	          conflictGroup: "apps/web/src/App.tsx:function-render-widget",
-	          agentRunId: null,
-	          proposalId: null,
-	          appliedAt: null,
-	          createdAt: "now",
-	          updatedAt: "now"
-	        }
-	      ]
-	    };
-	    vi.stubGlobal(
+        document.documentElement.dataset.theme = "system";
+      const agentRuns: AgentRun[] = [];
+      let planningRunCount = 0;
+      const workflowResponse = {
+        id: "workflow-1",
+        projectId: project.id,
+        scopeNodeId: "module-web",
+        scopeName: "Web Workspace",
+        status: "preview",
+        currentLayer: 0,
+        summary: "1 coding item planned under Web Workspace.",
+        createdAt: "now",
+        updatedAt: "now",
+        items: [
+          {
+            id: "workflow-item-1",
+            workflowId: "workflow-1",
+            projectId: project.id,
+            nodeId: "function-render-widget",
+            nodeName: "renderWidget",
+            nodeKind: "function",
+            layerIndex: 0,
+            recommendedMode: "small",
+            selectedMode: "small",
+            modeReason: "Leaf-local block.",
+            status: "pending",
+            conflictGroup: "apps/web/src/App.tsx:function-render-widget",
+            agentRunId: null,
+            proposalId: null,
+            appliedAt: null,
+            createdAt: "now",
+            updatedAt: "now"
+          }
+        ]
+      };
+      vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
@@ -820,47 +848,48 @@ describe("GraphCode app shell", () => {
             }
           });
         }
-	        if (url === "/api/projects/graphcode-self/github/disconnect") {
-	          return json(defaultSettings);
-	        }
-	        if (url === "/api/coding-workflows/preview") {
-	          return json(workflowResponse);
-	        }
-	        if (url === "/api/coding-workflows/start") {
-	          const payload = JSON.parse(String(init?.body ?? "{}"));
-	          const overrides = new Map((payload.modeOverrides ?? []).map((item: { nodeId: string; mode: string }) => [item.nodeId, item.mode]));
-	          return json({
-	            ...workflowResponse,
-	            status: "blocked",
-	            items: workflowResponse.items.map((item) => ({
-	              ...item,
-	              selectedMode: overrides.get(item.nodeId) ?? item.selectedMode,
-	              status: "proposed",
-	              agentRunId: "run-coding-workflow",
-	              proposalId: "proposal-coding-workflow"
-	            }))
-	          });
-	        }
-	        if (url === "/api/coding-workflows/apply-layer") {
-	          return json({
-	            ...workflowResponse,
-	            status: "succeeded",
-	            items: workflowResponse.items.map((item) => ({ ...item, status: "applied", appliedAt: "now" }))
-	          });
-	        }
-	        if (url === "/api/projects/graphcode-self/coding-workflows/workflow-1") {
-	          return json(workflowResponse);
-	        }
-	        if (url === "/api/agents/planning" || url === "/api/agents/coding" || url === "/api/agents/review" || url === "/api/agents/scanning") {
+          if (url === "/api/projects/graphcode-self/github/disconnect") {
+            return json(defaultSettings);
+          }
+          if (url === "/api/coding-workflows/preview") {
+            return json(workflowResponse);
+          }
+          if (url === "/api/coding-workflows/start") {
+            const payload = JSON.parse(String(init?.body ?? "{}"));
+            const overrides = new Map((payload.modeOverrides ?? []).map((item: { nodeId: string; mode: string }) => [item.nodeId, item.mode]));
+            return json({
+              ...workflowResponse,
+              status: "blocked",
+              items: workflowResponse.items.map((item) => ({
+                ...item,
+                selectedMode: overrides.get(item.nodeId) ?? item.selectedMode,
+                status: "proposed",
+                agentRunId: "run-coding-workflow",
+                proposalId: "proposal-coding-workflow"
+              }))
+            });
+          }
+          if (url === "/api/coding-workflows/apply-layer") {
+            return json({
+              ...workflowResponse,
+              status: "succeeded",
+              items: workflowResponse.items.map((item) => ({ ...item, status: "applied", appliedAt: "now" }))
+            });
+          }
+          if (url === "/api/projects/graphcode-self/coding-workflows/workflow-1") {
+            return json(workflowResponse);
+          }
+          if (url === "/api/agents/planning" || url === "/api/agents/coding" || url === "/api/agents/review" || url === "/api/agents/scanning") {
           const payload = JSON.parse(String(init?.body ?? "{}"));
           const agentKind = url.split("/").at(-1)?.replace("review", "review") ?? "planning";
           const id = url === "/api/agents/planning" ? `run-plan-${++planningRunCount}` : `run-${agentKind}`;
           const run: AgentRun = {
             id,
             projectId: payload.projectId ?? project.id,
-            agentKind: agentKind as AgentRun["agentKind"],
-            codingMode: url === "/api/agents/coding" ? payload.mode ?? "medium" : null,
-            status: "succeeded",
+              agentKind: agentKind as AgentRun["agentKind"],
+              codingMode: url === "/api/agents/coding" ? payload.mode ?? "medium" : null,
+              reviewMode: url === "/api/agents/review" ? payload.mode ?? "medium" : null,
+              status: "succeeded",
             baseGraphRevision: 7,
             appliedGraphRevision: null,
             conflictReason: null,
@@ -1681,10 +1710,13 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByLabelText("Settings"));
-    expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /Agents/i }));
-    expect(screen.getByRole("heading", { name: "Planning" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Scanning Local" })).toBeInTheDocument();
+      expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: /Agents/i }));
+      expect(screen.getByRole("heading", { name: "Planning" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Review Small" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Review Medium" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Review Large" })).toBeInTheDocument();
+      expect(screen.getByRole("heading", { name: "Scanning Local" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Scanning Medium" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Scanning Global" })).toBeInTheDocument();
     expect(screen.getAllByText("Environment Variable Name")[0]).toBeInTheDocument();
@@ -1693,6 +1725,10 @@ describe("GraphCode app shell", () => {
     const keyFile = new File(["OPENAI_API_KEY=abc123"], "key.env", { type: "text/plain" });
     fireEvent.change(screen.getAllByLabelText("Select Key File")[0], { target: { files: [keyFile] } });
     expect(await screen.findByText("API key read successfully")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: /Extensions/i }));
+    expect(screen.getByRole("heading", { name: "ML Pipeline" })).toBeInTheDocument();
+    fireEvent.click(within(screen.getByRole("heading", { name: "ML Pipeline" }).closest(".agent-settings-card") as HTMLElement).getByLabelText("Enabled"));
 
     fireEvent.click(screen.getByRole("button", { name: /GitHub/i }));
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
@@ -1711,11 +1747,13 @@ describe("GraphCode app shell", () => {
         })
       );
     });
-    const settingsCall = vi
-      .mocked(fetch)
-      .mock.calls.find(([url, init]) => url === "/api/projects/graphcode-self/settings" && init?.method === "PUT");
-    expect(JSON.parse(String(settingsCall?.[1]?.body)).scanningAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
-  });
+      const settingsCall = vi
+        .mocked(fetch)
+        .mock.calls.find(([url, init]) => url === "/api/projects/graphcode-self/settings" && init?.method === "PUT");
+      expect(JSON.parse(String(settingsCall?.[1]?.body)).reviewAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
+      expect(JSON.parse(String(settingsCall?.[1]?.body)).scanningAgents.map((agent: { mode: string }) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
+      expect(JSON.parse(String(settingsCall?.[1]?.body)).extensions.enabledPackageIds).toEqual(["@graphcode/extension-ml-pipeline"]);
+    });
 
   it("shows scanning runs in the activity feed", async () => {
     render(<App />);
@@ -1810,21 +1848,21 @@ function node(input: TestNodeInput): GraphNode {
       startLine: input.source?.startLine ?? null,
       endLine: input.source?.endLine ?? null
     },
-	    code: input.code ?? {
-	      context: input.summary ?? `${input.name} code context.`,
-	      directory: input.source?.path ?? input.sourcePath ?? null,
-	      startLine: input.source?.startLine ?? null,
-	      endLine: input.source?.endLine ?? null,
-	      language: "typescript"
-	    },
-	    execution: input.execution ?? {
-	      testScriptDirectory: null,
-	      virtualEnvironment: null,
-	      workingDirectory: null,
-	      setupCommand: null,
-	      testCommand: null
-	    },
-	    position: input.position ?? { x: 0, y: 0 },
+      code: input.code ?? {
+        context: input.summary ?? `${input.name} code context.`,
+        directory: input.source?.path ?? input.sourcePath ?? null,
+        startLine: input.source?.startLine ?? null,
+        endLine: input.source?.endLine ?? null,
+        language: "typescript"
+      },
+      execution: input.execution ?? {
+        testScriptDirectory: null,
+        virtualEnvironment: null,
+        workingDirectory: null,
+        setupCommand: null,
+        testCommand: null
+      },
+      position: input.position ?? { x: 0, y: 0 },
     size: input.size ?? { width: 224, height: 120 },
     customTypeId: input.customTypeId ?? null,
     childCount: input.childCount ?? 0,
@@ -1846,9 +1884,10 @@ function detail(baseNode: GraphNode, overrides: Partial<NodeDetail> = {}): NodeD
     inputs: [],
     outputs: [],
     processes: [],
-    formats: [],
-    basicDetails: [],
-    incomingEdges: [],
+      formats: [],
+      basicDetails: [],
+      extensionDetails: [],
+      incomingEdges: [],
     outgoingEdges: [],
     relatedNodes: [],
     reusedIn: [],

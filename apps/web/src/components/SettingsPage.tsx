@@ -1,24 +1,27 @@
 import {
-  CODING_AGENT_MODES,
-  SCANNING_AGENT_MODES,
-  type AgentConfig,
-  type AgentKind,
-  type AgentProvider,
-  type CodingAgentConfig,
-  type CodingAgentMode,
+    CODING_AGENT_MODES,
+    REVIEW_AGENT_MODES,
+    SCANNING_AGENT_MODES,
+    type AgentConfig,
+    type AgentKind,
+    type AgentProvider,
+    type CodingAgentConfig,
+    type CodingAgentMode,
   type GithubDevicePollResponse,
   type GithubDeviceStartResponse,
-  type Project,
-  type ScanningAgentConfig,
+    type Project,
+    type ReviewAgentConfig,
+    type ReviewAgentMode,
+    type ScanningAgentConfig,
   type ScanningAgentMode,
   type SettingsValidationResult,
   type WorkspaceSettings,
   type WorkspaceSettingsMutation
-} from "@graphcode/graph-model";
+  } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
-import { Bot, CheckCircle2, ExternalLink, Github, Monitor, Save, Unplug, X } from "lucide-react";
+import { Bot, CheckCircle2, Boxes, ExternalLink, Github, Monitor, Save, Unplug, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { agentKindLabel, codingAgentModeLabel, providerLabel, scanningAgentModeLabel } from "../displayLabels";
+import { agentKindLabel, codingAgentModeLabel, providerLabel, reviewAgentModeLabel, scanningAgentModeLabel } from "../displayLabels";
 
 type SettingsPageProps = {
   project: Project;
@@ -32,7 +35,7 @@ type SettingsPageProps = {
   onDisconnectGithub: () => Promise<WorkspaceSettings>;
 };
 
-const agentKinds: AgentKind[] = ["planning", "review"];
+const agentKinds: AgentKind[] = ["planning"];
 const providers: AgentProvider[] = ["fake", "claudecode", "openai", "gemini", "openrouter"];
 
 export function SettingsPage({
@@ -46,17 +49,19 @@ export function SettingsPage({
   onPollGithubDeviceFlow,
   onDisconnectGithub
 }: SettingsPageProps) {
-  const [activeSection, setActiveSection] = useState<"general" | "agents" | "github">("general");
+  const [activeSection, setActiveSection] = useState<"general" | "agents" | "extensions" | "github">("general");
   const [draft, setDraft] = useState<WorkspaceSettingsMutation>(() => toMutation(settings));
   const [readSuccessByField, setReadSuccessByField] = useState<Record<string, string>>({});
   const [deviceFlow, setDeviceFlow] = useState<GithubDeviceStartResponse | null>(null);
   const [githubBusy, setGithubBusy] = useState(false);
   const [githubMessage, setGithubMessage] = useState("");
   const errors = validation?.fieldErrors ?? {};
-  const agentByKind = useMemo(() => new Map(draft.agents.map((agent) => [agent.agentKind, agent])), [draft.agents]);
-  const codingAgentDrafts = useMemo(() => draft.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent), [draft.codingAgents]);
-  const codingAgentByMode = useMemo(() => new Map(codingAgentDrafts.map((agent) => [agent.mode, agent])), [codingAgentDrafts]);
-  const scanningAgentDrafts = useMemo(() => draft.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent), [draft.scanningAgents]);
+    const agentByKind = useMemo(() => new Map(draft.agents.map((agent) => [agent.agentKind, agent])), [draft.agents]);
+    const codingAgentDrafts = useMemo(() => draft.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent), [draft.codingAgents]);
+    const codingAgentByMode = useMemo(() => new Map(codingAgentDrafts.map((agent) => [agent.mode, agent])), [codingAgentDrafts]);
+    const reviewAgentDrafts = useMemo(() => draft.reviewAgents ?? REVIEW_AGENT_MODES.map(defaultReviewAgent), [draft.reviewAgents]);
+    const reviewAgentByMode = useMemo(() => new Map(reviewAgentDrafts.map((agent) => [agent.mode, agent])), [reviewAgentDrafts]);
+    const scanningAgentDrafts = useMemo(() => draft.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent), [draft.scanningAgents]);
   const scanningAgentByMode = useMemo(() => new Map(scanningAgentDrafts.map((agent) => [agent.mode, agent])), [scanningAgentDrafts]);
 
   useEffect(() => {
@@ -70,18 +75,45 @@ export function SettingsPage({
     }));
   };
 
-  const updateCodingAgent = (mode: CodingAgentMode, patch: Partial<CodingAgentConfig>) => {
+    const updateCodingAgent = (mode: CodingAgentMode, patch: Partial<CodingAgentConfig>) => {
     setDraft((current) => ({
       ...current,
       codingAgents: (current.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
     }));
-  };
+    };
 
-  const updateScanningAgent = (mode: ScanningAgentMode, patch: Partial<ScanningAgentConfig>) => {
+    const updateReviewAgent = (mode: ReviewAgentMode, patch: Partial<ReviewAgentConfig>) => {
+      setDraft((current) => ({
+        ...current,
+        reviewAgents: (current.reviewAgents ?? REVIEW_AGENT_MODES.map(defaultReviewAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
+      }));
+    };
+
+	  const updateScanningAgent = (mode: ScanningAgentMode, patch: Partial<ScanningAgentConfig>) => {
     setDraft((current) => ({
       ...current,
       scanningAgents: (current.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
     }));
+  };
+
+  const toggleExtensionPackage = (packageId: WorkspaceSettings["extensions"]["enabledPackageIds"][number], enabled: boolean) => {
+    setDraft((current) => {
+      const extensions = current.extensions ?? { enabledPackageIds: [], configs: {} };
+      const enabledPackageIds = new Set(extensions.enabledPackageIds);
+      if (enabled) {
+        enabledPackageIds.add(packageId);
+      } else {
+        enabledPackageIds.delete(packageId);
+      }
+      return {
+        ...current,
+        extensions: {
+          ...extensions,
+          enabledPackageIds: [...enabledPackageIds],
+          configs: extensions.configs ?? {}
+        }
+      };
+    });
   };
 
   const setApiKeySourceType = (agent: AgentConfig, type: AgentConfig["apiKeySource"]["type"]) => {
@@ -102,13 +134,25 @@ export function SettingsPage({
     });
   };
 
-  const setCodingSystemPromptSourceType = (agent: CodingAgentConfig, type: CodingAgentConfig["systemPromptSource"]["type"]) => {
+    const setCodingSystemPromptSourceType = (agent: CodingAgentConfig, type: CodingAgentConfig["systemPromptSource"]["type"]) => {
     updateCodingAgent(agent.mode, {
       systemPromptSource: { type, value: type === "manual" ? agent.systemPromptSource.value ?? "" : "" }
     });
-  };
+    };
 
-  const setScanningApiKeySourceType = (agent: ScanningAgentConfig, type: ScanningAgentConfig["apiKeySource"]["type"]) => {
+    const setReviewApiKeySourceType = (agent: ReviewAgentConfig, type: ReviewAgentConfig["apiKeySource"]["type"]) => {
+      updateReviewAgent(agent.mode, {
+        apiKeySource: { type, value: "" }
+      });
+    };
+
+    const setReviewSystemPromptSourceType = (agent: ReviewAgentConfig, type: ReviewAgentConfig["systemPromptSource"]["type"]) => {
+      updateReviewAgent(agent.mode, {
+        systemPromptSource: { type, value: type === "manual" ? agent.systemPromptSource.value ?? "" : "" }
+      });
+    };
+
+    const setScanningApiKeySourceType = (agent: ScanningAgentConfig, type: ScanningAgentConfig["apiKeySource"]["type"]) => {
     updateScanningAgent(agent.mode, {
       apiKeySource: { type, value: "" }
     });
@@ -165,7 +209,7 @@ export function SettingsPage({
     setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.apiKey`]: "API key read successfully" }));
   };
 
-  const handleCodingPromptFile = async (agent: CodingAgentConfig, file: File | null) => {
+    const handleCodingPromptFile = async (agent: CodingAgentConfig, file: File | null) => {
     if (!file) {
       return;
     }
@@ -177,10 +221,40 @@ export function SettingsPage({
     updateCodingAgent(agent.mode, {
       systemPromptSource: { type: "file", value }
     });
-    setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.prompt`]: "System prompt read successfully" }));
-  };
+      setReadSuccessByField((current) => ({ ...current, [`coding.${agent.mode}.prompt`]: "System prompt read successfully" }));
+    };
 
-  const handleScanningApiKeyFile = async (agent: ScanningAgentConfig, file: File | null) => {
+    const handleReviewApiKeyFile = async (agent: ReviewAgentConfig, file: File | null) => {
+      if (!file) {
+        return;
+      }
+      const value = parseSecretFile(await readFileText(file));
+      if (!value) {
+        setReadSuccessByField((current) => ({ ...current, [`review.${agent.mode}.apiKey`]: "" }));
+        return;
+      }
+      updateReviewAgent(agent.mode, {
+        apiKeySource: { type: "file", value }
+      });
+      setReadSuccessByField((current) => ({ ...current, [`review.${agent.mode}.apiKey`]: "API key read successfully" }));
+    };
+
+    const handleReviewPromptFile = async (agent: ReviewAgentConfig, file: File | null) => {
+      if (!file) {
+        return;
+      }
+      const value = (await readFileText(file)).trim();
+      if (!value) {
+        setReadSuccessByField((current) => ({ ...current, [`review.${agent.mode}.prompt`]: "" }));
+        return;
+      }
+      updateReviewAgent(agent.mode, {
+        systemPromptSource: { type: "file", value }
+      });
+      setReadSuccessByField((current) => ({ ...current, [`review.${agent.mode}.prompt`]: "System prompt read successfully" }));
+    };
+
+    const handleScanningApiKeyFile = async (agent: ScanningAgentConfig, file: File | null) => {
     if (!file) {
       return;
     }
@@ -285,6 +359,10 @@ export function SettingsPage({
               <Bot size={16} />
               Agents
             </button>
+            <button type="button" className={activeSection === "extensions" ? "active" : ""} onClick={() => setActiveSection("extensions")}>
+              <Boxes size={16} />
+              Extensions
+            </button>
             <button type="button" className={activeSection === "github" ? "active" : ""} onClick={() => setActiveSection("github")}>
               <Github size={16} />
               GitHub
@@ -303,6 +381,26 @@ export function SettingsPage({
                     <option value="dark">Night</option>
                   </select>
                 </label>
+              </section>
+            ) : null}
+
+            {activeSection === "extensions" ? (
+              <section className="settings-section agent-settings-grid">
+                <h3>Extensions</h3>
+                {settings.extensions.availablePackages.map((extensionPackage) => {
+                  const enabled = (draft.extensions?.enabledPackageIds ?? []).includes(extensionPackage.id);
+                  return (
+                    <div className="agent-settings-card" key={extensionPackage.id}>
+                      <h4>{extensionPackage.name}</h4>
+                      <p className="muted">{extensionPackage.description}</p>
+                      <label className="inline-control">
+                        <input type="checkbox" checked={enabled} onChange={(event) => toggleExtensionPackage(extensionPackage.id, event.target.checked)} />
+                        <span>Enabled</span>
+                      </label>
+                      <small className="muted">{extensionPackage.nodeKinds.length} block types</small>
+                    </div>
+                  );
+                })}
               </section>
             ) : null}
 
@@ -408,9 +506,9 @@ export function SettingsPage({
                     </div>
                   );
                 })}
-                {CODING_AGENT_MODES.map((mode) => {
-                  const agent = codingAgentByMode.get(mode)!;
-                  const index = codingAgentDrafts.findIndex((item) => item.mode === mode);
+                  {CODING_AGENT_MODES.map((mode) => {
+                    const agent = codingAgentByMode.get(mode)!;
+                    const index = codingAgentDrafts.findIndex((item) => item.mode === mode);
                   return (
                     <div className="agent-settings-card" key={`coding-${mode}`}>
                       <h4>Coding {codingAgentModeLabel(mode)}</h4>
@@ -491,10 +589,96 @@ export function SettingsPage({
                           <FieldError value={errors[`codingAgents.${index}.systemPromptSource.value`]} />
                         </div>
                       </div>
-                    </div>
-                  );
-                })}
-                {SCANNING_AGENT_MODES.map((mode) => {
+                      </div>
+                    );
+                  })}
+                  {REVIEW_AGENT_MODES.map((mode) => {
+                    const agent = reviewAgentByMode.get(mode)!;
+                    const index = reviewAgentDrafts.findIndex((item) => item.mode === mode);
+                    return (
+                      <div className="agent-settings-card" key={`review-${mode}`}>
+                        <h4>Review {reviewAgentModeLabel(mode)}</h4>
+                        <div className="form-grid">
+                          <label className="form-field">
+                            <span>Provider</span>
+                            <select value={agent.provider} onChange={(event) => updateReviewAgent(mode, { provider: event.target.value as AgentProvider })}>
+                              {providers.map((provider) => (
+                                <option key={provider} value={provider}>
+                                  {providerLabel(provider)}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <label className="form-field">
+                            <span>Model</span>
+                            <input value={agent.model} onChange={(event) => updateReviewAgent(mode, { model: event.target.value })} />
+                            <FieldError value={errors[`reviewAgents.${index}.model`]} />
+                          </label>
+                        </div>
+                        <div className="form-grid">
+                          <label className="form-field">
+                            <span>API Key Source</span>
+                            <select value={agent.apiKeySource.type} onChange={(event) => setReviewApiKeySourceType(agent, event.target.value as ReviewAgentConfig["apiKeySource"]["type"])}>
+                              <option value="manual">Manual</option>
+                              <option value="file">Read File</option>
+                              <option value="env">Environment Variable</option>
+                            </select>
+                          </label>
+                          <div className="form-field">
+                            <span>{apiKeyEntryLabel(agent.apiKeySource.type)}</span>
+                            <ApiKeyEntry
+                              agent={agent}
+                              configured={(settings.reviewAgents ?? []).find((item) => item.mode === mode)?.apiKeyConfigured ?? false}
+                              onChange={(value) => updateReviewAgent(mode, { apiKeySource: { ...agent.apiKeySource, value } })}
+                              onFile={(file) => void handleReviewApiKeyFile(agent, file)}
+                            />
+                            <ReadSuccess value={readSuccessByField[`review.${mode}.apiKey`]} />
+                            <FieldError value={errors[`reviewAgents.${index}.apiKeySource.value`]} />
+                          </div>
+                        </div>
+                        <label className="form-field">
+                          <span>Parallel Calls</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={64}
+                            value={agent.parallelLimit}
+                            onChange={(event) => updateReviewAgent(mode, { parallelLimit: Number.parseInt(event.target.value, 10) || 1 })}
+                          />
+                        </label>
+                        <div className="form-grid">
+                          <label className="form-field">
+                            <span>System Prompt Source</span>
+                            <select value={agent.systemPromptSource.type} onChange={(event) => setReviewSystemPromptSourceType(agent, event.target.value as ReviewAgentConfig["systemPromptSource"]["type"])}>
+                              <option value="manual">Manual</option>
+                              <option value="file">Read File</option>
+                            </select>
+                          </label>
+                          <div className="form-field">
+                            <span>{agent.systemPromptSource.type === "file" ? "System Prompt File" : "System Prompt"}</span>
+                            {agent.systemPromptSource.type === "file" ? (
+                              <>
+                                <FilePicker label="Select Prompt File" accept=".txt,.md,.prompt,*/*" onFile={(file) => void handleReviewPromptFile(agent, file)} />
+                                <ReadSuccess value={readSuccessByField[`review.${mode}.prompt`]} />
+                              </>
+                            ) : (
+                              <textarea
+                                rows={3}
+                                value={agent.systemPromptSource.value ?? ""}
+                                onChange={(event) =>
+                                  updateReviewAgent(mode, {
+                                    systemPromptSource: { ...agent.systemPromptSource, value: event.target.value }
+                                  })
+                                }
+                              />
+                            )}
+                            <FieldError value={errors[`reviewAgents.${index}.systemPromptSource.value`]} />
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {SCANNING_AGENT_MODES.map((mode) => {
                   const agent = scanningAgentByMode.get(mode)!;
                   const index = scanningAgentDrafts.findIndex((item) => item.mode === mode);
                   return (
@@ -667,12 +851,12 @@ export function SettingsPage({
 }
 
 function ApiKeyEntry({
-  agent,
-  configured,
-  onChange,
-  onFile
-}: {
-	  agent: Pick<AgentConfig, "apiKeySource"> | Pick<CodingAgentConfig, "apiKeySource"> | Pick<ScanningAgentConfig, "apiKeySource">;
+    agent,
+    configured,
+    onChange,
+    onFile
+  }: {
+    agent: Pick<AgentConfig, "apiKeySource"> | Pick<CodingAgentConfig, "apiKeySource"> | Pick<ReviewAgentConfig, "apiKeySource"> | Pick<ScanningAgentConfig, "apiKeySource">;
   configured: boolean;
   onChange: (value: string) => void;
   onFile: (file: File | null) => void;
@@ -753,6 +937,17 @@ function defaultCodingAgent(mode: CodingAgentMode): CodingAgentConfig {
   };
 }
 
+function defaultReviewAgent(mode: ReviewAgentMode): ReviewAgentConfig {
+  return {
+    mode,
+    provider: "fake",
+    model: "graphcode-fake-v1",
+    parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
+    apiKeySource: { type: "env", value: "" },
+    systemPromptSource: { type: "manual", value: `Use ${mode} scoped review context.` }
+  };
+}
+
 function defaultScanningAgent(mode: ScanningAgentMode): ScanningAgentConfig {
   return {
     mode,
@@ -767,8 +962,11 @@ function defaultScanningAgent(mode: ScanningAgentMode): ScanningAgentConfig {
 function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
   const settingsCodingAgents = settings.codingAgents ?? [];
   const codingAgents = settingsCodingAgents.length > 0 ? settingsCodingAgents : CODING_AGENT_MODES.map(defaultCodingAgent);
+  const settingsReviewAgents = settings.reviewAgents ?? [];
+  const reviewAgents = settingsReviewAgents.length > 0 ? settingsReviewAgents : REVIEW_AGENT_MODES.map(defaultReviewAgent);
   const settingsScanningAgents = settings.scanningAgents ?? [];
   const scanningAgents = settingsScanningAgents.length > 0 ? settingsScanningAgents : SCANNING_AGENT_MODES.map(defaultScanningAgent);
+  const extensionSettings = settings.extensions ?? { enabledPackageIds: [], configs: {} };
   return {
     general: settings.general,
     github: {
@@ -777,6 +975,10 @@ function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
       clientId: settings.github.clientId
     },
     automation: settings.automation,
+    extensions: {
+      enabledPackageIds: extensionSettings.enabledPackageIds,
+      configs: extensionSettings.configs
+    },
     agents: settings.agents.map((agent) => ({
       agentKind: agent.agentKind,
       provider: agent.provider,
@@ -785,15 +987,23 @@ function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
       apiKeySource: { ...agent.apiKeySource, value: "" },
       systemPromptSource: agent.systemPromptSource
     })),
-    codingAgents: codingAgents.map((agent) => ({
-      mode: agent.mode,
+      codingAgents: codingAgents.map((agent) => ({
+        mode: agent.mode,
       provider: agent.provider,
       model: agent.model,
       parallelLimit: agent.parallelLimit,
       apiKeySource: { ...agent.apiKeySource, value: "" },
-      systemPromptSource: agent.systemPromptSource
-    })),
-    scanningAgents: scanningAgents.map((agent) => ({
+        systemPromptSource: agent.systemPromptSource
+      })),
+      reviewAgents: reviewAgents.map((agent) => ({
+        mode: agent.mode,
+        provider: agent.provider,
+        model: agent.model,
+        parallelLimit: agent.parallelLimit,
+        apiKeySource: { ...agent.apiKeySource, value: "" },
+        systemPromptSource: agent.systemPromptSource
+      })),
+      scanningAgents: scanningAgents.map((agent) => ({
       mode: agent.mode,
       provider: agent.provider,
       model: agent.model,

@@ -37,10 +37,10 @@ const node: GraphNode = {
   },
   parentId: null,
   attachedToId: null,
-	  customTypeId: null,
-	  source: { path: "src/module.ts", startLine: 1, endLine: 4 },
-	  execution,
-	  position: { x: 0, y: 0 },
+    customTypeId: null,
+    source: { path: "src/module.ts", startLine: 1, endLine: 4 },
+    execution,
+    position: { x: 0, y: 0 },
   size: { width: 224, height: 120 },
   childCount: 0,
   hasChildren: false,
@@ -59,9 +59,10 @@ const detail: NodeDetail = {
   inputs: [],
   outputs: [],
   processes: [],
-  formats: [],
-  basicDetails: [],
-  incomingEdges: [],
+    formats: [],
+    basicDetails: [],
+    extensionDetails: [],
+    incomingEdges: [],
   outgoingEdges: [],
   relatedNodes: [],
   reusedIn: []
@@ -87,9 +88,10 @@ function canvas(nodes: GraphNode[] = [node], edges: GraphEdge[] = []): CanvasGra
     dependencies: [],
     io: [],
     processes: [],
-    formats: [],
-    basicDetails: [],
-    customTypes: [],
+      formats: [],
+      basicDetails: [],
+      extensionDetails: [],
+      customTypes: [],
     nodeTypeStyles: [],
     reuses: []
   };
@@ -98,8 +100,8 @@ function canvas(nodes: GraphNode[] = [node], edges: GraphEdge[] = []): CanvasGra
 function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
   return {
     readGraph: vi.fn(async () => ({ nodes: [node], edges: [] as GraphEdge[] })),
-	    getNodeDetail: vi.fn(async () => detail),
-	    getCanvasGraph: vi.fn(async () => canvas()),
+      getNodeDetail: vi.fn(async () => detail),
+      getCanvasGraph: vi.fn(async () => canvas()),
     resolveExecutionMetadata: vi.fn(async () => execution),
     setStatuses: vi.fn(async () => {}),
     applyGraphPatch: vi.fn(async () => {}),
@@ -171,53 +173,53 @@ describe("GraphCode agent runtime", () => {
       { config: { ...baseConfig, agentKind: "coding" }, runId: "run-2", toolbox: tools }
     );
 
-	    expect(result.diff).toContain("src/module.ts");
-	    expect(result.response).toContain("virtualEnvironment=.venv");
-	    expect(result.response).toContain("testScriptDirectory=tests/generated");
-	    expect(tools.writeCodeProposal).toHaveBeenCalled();
-	    expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded" })]);
-	  });
+      expect(result.diff).toContain("src/module.ts");
+      expect(result.response).toContain("virtualEnvironment=.venv");
+      expect(result.response).toContain("testScriptDirectory=tests/generated");
+      expect(tools.writeCodeProposal).toHaveBeenCalled();
+      expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded" })]);
+    });
 
-	  it("stores parsed test artifact manifests with coding proposals", async () => {
-	    const command = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.sh`);
-	    fs.writeFileSync(
-	      command,
-	      [
-	        "#!/bin/sh",
-	        "cat <<'EOF'",
-	        "diff --git a/src/module.ts b/src/module.ts",
-	        "--- a/src/module.ts",
-	        "+++ b/src/module.ts",
-	        "@@",
-	        "+export const value = 2;",
-	        "GRAPHCODE_TEST_ARTIFACTS_JSON",
-	        "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}",
-	        "EOF"
-	      ].join("\n"),
-	      { mode: 0o755 }
-	    );
-	    const tools = toolbox();
+    it("stores parsed test artifact manifests with coding proposals", async () => {
+      const command = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.sh`);
+      fs.writeFileSync(
+        command,
+        [
+          "#!/bin/sh",
+          "cat <<'EOF'",
+          "diff --git a/src/module.ts b/src/module.ts",
+          "--- a/src/module.ts",
+          "+++ b/src/module.ts",
+          "@@",
+          "+export const value = 2;",
+          "GRAPHCODE_TEST_ARTIFACTS_JSON",
+          "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}",
+          "EOF"
+        ].join("\n"),
+        { mode: 0o755 }
+      );
+      const tools = toolbox();
 
-	    await runCodingAgent(
-	      {
-	        projectId: "project",
-	        nodeId: "node-1",
-	        mode: "small",
-	        prompt: "Update value and test it"
-	      },
-	      { config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command }, runId: "run-artifact", toolbox: tools }
-	    );
+      await runCodingAgent(
+        {
+          projectId: "project",
+          nodeId: "node-1",
+          mode: "small",
+          prompt: "Update value and test it"
+        },
+        { config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command }, runId: "run-artifact", toolbox: tools }
+      );
 
-	    expect(tools.writeCodeProposal).toHaveBeenCalledWith(
-	      "project",
-	      "run-artifact",
-	      "node-1",
-	      expect.stringContaining("diff --git a/src/module.ts b/src/module.ts"),
-	      expect.objectContaining({
-	        scripts: [expect.objectContaining({ relativePath: "module.test.ts" })]
-	      })
-	    );
-	  });
+      expect(tools.writeCodeProposal).toHaveBeenCalledWith(
+        "project",
+        "run-artifact",
+        "node-1",
+        expect.stringContaining("diff --git a/src/module.ts b/src/module.ts"),
+        expect.objectContaining({
+          scripts: [expect.objectContaining({ relativePath: "module.test.ts" })]
+        })
+      );
+    });
 
   it("includes function workflow canvas context for medium coding runs", async () => {
     const functionNode: GraphNode = {
@@ -286,26 +288,26 @@ describe("GraphCode agent runtime", () => {
     expect(result.response).toContain("flow-process-output");
   });
 
-	  it("rejects coding diffs that leave the selected source scope", async () => {
-	    const command = path.join(os.tmpdir(), `graphcode-agent-bad-${crypto.randomUUID()}.sh`);
-	    fs.writeFileSync(
-	      command,
-	      ["#!/bin/sh", "cat <<'EOF'", "diff --git a/src/other.ts b/src/other.ts", "--- a/src/other.ts", "+++ b/src/other.ts", "@@", "+bad", "EOF"].join("\n"),
-	      { mode: 0o755 }
-	    );
-	    await expect(
-	      runCodingAgent(
+    it("rejects coding diffs that leave the selected source scope", async () => {
+      const command = path.join(os.tmpdir(), `graphcode-agent-bad-${crypto.randomUUID()}.sh`);
+      fs.writeFileSync(
+        command,
+        ["#!/bin/sh", "cat <<'EOF'", "diff --git a/src/other.ts b/src/other.ts", "--- a/src/other.ts", "+++ b/src/other.ts", "@@", "+bad", "EOF"].join("\n"),
+        { mode: 0o755 }
+      );
+      await expect(
+        runCodingAgent(
         {
           projectId: "project",
           nodeId: "node-1",
           mode: "medium"
         },
-	        {
-	          config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command },
-	          runId: "run-3",
-	          toolbox: toolbox()
-	        }
-	      )
+          {
+            config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command },
+            runId: "run-3",
+            toolbox: toolbox()
+          }
+        )
     ).rejects.toThrow(/escaped/);
   });
 
@@ -448,19 +450,84 @@ describe("GraphCode agent runtime", () => {
     ).toThrow(/startLine/);
   });
 
-  it("marks reviewed or bugged after review", async () => {
-    const passTools = toolbox();
-    await runReviewAgent(
-      { projectId: "project", runId: "run-coded", targetNodeId: "node-1", diff: "diff --git a/src/module.ts b/src/module.ts\n+ok" },
-      { config: { ...baseConfig, agentKind: "review" }, runId: "run-review-pass", toolbox: passTools }
-    );
-    expect(passTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "reviewed" })]);
+  it("accepts extension details in structured scan output", () => {
+    const parsed = scanLocalOutputSchema.parse({
+      filePath: "models/train.py",
+      contentHash: "hash-model",
+      nodes: [
+        {
+          stableKey: "optimizer:adamw",
+          kind: "ml_optimizer",
+          name: "AdamW",
+          source: { path: "models/train.py", startLine: 10, endLine: 12 },
+          detail: {
+            extensionDetails: {
+              packageId: "@graphcode/extension-ml-pipeline",
+              schemaId: "ml_optimizer",
+              payload: { optimizerType: "adamw", learningRate: "1e-4" }
+            }
+          }
+        }
+      ],
+      edges: []
+    });
 
-    const failTools = toolbox();
-    await runReviewAgent(
-      { projectId: "project", runId: "run-coded", targetNodeId: "node-1", diff: "diff --git a/src/module.ts b/src/module.ts\n+BUG" },
-      { config: { ...baseConfig, agentKind: "review" }, runId: "run-review-fail", toolbox: failTools }
-    );
-    expect(failTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "bugged" })]);
+    expect(parsed.nodes[0]?.detail?.extensionDetails?.schemaId).toBe("ml_optimizer");
   });
+
+      it("marks reviewed or bugged after review", async () => {
+      const passTools = toolbox();
+      await runReviewAgent(
+        {
+          projectId: "project",
+          runId: "run-coded",
+          mode: "medium",
+          targetNodeId: "node-1",
+          diff: "diff --git a/src/module.ts b/src/module.ts\n--- a/src/module.ts\n+++ b/src/module.ts\n+ok",
+          targetRun: {
+            id: "run-coded",
+            projectId: "project",
+            agentKind: "coding",
+            codingMode: "medium",
+            reviewMode: null,
+            status: "succeeded",
+            baseGraphRevision: 0,
+            appliedGraphRevision: null,
+            conflictReason: null,
+            targetNodeId: "node-1",
+            prompt: "Patch value",
+            response: "Coded",
+            diff: "diff --git",
+            graphPatch: null,
+            error: null,
+            createdAt: "now",
+            updatedAt: "now"
+          }
+        },
+        { config: { ...baseConfig, agentKind: "review" }, runId: "run-review-pass", toolbox: passTools }
+      );
+      expect(passTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "reviewed" })]);
+      expect(passTools.getCanvasGraph).toHaveBeenCalledWith("project", "node-1", true);
+
+      const failTools = toolbox();
+      await runReviewAgent(
+        { projectId: "project", runId: "run-coded", targetNodeId: "node-1", diff: "diff --git a/src/module.ts b/src/module.ts\n+BUG" },
+        { config: { ...baseConfig, agentKind: "review" }, runId: "run-review-fail", toolbox: failTools }
+      );
+      expect(failTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "bugged" })]);
+
+      const scopeLeakTools = toolbox();
+      const scopeLeakResult = await runReviewAgent(
+        {
+          projectId: "project",
+          runId: "run-coded",
+          mode: "large",
+          targetNodeId: "node-1",
+          diff: "diff --git a/src/other.ts b/src/other.ts\n--- a/src/other.ts\n+++ b/src/other.ts\n+leak"
+        },
+        { config: { ...baseConfig, agentKind: "review" }, runId: "run-review-scope", toolbox: scopeLeakTools }
+      );
+      expect(scopeLeakResult.response).toContain("Review mode: large");
+      expect(scopeLeakTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "bugged" })]);
+    });
 });

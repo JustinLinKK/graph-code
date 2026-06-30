@@ -47,24 +47,27 @@ describe("SQLite graph repository", () => {
         "io_details",
         "process_details",
         "format_details",
+        "extension_node_details",
         "graph_node_layouts",
-	        "graph_node_type_styles",
-	        "graph_revisions",
-	        "graph_entity_versions",
-	        "workspace_settings",
-	        "coding_agent_settings",
-        "scanning_agent_settings",
+          "graph_node_type_styles",
+          "graph_revisions",
+          "graph_entity_versions",
+            "workspace_settings",
+            "workspace_extension_settings",
+            "coding_agent_settings",
+            "review_agent_settings",
+          "scanning_agent_settings",
         "scan_file_state",
-	        "agent_settings",
-	        "agent_runs",
-	        "agent_messages",
-	        "graph_status_history",
-	        "code_proposals",
-	        "coding_workflows",
-	        "coding_workflow_items"
-	      ])
-	    );
-	  });
+          "agent_settings",
+          "agent_runs",
+          "agent_messages",
+          "graph_status_history",
+          "code_proposals",
+          "coding_workflows",
+          "coding_workflow_items"
+        ])
+      );
+    });
 
   it("saves settings with masked views and records agent status history", () => {
     const project = repo.seedSelfGraph(selfRootPath);
@@ -81,8 +84,18 @@ describe("SQLite graph repository", () => {
           apiKeySource: { type: "manual", value: "secret-value" },
           systemPromptSource: { type: "manual", value: "Stay scoped." }
         }
-      ],
-      scanningAgents: [
+        ],
+        reviewAgents: [
+          {
+            mode: "small",
+            provider: "openai",
+            model: "gpt-4.1-mini",
+            parallelLimit: 1,
+            apiKeySource: { type: "manual", value: "review-secret" },
+            systemPromptSource: { type: "manual", value: "Review one block." }
+          }
+        ],
+        scanningAgents: [
         {
           mode: "local",
           provider: "openai",
@@ -111,118 +124,224 @@ describe("SQLite graph repository", () => {
     expect(settings.github.clientId).toBe("github-client");
     expect(settings.github.auth.tokenConfigured).toBe(false);
     expect(settings.automation.autoReviewAfterCoding).toBe(false);
-    expect(settings.agents.some((agent) => agent.agentKind === "coding")).toBe(false);
-    expect(settings.codingAgents).toHaveLength(3);
-    expect(settings.scanningAgents).toHaveLength(3);
+    expect(settings.extensions.availablePackages.map((extensionPackage) => extensionPackage.id)).toEqual([
+      "@graphcode/extension-embedded-systems",
+      "@graphcode/extension-ml-pipeline"
+    ]);
+    expect(settings.extensions.enabledPackageIds).toEqual([]);
+      expect(settings.agents.some((agent) => agent.agentKind === "coding")).toBe(false);
+      expect(settings.agents.some((agent) => agent.agentKind === "review")).toBe(false);
+      expect(settings.codingAgents).toHaveLength(3);
+      expect(settings.reviewAgents).toHaveLength(3);
+      expect(settings.scanningAgents).toHaveLength(3);
     expect(settings.codingAgents.find((agent) => agent.mode === "medium")?.apiKeySource.value).toBe("");
     expect(settings.codingAgents.find((agent) => agent.mode === "medium")?.apiKeyConfigured).toBe(true);
-    expect(settings.scanningAgents.find((agent) => agent.mode === "local")?.apiKeySource.value).toBe("");
-    expect(settings.scanningAgents.find((agent) => agent.mode === "local")?.apiKeyConfigured).toBe(true);
-    expect(raw.apiKeySource.value).toBe("secret-value");
-    expect(repo.getCodingAgentConfig(project.id, "large").apiKeySource.value).toBe("secret-value");
-    expect(repo.getScanningAgentConfig(project.id, "local").apiKeySource.value).toBe("scan-secret");
-    expect(run.codingMode).toBe("medium");
+      expect(settings.scanningAgents.find((agent) => agent.mode === "local")?.apiKeySource.value).toBe("");
+      expect(settings.scanningAgents.find((agent) => agent.mode === "local")?.apiKeyConfigured).toBe(true);
+      expect(settings.reviewAgents.find((agent) => agent.mode === "small")?.apiKeySource.value).toBe("");
+      expect(settings.reviewAgents.find((agent) => agent.mode === "small")?.apiKeyConfigured).toBe(true);
+      expect(raw.apiKeySource.value).toBe("secret-value");
+      expect(repo.getCodingAgentConfig(project.id, "large").apiKeySource.value).toBe("secret-value");
+      expect(repo.getReviewAgentConfig(project.id, "small").apiKeySource.value).toBe("review-secret");
+      expect(repo.getScanningAgentConfig(project.id, "local").apiKeySource.value).toBe("scan-secret");
+      expect(run.codingMode).toBe("medium");
+      expect(run.reviewMode).toBeNull();
     expect(history[0].status).toBe("coded");
-	    expect(repo.getNode("module-web").agentStatus).toBe("coded");
-	  });
+    expect(repo.getNode("module-web").agentStatus).toBe("coded");
+    });
 
-	  it("plans layered coding workflows, resolves execution metadata, and stores test artifacts", () => {
-	    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-workflow-"));
-	    const project = repo.createProject({ id: "workflow-project", name: "Workflow Project", rootPath });
-	    repo.createNode({ id: "framework-root", projectId: project.id, kind: "framework", name: "Root", agentStatus: "implemented" });
-	    repo.createNode({
-	      id: "module-root",
-	      projectId: project.id,
-	      kind: "module",
-	      name: "Module",
-	      parentId: "framework-root",
-	      sourcePath: "src/module.ts",
-	      agentStatus: "planning",
-	      execution: { testCommand: "pnpm test", testScriptDirectory: "tests/generated" }
-	    });
-	    repo.createNode({
-	      id: "function-leaf",
-	      projectId: project.id,
-	      kind: "function",
-	      name: "leaf",
-	      parentId: "module-root",
-	      sourcePath: "src/module.ts",
-	      agentStatus: "planning",
-	      execution: { virtualEnvironment: ".venv" }
-	    });
-	    repo.createNode({
-	      id: "process-leaf",
-	      projectId: project.id,
-	      kind: "process",
-	      name: "Validate",
-	      attachedToId: "function-leaf",
-	      sourcePath: "src/module.ts",
-	      agentStatus: "planning"
-	    });
-	    repo.createNode({
-	      id: "function-parent",
-	      projectId: project.id,
-	      kind: "function",
-	      name: "parent",
-	      parentId: "module-root",
-	      sourcePath: "src/module.ts",
-	      agentStatus: "planning"
-	    });
-	    repo.createNode({
-	      id: "function-child",
-	      projectId: project.id,
-	      kind: "function",
-	      name: "child",
-	      parentId: "function-parent",
-	      sourcePath: "src/module.ts",
-	      agentStatus: "planning"
-	    });
+    it("gates native extension blocks by workspace settings and stores extension details", async () => {
+      const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-extension-"));
+      const project = repo.createProject({ id: "extension-project", name: "Extension Project", rootPath });
+      repo.createNode({ id: "framework-root", projectId: project.id, kind: "framework", name: "Root" });
 
-	    const preview = repo.previewCodingWorkflow(project.id, "module-root");
-	    const processItem = preview.items.find((item) => item.nodeId === "process-leaf");
-	    const leafItem = preview.items.find((item) => item.nodeId === "function-leaf");
-	    const parentItem = preview.items.find((item) => item.nodeId === "function-parent");
-	    const childItem = preview.items.find((item) => item.nodeId === "function-child");
-	    const moduleItem = preview.items.find((item) => item.nodeId === "module-root");
-	    const resolved = repo.resolveExecutionMetadata("process-leaf");
-	    const run = repo.createAgentRun({ projectId: project.id, agentKind: "coding", targetNodeId: "process-leaf", status: "succeeded" });
-	    const proposalId = repo.storeCodeProposal({
-	      projectId: project.id,
-	      agentRunId: run.id,
-	      targetNodeId: "process-leaf",
-	      diff: "diff --git a/src/module.ts b/src/module.ts",
-	      artifactManifest: {
-	        testScriptDirectory: "ignored-by-storage",
-	        scripts: [{ relativePath: "leaf.test.ts", content: "test('leaf', () => {})" }]
-	      }
-	    });
-	    const proposal = repo.getLatestCodeProposalForRun(run.id);
-	    const workflow = repo.createCodingWorkflow(project.id, "module-root", [], "running");
-	    const layerZeroItems = workflow.items.filter((item) => item.layerIndex === 0);
-	    for (const item of layerZeroItems) {
-	      repo.updateCodingWorkflowItem({
-	        itemId: item.id,
-	        status: item.nodeId === "process-leaf" ? "proposed" : "skipped",
-	        proposalId: item.nodeId === "process-leaf" ? proposalId : null
-	      });
-	    }
-	    repo.applyCodingWorkflowLayer(project.id, workflow.id, 0);
+      expect(() =>
+        repo.createNode({
+          id: "robot-system",
+          projectId: project.id,
+          kind: "embedded_system",
+          name: "Robot System",
+          parentId: "framework-root"
+        })
+      ).toThrow(/Enable Embedded Systems/);
 
-	    expect(processItem?.layerIndex).toBe(0);
-	    expect(processItem?.recommendedMode).toBe("small");
-	    expect(leafItem?.layerIndex).toBeGreaterThan(processItem?.layerIndex ?? -1);
-	    expect(childItem?.recommendedMode).toBe("small");
-	    expect(parentItem?.recommendedMode).toBe("medium");
-	    expect(moduleItem?.layerIndex).toBeGreaterThan(parentItem?.layerIndex ?? -1);
-	    expect(resolved.virtualEnvironment).toBe(".venv");
-	    expect(resolved.testCommand).toBe("pnpm test");
-	    expect(proposal?.id).toBe(proposalId);
-	    expect(proposal?.artifactManifest?.testScriptDirectory).toBe(path.join(".graphcode", "artifacts", "code-proposals", proposalId));
-	    expect(fs.existsSync(path.join(rootPath, ".graphcode", "artifacts", "code-proposals", proposalId, "leaf.test.ts"))).toBe(true);
-	    expect(fs.existsSync(path.join(rootPath, "tests", "generated", "leaf.test.ts"))).toBe(true);
-	  });
+      const disabledScan: ScanPipelineResult = {
+        initial: true,
+        inventory: [],
+        changedFiles: [],
+        deletedFiles: [],
+        localOutputs: [],
+        mediumOutputs: [],
+        globalOutput: {
+          summary: "",
+          nodes: [
+            {
+              stableKey: "root",
+              kind: "framework",
+              name: "Scanned Workspace",
+              summary: "",
+              codeContext: "",
+              source: { path: null, startLine: null, endLine: null },
+              language: "unknown"
+            },
+            {
+              stableKey: "robot",
+              kind: "embedded_system",
+              name: "Robot",
+              summary: "",
+              codeContext: "",
+              source: { path: null, startLine: null, endLine: null },
+              language: "unknown",
+              parentStableKey: "root"
+            }
+          ],
+          edges: []
+        }
+      };
+      expect(() => repo.applyScanPipelineResult(project.id, disabledScan)).toThrow(/extension package is disabled/);
 
-	  it("applies planning graph patches transactionally and conflicts overlapping stale edits", () => {
+      repo.saveWorkspaceSettings(project.id, {
+        general: { theme: "system" },
+        github: { enabled: false, repository: "", clientId: "" },
+        automation: { autoReviewAfterCoding: true },
+        extensions: { enabledPackageIds: ["@graphcode/extension-embedded-systems"], configs: {} },
+        agents: []
+      });
+      const system = repo.createNodeFromMutation(project.id, {
+        kind: "embedded_system",
+        name: "Robot System",
+        parentId: "framework-root",
+        extensionDetails: {
+          packageId: "@graphcode/extension-embedded-systems",
+          schemaId: "embedded_system",
+          payload: { runtime: "ros2", target: "rover" }
+        }
+      });
+      const device = repo.createNodeFromMutation(project.id, {
+        kind: "embedded_device",
+        name: "Controller",
+        parentId: system.id,
+        extensionDetails: {
+          packageId: "@graphcode/extension-embedded-systems",
+          schemaId: "embedded_device",
+          payload: { deviceType: "mcu", voltage: "3.3V" }
+        }
+      });
+      const uart = repo.createNodeFromMutation(project.id, {
+        kind: "uart_bus",
+        name: "Telemetry UART",
+        attachedToId: device.id,
+        extensionDetails: {
+          packageId: "@graphcode/extension-embedded-systems",
+          schemaId: "uart_bus",
+          payload: { port: "USART1", baud: "115200", parity: "none" }
+        }
+      });
+
+      const detail = repo.getNodeDetail(device.id);
+      const canvas = await repo.getCanvasGraph({ projectId: project.id, rootNodeId: system.id });
+      expect(detail.extensionDetails.find((row) => row.node.id === uart.id)?.details.payload.baud).toBe(115200);
+      expect(canvas.extensionDetails.map((row) => row.nodeId)).toContain(uart.id);
+      expect(repo.getWorkspaceSettings(project.id).extensions.enabledPackageIds).toEqual(["@graphcode/extension-embedded-systems"]);
+    });
+
+    it("plans layered coding workflows, resolves execution metadata, and stores test artifacts", () => {
+      const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-workflow-"));
+      const project = repo.createProject({ id: "workflow-project", name: "Workflow Project", rootPath });
+      repo.createNode({ id: "framework-root", projectId: project.id, kind: "framework", name: "Root", agentStatus: "implemented" });
+      repo.createNode({
+        id: "module-root",
+        projectId: project.id,
+        kind: "module",
+        name: "Module",
+        parentId: "framework-root",
+        sourcePath: "src/module.ts",
+        agentStatus: "planning",
+        execution: { testCommand: "pnpm test", testScriptDirectory: "tests/generated" }
+      });
+      repo.createNode({
+        id: "function-leaf",
+        projectId: project.id,
+        kind: "function",
+        name: "leaf",
+        parentId: "module-root",
+        sourcePath: "src/module.ts",
+        agentStatus: "planning",
+        execution: { virtualEnvironment: ".venv" }
+      });
+      repo.createNode({
+        id: "process-leaf",
+        projectId: project.id,
+        kind: "process",
+        name: "Validate",
+        attachedToId: "function-leaf",
+        sourcePath: "src/module.ts",
+        agentStatus: "planning"
+      });
+      repo.createNode({
+        id: "function-parent",
+        projectId: project.id,
+        kind: "function",
+        name: "parent",
+        parentId: "module-root",
+        sourcePath: "src/module.ts",
+        agentStatus: "planning"
+      });
+      repo.createNode({
+        id: "function-child",
+        projectId: project.id,
+        kind: "function",
+        name: "child",
+        parentId: "function-parent",
+        sourcePath: "src/module.ts",
+        agentStatus: "planning"
+      });
+
+      const preview = repo.previewCodingWorkflow(project.id, "module-root");
+      const processItem = preview.items.find((item) => item.nodeId === "process-leaf");
+      const leafItem = preview.items.find((item) => item.nodeId === "function-leaf");
+      const parentItem = preview.items.find((item) => item.nodeId === "function-parent");
+      const childItem = preview.items.find((item) => item.nodeId === "function-child");
+      const moduleItem = preview.items.find((item) => item.nodeId === "module-root");
+      const resolved = repo.resolveExecutionMetadata("process-leaf");
+      const run = repo.createAgentRun({ projectId: project.id, agentKind: "coding", targetNodeId: "process-leaf", status: "succeeded" });
+      const proposalId = repo.storeCodeProposal({
+        projectId: project.id,
+        agentRunId: run.id,
+        targetNodeId: "process-leaf",
+        diff: "diff --git a/src/module.ts b/src/module.ts",
+        artifactManifest: {
+          testScriptDirectory: "ignored-by-storage",
+          scripts: [{ relativePath: "leaf.test.ts", content: "test('leaf', () => {})" }]
+        }
+      });
+      const proposal = repo.getLatestCodeProposalForRun(run.id);
+      const workflow = repo.createCodingWorkflow(project.id, "module-root", [], "running");
+      const layerZeroItems = workflow.items.filter((item) => item.layerIndex === 0);
+      for (const item of layerZeroItems) {
+        repo.updateCodingWorkflowItem({
+          itemId: item.id,
+          status: item.nodeId === "process-leaf" ? "proposed" : "skipped",
+          proposalId: item.nodeId === "process-leaf" ? proposalId : null
+        });
+      }
+      repo.applyCodingWorkflowLayer(project.id, workflow.id, 0);
+
+      expect(processItem?.layerIndex).toBe(0);
+      expect(processItem?.recommendedMode).toBe("small");
+      expect(leafItem?.layerIndex).toBeGreaterThan(processItem?.layerIndex ?? -1);
+      expect(childItem?.recommendedMode).toBe("small");
+      expect(parentItem?.recommendedMode).toBe("medium");
+      expect(moduleItem?.layerIndex).toBeGreaterThan(parentItem?.layerIndex ?? -1);
+      expect(resolved.virtualEnvironment).toBe(".venv");
+      expect(resolved.testCommand).toBe("pnpm test");
+      expect(proposal?.id).toBe(proposalId);
+      expect(proposal?.artifactManifest?.testScriptDirectory).toBe(path.join(".graphcode", "artifacts", "code-proposals", proposalId));
+      expect(fs.existsSync(path.join(rootPath, ".graphcode", "artifacts", "code-proposals", proposalId, "leaf.test.ts"))).toBe(true);
+      expect(fs.existsSync(path.join(rootPath, "tests", "generated", "leaf.test.ts"))).toBe(true);
+    });
+
+    it("applies planning graph patches transactionally and conflicts overlapping stale edits", () => {
     const project = repo.seedSelfGraph(selfRootPath);
     const first = repo.createAgentRun({
       projectId: project.id,
@@ -321,7 +440,9 @@ describe("SQLite graph repository", () => {
         api_key_source_type, api_key_source_value,
         system_prompt_source_type, system_prompt_source_value
       )
-      VALUES ('legacy', 'coding', 'openai', 'legacy-coder', 6, 'manual', 'legacy-key', 'manual', 'legacy prompt');
+        VALUES
+          ('legacy', 'coding', 'openai', 'legacy-coder', 6, 'manual', 'legacy-key', 'manual', 'legacy prompt'),
+          ('legacy', 'review', 'openai', 'legacy-reviewer', 3, 'manual', 'legacy-review-key', 'manual', 'legacy review prompt');
       CREATE TABLE agent_runs (
         id TEXT PRIMARY KEY,
         project_id TEXT NOT NULL,
@@ -342,13 +463,17 @@ describe("SQLite graph repository", () => {
     migrate(legacyDb);
     const legacyRepo = new GraphRepository(legacyDb);
 
-    const settings = legacyRepo.getWorkspaceSettings("legacy");
-    expect(settings.codingAgents.map((agent) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
-    expect(settings.scanningAgents.map((agent) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
-    expect(legacyRepo.getCodingAgentConfig("legacy", "small").model).toBe("legacy-coder");
-    expect(legacyRepo.getCodingAgentConfig("legacy", "large").apiKeySource.value).toBe("legacy-key");
-    expect(legacyRepo.getScanningAgentConfig("legacy", "global").parallelLimit).toBe(1);
-    expect(legacyRepo.getAgentRun("run-legacy").codingMode).toBe("medium");
+      const settings = legacyRepo.getWorkspaceSettings("legacy");
+      expect(settings.codingAgents.map((agent) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
+      expect(settings.reviewAgents.map((agent) => agent.mode).sort()).toEqual(["large", "medium", "small"]);
+      expect(settings.scanningAgents.map((agent) => agent.mode).sort()).toEqual(["global", "local", "medium"]);
+      expect(legacyRepo.getCodingAgentConfig("legacy", "small").model).toBe("legacy-coder");
+      expect(legacyRepo.getCodingAgentConfig("legacy", "large").apiKeySource.value).toBe("legacy-key");
+      expect(legacyRepo.getReviewAgentConfig("legacy", "small").model).toBe("legacy-reviewer");
+      expect(legacyRepo.getReviewAgentConfig("legacy", "large").apiKeySource.value).toBe("legacy-review-key");
+      expect(legacyRepo.getScanningAgentConfig("legacy", "global").parallelLimit).toBe(1);
+      expect(legacyRepo.getAgentRun("run-legacy").codingMode).toBe("medium");
+      expect(legacyRepo.createAgentRun({ projectId: "legacy", agentKind: "review" }).reviewMode).toBe("medium");
 
     legacyDb.close();
   });

@@ -23,9 +23,10 @@ import {
   type OpenWorkspaceResult,
   type OpenWorkspaceRequest,
   type PlanningChatRequest,
-  type Project,
-  type ReviewAgentRequest,
-  SCANNING_AGENT_MODES,
+    type Project,
+    type ReviewAgentRequest,
+    type ReviewAgentMode,
+    SCANNING_AGENT_MODES,
   type ScanningAgentRequest,
   type SettingsValidationResult,
   type WorkspaceSettings,
@@ -92,22 +93,33 @@ export class WorkspaceRuntime {
     };
   }
 
-  async validateSettings(projectId: string, input: WorkspaceSettingsMutation): Promise<SettingsValidationResult> {
-    const validation = this.repository.validateWorkspaceSettings(projectId, input);
-    const fieldErrors = { ...validation.fieldErrors };
-    await Promise.all(
-      input.agents.map(async (agent, index) => {
-        if (agent.provider !== "claudecode") {
-          return;
-        }
+    async validateSettings(projectId: string, input: WorkspaceSettingsMutation): Promise<SettingsValidationResult> {
+      const validation = this.repository.validateWorkspaceSettings(projectId, input);
+      const fieldErrors = { ...validation.fieldErrors };
+      await Promise.all([
+        ...input.agents.map(async (agent, index) => {
+          if (agent.provider !== "claudecode") {
+            return;
+          }
         const command = agent.model.trim() || "claude";
         try {
           await execFileAsync(command, ["--version"], { timeout: 5000 });
-        } catch {
-          fieldErrors[`agents.${index}.model`] = `Claude Code command not found or not executable: ${command}`;
-        }
-      })
-    );
+          } catch {
+            fieldErrors[`agents.${index}.model`] = `Claude Code command not found or not executable: ${command}`;
+          }
+        }),
+        ...(input.reviewAgents ?? []).map(async (agent, index) => {
+          if (agent.provider !== "claudecode") {
+            return;
+          }
+          const command = agent.model.trim() || "claude";
+          try {
+            await execFileAsync(command, ["--version"], { timeout: 5000 });
+          } catch {
+            fieldErrors[`reviewAgents.${index}.model`] = `Claude Code command not found or not executable: ${command}`;
+          }
+        })
+      ]);
     return {
       ok: Object.keys(fieldErrors).length === 0,
       testedAt: new Date().toISOString(),
@@ -236,16 +248,16 @@ export class WorkspaceRuntime {
       status: "running"
     });
     this.repository.addAgentMessage({ runId: run.id, role: "user", content: input.prompt ?? "Start code" });
-    const codingRun = await this.finishAgentRun(run, () =>
+      const codingRun = await this.finishAgentRun(run, () =>
       runCodingAgent(input, {
         config: { ...this.repository.getCodingAgentConfig(input.projectId, mode), agentKind: "coding" },
         runId: run.id,
         toolbox: this.createToolbox(input.projectId)
       })
-    );
-    if (codingRun.status === "succeeded" && (options.autoReview ?? true) && this.repository.getWorkspaceSettings(input.projectId).automation.autoReviewAfterCoding) {
-      await this.runReview({ projectId: input.projectId, runId: codingRun.id });
-    }
+      );
+      if (codingRun.status === "succeeded" && (options.autoReview ?? true) && this.repository.getWorkspaceSettings(input.projectId).automation.autoReviewAfterCoding) {
+        await this.runReview({ projectId: input.projectId, runId: codingRun.id, mode: codingRun.codingMode ?? "medium" });
+      }
     return codingRun;
   }
 
@@ -275,24 +287,28 @@ export class WorkspaceRuntime {
     return this.repository.getCodingWorkflow(workflow.id);
   }
 
-  async runReview(input: ReviewAgentRequest): Promise<AgentRun> {
-    const targetRun = this.repository.getAgentRun(input.runId);
-    const run = this.repository.createAgentRun({
-      projectId: input.projectId,
-      agentKind: "review",
-      targetNodeId: targetRun.targetNodeId,
-      prompt: `Review ${input.runId}`,
-      status: "running"
+    async runReview(input: ReviewAgentRequest): Promise<AgentRun> {
+      const targetRun = this.repository.getAgentRun(input.runId);
+      const mode: ReviewAgentMode = input.mode ?? targetRun.codingMode ?? "medium";
+      const run = this.repository.createAgentRun({
+        projectId: input.projectId,
+        agentKind: "review",
+        reviewMode: mode,
+        targetNodeId: targetRun.targetNodeId,
+        prompt: `Review ${input.runId}`,
+        status: "running"
     });
     return this.finishAgentRun(run, () =>
       runReviewAgent(
         {
-          ...input,
-          diff: targetRun.diff,
-          targetNodeId: targetRun.targetNodeId
-        },
-        {
-          config: this.repository.getAgentConfig(input.projectId, "review"),
+            ...input,
+            mode,
+            targetRun,
+            diff: targetRun.diff,
+            targetNodeId: targetRun.targetNodeId
+          },
+          {
+            config: { ...this.repository.getReviewAgentConfig(input.projectId, mode), agentKind: "review" },
           runId: run.id,
           toolbox: this.createToolbox(input.projectId)
         }
@@ -306,10 +322,12 @@ export class WorkspaceRuntime {
 
   async runScanning(input: ScanningAgentRequest): Promise<AgentRun> {
     const project = this.repository.getProject(input.projectId);
-    const enrichedInput = {
+    const settings = this.repository.getWorkspaceSettings(input.projectId);
+    const enrichedInput: ScanningAgentRequest = {
       ...input,
       projectDescription: input.projectDescription ?? project.description,
-      scanningInstructions: input.scanningInstructions ?? project.scanningInstructions
+      scanningInstructions: input.scanningInstructions ?? project.scanningInstructions,
+      enabledExtensionPackageIds: settings.extensions.enabledPackageIds
     };
     const prompt = scanningPrompt(enrichedInput);
     const run = this.repository.createAgentRun({

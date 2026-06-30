@@ -3,21 +3,24 @@ import {
   agentConfigSchema,
   agentRunSchema,
   agentRunStatusSchema,
-	  agentStatusSchema,
-	  blankWorkspaceInitializationSchema,
-	  blockExecutionMetadataSchema,
-	  boundaryMutationSchema,
-	  codingAgentConfigSchema,
-	  codingAgentModeSchema,
-	  codingAgentRequestSchema,
-	  codingWorkflowApplyLayerRequestSchema,
-	  codingWorkflowItemSchema,
-	  codingWorkflowSchema,
-	  codingWorkflowStartRequestSchema,
-	  codeProposalArtifactManifestSchema,
-	  edgeMutationSchema,
-	  graphNodeSchema,
-	  graphPatchSchema,
+    agentStatusSchema,
+    blankWorkspaceInitializationSchema,
+    blockExecutionMetadataSchema,
+    boundaryMutationSchema,
+    codingAgentConfigSchema,
+    codingAgentModeSchema,
+    codingAgentRequestSchema,
+    codingWorkflowApplyLayerRequestSchema,
+    codingWorkflowItemSchema,
+    codingWorkflowSchema,
+    codingWorkflowStartRequestSchema,
+    codeProposalArtifactManifestSchema,
+    edgeMutationSchema,
+    AVAILABLE_EXTENSION_PACKAGES,
+    extensionNodeDetailsMutationSchema,
+    extensionNodeDefinitionForKind,
+    graphNodeSchema,
+    graphPatchSchema,
   SCANNING_AGENT_MODES,
   githubDevicePollRequestSchema,
   githubDeviceStartResponseSchema,
@@ -37,11 +40,15 @@ import {
   tagAssignmentSchema,
   nodeTypeStyleSchema,
   openWorkspaceSchema,
-  planningChatRequestSchema,
-  projectSchema,
-  scanningAgentConfigSchema,
-  scanningAgentModeSchema,
-  scanningAgentRequestSchema,
+      planningChatRequestSchema,
+      projectSchema,
+    REVIEW_AGENT_MODES,
+    reviewAgentConfigSchema,
+    reviewAgentModeSchema,
+    reviewAgentRequestSchema,
+    scanningAgentConfigSchema,
+    scanningAgentModeSchema,
+    scanningAgentRequestSchema,
   settingsValidationResultSchema,
   workspaceInitializationSchema,
   workspaceSettingsSchema,
@@ -54,6 +61,32 @@ describe("graph model enums", () => {
     expect(graphNodeKindSchema.parse("website")).toBe("website");
     expect(graphNodeKindSchema.parse("ui_component")).toBe("ui_component");
     expect(graphNodeKindSchema.parse("dependency")).toBe("dependency");
+    expect(graphNodeKindSchema.parse("ros_topic")).toBe("ros_topic");
+    expect(graphNodeKindSchema.parse("ml_layer")).toBe("ml_layer");
+  });
+
+  it("accepts native extension package manifests and detail payloads", () => {
+    expect(AVAILABLE_EXTENSION_PACKAGES.map((extensionPackage) => extensionPackage.id)).toEqual([
+      "@graphcode/extension-embedded-systems",
+      "@graphcode/extension-ml-pipeline"
+    ]);
+    expect(extensionNodeDefinitionForKind("ml_optimizer")?.fields.some((field) => field.key === "optimizerType")).toBe(true);
+    expect(
+      extensionNodeDetailsMutationSchema.parse({
+        packageId: "@graphcode/extension-embedded-systems",
+        schemaId: "uart_bus",
+        payload: { baud: 115200, parity: "none" }
+      }).payload.baud
+    ).toBe(115200);
+    expect(
+      workspaceSettingsMutationSchema.parse({
+        general: { theme: "system" },
+        github: { enabled: false, repository: "", clientId: "" },
+        automation: { autoReviewAfterCoding: true },
+        extensions: { enabledPackageIds: ["@graphcode/extension-ml-pipeline"], configs: {} },
+        agents: []
+      }).extensions.enabledPackageIds
+    ).toEqual(["@graphcode/extension-ml-pipeline"]);
   });
 
   it("separates domain nodes from attachment nodes", () => {
@@ -200,9 +233,11 @@ describe("graph model enums", () => {
   it("accepts agent settings, statuses, validation, and run payloads", () => {
     expect(agentStatusSchema.parse("coded")).toBe("coded");
     expect(agentStatusSchema.parse("implemented")).toBe("implemented");
-    expect(agentRunStatusSchema.parse("conflicted")).toBe("conflicted");
-    expect(codingAgentModeSchema.parse("small")).toBe("small");
-    expect(processKindSchema.parse("condition")).toBe("condition");
+      expect(agentRunStatusSchema.parse("conflicted")).toBe("conflicted");
+      expect(codingAgentModeSchema.parse("small")).toBe("small");
+      expect(REVIEW_AGENT_MODES).toEqual(["small", "medium", "large"]);
+      expect(reviewAgentModeSchema.parse("large")).toBe("large");
+      expect(processKindSchema.parse("condition")).toBe("condition");
     expect(gitStatusInfoSchema.parse({ worktree: "pending", change: "modified" }).change).toBe("modified");
     expect(
       agentConfigSchema.parse({
@@ -214,16 +249,26 @@ describe("graph model enums", () => {
         systemPromptSource: { type: "manual", value: "Stay scoped." }
       }).provider
     ).toBe("openrouter");
-    expect(
-      codingAgentConfigSchema.parse({
-        mode: "large",
+      expect(
+        codingAgentConfigSchema.parse({
+          mode: "large",
         provider: "openai",
         model: "gpt-5",
         parallelLimit: 2,
         apiKeySource: { type: "env", value: "OPENAI_API_KEY" },
         systemPromptSource: { type: "manual", value: "Use full scoped context." }
       }).mode
-    ).toBe("large");
+      ).toBe("large");
+      expect(
+        reviewAgentConfigSchema.parse({
+          mode: "medium",
+          provider: "openai",
+          model: "gpt-5",
+          parallelLimit: 2,
+          apiKeySource: { type: "env", value: "OPENAI_API_KEY" },
+          systemPromptSource: { type: "manual", value: "Review scoped diffs." }
+        }).mode
+      ).toBe("medium");
     expect(SCANNING_AGENT_MODES).toEqual(["local", "medium", "global"]);
     expect(scanningAgentModeSchema.parse("global")).toBe("global");
     expect(
@@ -263,17 +308,27 @@ describe("graph model enums", () => {
             systemPromptSource: { type: "manual", value: "Plan." }
           }
         ],
-        codingAgents: [
-          {
-            mode: "small",
+          codingAgents: [
+            {
+              mode: "small",
             provider: "fake",
             model: "fake-small",
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
-            systemPromptSource: { type: "manual", value: "Small scoped coding." }
-          }
-        ],
-        scanningAgents: [
+              systemPromptSource: { type: "manual", value: "Small scoped coding." }
+            }
+          ],
+          reviewAgents: [
+            {
+              mode: "small",
+              provider: "fake",
+              model: "fake-review-small",
+              parallelLimit: 1,
+              apiKeySource: { type: "env", value: "" },
+              systemPromptSource: { type: "manual", value: "Small scoped review." }
+            }
+          ],
+          scanningAgents: [
           {
             mode: "local",
             provider: "fake",
@@ -302,20 +357,37 @@ describe("graph model enums", () => {
           }
         },
         automation: { autoReviewAfterCoding: true },
+        extensions: {
+          availablePackages: AVAILABLE_EXTENSION_PACKAGES,
+          enabledPackageIds: [],
+          configs: {}
+        },
         agents: [],
-        codingAgents: [
-          {
-            mode: "medium",
+          codingAgents: [
+            {
+              mode: "medium",
             provider: "fake",
             model: "fake-medium",
             parallelLimit: 2,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Medium scoped coding." },
             apiKeyConfigured: false,
-            systemPromptConfigured: true
-          }
-        ],
-        scanningAgents: [
+              systemPromptConfigured: true
+            }
+          ],
+          reviewAgents: [
+            {
+              mode: "large",
+              provider: "fake",
+              model: "fake-review-large",
+              parallelLimit: 2,
+              apiKeySource: { type: "env", value: "" },
+              systemPromptSource: { type: "manual", value: "Large scoped review." },
+              apiKeyConfigured: false,
+              systemPromptConfigured: true
+            }
+          ],
+          scanningAgents: [
           {
             mode: "global",
             provider: "fake",
@@ -339,9 +411,10 @@ describe("graph model enums", () => {
     const parsedRun = agentRunSchema.parse({
         id: "run-1",
         projectId: "project",
-        agentKind: "coding",
-        codingMode: "large",
-        status: "succeeded",
+          agentKind: "coding",
+          codingMode: "large",
+          reviewMode: null,
+          status: "succeeded",
         targetNodeId: "node-1",
         prompt: "Do it",
         response: "Done",
@@ -352,101 +425,114 @@ describe("graph model enums", () => {
         updatedAt: "now"
       });
     expect(parsedRun.status).toBe("succeeded");
-    expect(parsedRun.baseGraphRevision).toBe(0);
-	    expect(parsedRun.appliedGraphRevision).toBeNull();
-	    expect(parsedRun.conflictReason).toBeNull();
-	  });
+      expect(parsedRun.baseGraphRevision).toBe(0);
+        expect(parsedRun.appliedGraphRevision).toBeNull();
+        expect(parsedRun.conflictReason).toBeNull();
+      expect(
+        reviewAgentRequestSchema.parse({
+          projectId: "project",
+          runId: "run-1"
+        }).mode
+      ).toBeUndefined();
+      expect(
+        reviewAgentRequestSchema.parse({
+          projectId: "project",
+          runId: "run-1",
+          mode: "small"
+        }).mode
+      ).toBe("small");
+      });
 
-	  it("accepts block execution metadata and layered coding workflow payloads", () => {
-	    expect(
-	      blockExecutionMetadataSchema.parse({
-	        testScriptDirectory: "tests/generated",
-	        virtualEnvironment: ".venv",
-	        workingDirectory: ".",
-	        setupCommand: "pnpm install",
-	        testCommand: "pnpm test"
-	      }).virtualEnvironment
-	    ).toBe(".venv");
-	    expect(
-	      graphNodeSchema.parse({
-	        id: "function-leaf",
-	        projectId: "project",
-	        kind: "function",
-	        name: "leaf",
-	        summary: "Leaf function",
-	        code: { context: "", directory: "src/a.ts", startLine: 1, endLine: 2, language: "typescript" },
-	        parentId: null,
-	        attachedToId: null,
-	        customTypeId: null,
-	        source: { path: "src/a.ts", startLine: 1, endLine: 2 },
-	        position: { x: 0, y: 0 },
-	        size: { width: 200, height: 120 },
-	        childCount: 0,
-	        hasChildren: false,
-	        agentStatus: "planning",
-	        gitStatus: null,
-	        tags: [],
-	        createdAt: "now",
-	        updatedAt: "now"
-	      }).execution.testCommand
-	    ).toBeNull();
-	    expect(
-	      codeProposalArtifactManifestSchema.parse({
-	        testScriptDirectory: "tests/generated",
-	        scripts: [{ relativePath: "leaf.test.ts", content: "test('leaf', () => {})", command: "pnpm test leaf.test.ts" }]
-	      }).scripts[0].relativePath
-	    ).toBe("leaf.test.ts");
-	    const item = codingWorkflowItemSchema.parse({
-	      id: "item-1",
-	      workflowId: "workflow-1",
-	      projectId: "project",
-	      nodeId: "function-leaf",
-	      nodeName: "leaf",
-	      nodeKind: "function",
-	      layerIndex: 0,
-	      recommendedMode: "small",
-	      selectedMode: "small",
-	      modeReason: "Leaf-local block.",
-	      status: "pending",
-	      conflictGroup: "src/a.ts:function-leaf",
-	      agentRunId: null,
-	      proposalId: null,
-	      appliedAt: null,
-	      createdAt: "now",
-	      updatedAt: "now"
-	    });
-	    expect(item.recommendedMode).toBe("small");
-	    expect(
-	      codingWorkflowSchema.parse({
-	        id: "workflow-1",
-	        projectId: "project",
-	        scopeNodeId: "module-a",
-	        scopeName: "Module A",
-	        status: "preview",
-	        currentLayer: 0,
-	        summary: "One item.",
-	        createdAt: "now",
-	        updatedAt: "now",
-	        items: [item]
-	      }).items
-	    ).toHaveLength(1);
-	    expect(
-	      codingWorkflowStartRequestSchema.parse({
-	        projectId: "project",
-	        scopeNodeId: "module-a",
-	        modeOverrides: [{ nodeId: "function-leaf", mode: "medium" }]
-	      }).modeOverrides[0].mode
-	    ).toBe("medium");
-	    expect(
-	      codingWorkflowApplyLayerRequestSchema.parse({
-	        projectId: "project",
-	        workflowId: "workflow-1",
-	        layerIndex: 0
-	      }).layerIndex
-	    ).toBe(0);
-	  });
+    it("accepts block execution metadata and layered coding workflow payloads", () => {
+      expect(
+        blockExecutionMetadataSchema.parse({
+          testScriptDirectory: "tests/generated",
+          virtualEnvironment: ".venv",
+          workingDirectory: ".",
+          setupCommand: "pnpm install",
+          testCommand: "pnpm test"
+        }).virtualEnvironment
+      ).toBe(".venv");
+      expect(
+        graphNodeSchema.parse({
+          id: "function-leaf",
+          projectId: "project",
+          kind: "function",
+          name: "leaf",
+          summary: "Leaf function",
+          code: { context: "", directory: "src/a.ts", startLine: 1, endLine: 2, language: "typescript" },
+          parentId: null,
+          attachedToId: null,
+          customTypeId: null,
+          source: { path: "src/a.ts", startLine: 1, endLine: 2 },
+          position: { x: 0, y: 0 },
+          size: { width: 200, height: 120 },
+          childCount: 0,
+          hasChildren: false,
+          agentStatus: "planning",
+          gitStatus: null,
+          tags: [],
+          createdAt: "now",
+          updatedAt: "now"
+        }).execution.testCommand
+      ).toBeNull();
+      expect(
+        codeProposalArtifactManifestSchema.parse({
+          testScriptDirectory: "tests/generated",
+          scripts: [{ relativePath: "leaf.test.ts", content: "test('leaf', () => {})", command: "pnpm test leaf.test.ts" }]
+        }).scripts[0].relativePath
+      ).toBe("leaf.test.ts");
+      const item = codingWorkflowItemSchema.parse({
+        id: "item-1",
+        workflowId: "workflow-1",
+        projectId: "project",
+        nodeId: "function-leaf",
+        nodeName: "leaf",
+        nodeKind: "function",
+        layerIndex: 0,
+        recommendedMode: "small",
+        selectedMode: "small",
+        modeReason: "Leaf-local block.",
+        status: "pending",
+        conflictGroup: "src/a.ts:function-leaf",
+        agentRunId: null,
+        proposalId: null,
+        appliedAt: null,
+        createdAt: "now",
+        updatedAt: "now"
+      });
+      expect(item.recommendedMode).toBe("small");
+      expect(
+        codingWorkflowSchema.parse({
+          id: "workflow-1",
+          projectId: "project",
+          scopeNodeId: "module-a",
+          scopeName: "Module A",
+          status: "preview",
+          currentLayer: 0,
+          summary: "One item.",
+          createdAt: "now",
+          updatedAt: "now",
+          items: [item]
+        }).items
+      ).toHaveLength(1);
+      expect(
+        codingWorkflowStartRequestSchema.parse({
+          projectId: "project",
+          scopeNodeId: "module-a",
+          modeOverrides: [{ nodeId: "function-leaf", mode: "medium" }]
+        }).modeOverrides[0].mode
+      ).toBe("medium");
+      expect(
+        codingWorkflowApplyLayerRequestSchema.parse({
+          projectId: "project",
+          workflowId: "workflow-1",
+          layerIndex: 0
+        }).layerIndex
+      ).toBe(0);
+    });
 
-	  it("requires first-run workspace initialization context", () => {
+    it("requires first-run workspace initialization context", () => {
     const initialization = workspaceInitializationSchema.parse({
       projectName: "  Compiler Explorer  ",
       projectDescription: "Maps the frontend, API, and execution backends.",

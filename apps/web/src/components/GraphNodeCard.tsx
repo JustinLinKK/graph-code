@@ -1,31 +1,9 @@
-import type { CustomBlockType, GraphNode, GraphNodeKind, GraphNodeReuse } from "@graphcode/graph-model";
+import type { CustomBlockType, GraphNode, GraphNodeReuse } from "@graphcode/graph-model";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
-import {
-  Box,
-  Braces,
-  Code2,
-  Database,
-  File,
-  FileArchive,
-  FileInput,
-  FileJson,
-  FileOutput,
-  FileType,
-  FolderTree,
-  Globe2,
-  KeyRound,
-  LayoutDashboard,
-  PanelsTopLeft,
-  Package,
-  Radio,
-  Settings2,
-  Square,
-  Terminal,
-  Workflow
-} from "lucide-react";
 import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { iconForCustomBlockType } from "../customBlockIcons";
 import { nodePalette } from "../graphStyles";
+import { iconForNodeKind } from "../nodeIcons";
 
 export type GraphNodeCardData = {
   node: GraphNode;
@@ -40,7 +18,7 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
   const cardData = data as unknown as GraphNodeCardData;
   const { node } = cardData;
   const isSelected = selected || cardData.selected;
-  const Icon = node.kind === "custom" ? iconForCustomBlockType(cardData.customType?.icon) : iconForKind(node.kind);
+  const Icon = node.kind === "custom" ? iconForCustomBlockType(cardData.customType?.icon) : iconForNodeKind(node.kind);
   const palette = nodePalette[node.kind];
   const accentColor = cardData.accentColor;
   const typeLabel = node.kind === "custom" ? cardData.customType?.name ?? palette.label : palette.label;
@@ -85,53 +63,4 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
       <Handle type="source" position={Position.Right} />
     </div>
   );
-}
-
-function iconForKind(kind: GraphNodeKind) {
-  switch (kind) {
-    case "framework":
-      return LayoutDashboard;
-    case "module":
-      return FolderTree;
-    case "website":
-      return Globe2;
-    case "ui_component":
-      return PanelsTopLeft;
-    case "function":
-      return Braces;
-    case "object":
-      return Box;
-    case "dependency":
-      return Package;
-    case "input":
-      return FileInput;
-    case "output":
-      return FileOutput;
-    case "process":
-      return Workflow;
-    case "format":
-      return FileType;
-    case "environment":
-      return Code2;
-    case "config":
-      return Settings2;
-    case "secret":
-      return KeyRound;
-    case "command":
-      return Terminal;
-    case "file":
-      return File;
-    case "database":
-      return Database;
-    case "api":
-      return Globe2;
-    case "event":
-      return Radio;
-    case "artifact":
-      return FileArchive;
-    case "custom":
-      return Square;
-    default:
-      return FileJson;
-  }
 }

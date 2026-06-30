@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-export const DOMAIN_NODE_KINDS = ["framework", "module", "website", "ui_component", "function", "object"] as const;
+export const CORE_DOMAIN_NODE_KINDS = ["framework", "module", "website", "ui_component", "function", "object"] as const;
+export const EMBEDDED_SYSTEMS_DOMAIN_NODE_KINDS = ["embedded_system", "embedded_device", "ros_node", "firmware_task"] as const;
+export const ML_PIPELINE_DOMAIN_NODE_KINDS = ["ml_pipeline", "ml_training_stage", "ml_model", "ml_layer"] as const;
+export const EXTENSION_DOMAIN_NODE_KINDS = [...EMBEDDED_SYSTEMS_DOMAIN_NODE_KINDS, ...ML_PIPELINE_DOMAIN_NODE_KINDS] as const;
+export const DOMAIN_NODE_KINDS = [...CORE_DOMAIN_NODE_KINDS, ...EXTENSION_DOMAIN_NODE_KINDS] as const;
 export const BASIC_NODE_KINDS = [
   "dependency",
   "input",
@@ -18,11 +22,41 @@ export const BASIC_NODE_KINDS = [
   "artifact",
   "custom"
 ] as const;
-export const ATTACHMENT_NODE_KINDS = BASIC_NODE_KINDS;
+export const EMBEDDED_SYSTEMS_ATTACHMENT_NODE_KINDS = [
+  "ros_topic",
+  "ros_service",
+  "ros_action",
+  "gpio_pin",
+  "uart_bus",
+  "i2c_bus",
+  "spi_bus",
+  "pwm_channel",
+  "adc_channel",
+  "can_bus",
+  "interrupt",
+  "timer"
+] as const;
+export const ML_PIPELINE_ATTACHMENT_NODE_KINDS = [
+  "ml_dataset",
+  "ml_dataloader",
+  "ml_preprocess",
+  "ml_loss",
+  "ml_optimizer",
+  "ml_scheduler",
+  "ml_metric",
+  "ml_checkpoint",
+  "ml_tensor",
+  "ml_experiment"
+] as const;
+export const EXTENSION_ATTACHMENT_NODE_KINDS = [...EMBEDDED_SYSTEMS_ATTACHMENT_NODE_KINDS, ...ML_PIPELINE_ATTACHMENT_NODE_KINDS] as const;
+export const EXTENSION_NODE_KINDS = [...EXTENSION_DOMAIN_NODE_KINDS, ...EXTENSION_ATTACHMENT_NODE_KINDS] as const;
+export const ATTACHMENT_NODE_KINDS = [...BASIC_NODE_KINDS, ...EXTENSION_ATTACHMENT_NODE_KINDS] as const;
 export const GRAPH_NODE_KINDS = [...DOMAIN_NODE_KINDS, ...ATTACHMENT_NODE_KINDS] as const;
 export const GRAPH_EDGE_KINDS = ["calls", "imports", "uses", "owns", "impacts", "flows", "describes_format"] as const;
 export const EDGE_POINTING_DIRECTIONS = ["source_to_target", "target_to_source", "bidirectional"] as const;
 export const BASIC_DETAIL_NODE_KINDS = ["environment", "config", "secret", "command", "file", "database", "api", "event", "artifact", "custom"] as const;
+export const EXTENSION_PACKAGE_IDS = ["@graphcode/extension-embedded-systems", "@graphcode/extension-ml-pipeline"] as const;
+export const EXTENSION_FIELD_TYPES = ["string", "number", "boolean", "enum", "textarea"] as const;
 export const DEPENDENCY_KINDS = [
   "package",
   "runtime",
@@ -68,6 +102,7 @@ export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const
 export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "conflicted"] as const;
 export const AGENT_PROVIDERS = ["fake", "claudecode", "openai", "gemini", "openrouter"] as const;
 export const CODING_AGENT_MODES = ["small", "medium", "large"] as const;
+export const REVIEW_AGENT_MODES = ["small", "medium", "large"] as const;
 export const SCANNING_AGENT_MODES = ["local", "medium", "global"] as const;
 export const CODING_WORKFLOW_STATUSES = ["preview", "running", "blocked", "succeeded", "failed"] as const;
 export const CODING_WORKFLOW_ITEM_STATUSES = ["pending", "running", "proposed", "applied", "skipped", "failed", "blocked"] as const;
@@ -96,6 +131,7 @@ export const agentKindSchema = z.enum(AGENT_KINDS);
 export const agentRunStatusSchema = z.enum(AGENT_RUN_STATUSES);
 export const agentProviderSchema = z.enum(AGENT_PROVIDERS);
 export const codingAgentModeSchema = z.enum(CODING_AGENT_MODES);
+export const reviewAgentModeSchema = z.enum(REVIEW_AGENT_MODES);
 export const scanningAgentModeSchema = z.enum(SCANNING_AGENT_MODES);
 export const codingWorkflowStatusSchema = z.enum(CODING_WORKFLOW_STATUSES);
 export const codingWorkflowItemStatusSchema = z.enum(CODING_WORKFLOW_ITEM_STATUSES);
@@ -104,6 +140,8 @@ export const secretSourceTypeSchema = z.enum(SECRET_SOURCE_TYPES);
 export const promptSourceTypeSchema = z.enum(PROMPT_SOURCE_TYPES);
 export const graphPatchEntityTypeSchema = z.enum(GRAPH_PATCH_ENTITY_TYPES);
 export const workspaceCreationModeSchema = z.enum(WORKSPACE_CREATION_MODES);
+export const extensionPackageIdSchema = z.enum(EXTENSION_PACKAGE_IDS);
+export const extensionFieldTypeSchema = z.enum(EXTENSION_FIELD_TYPES);
 
 export type GraphNodeKind = z.infer<typeof graphNodeKindSchema>;
 export type DomainNodeKind = z.infer<typeof domainNodeKindSchema>;
@@ -124,6 +162,7 @@ export type AgentKind = z.infer<typeof agentKindSchema>;
 export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
 export type AgentProvider = z.infer<typeof agentProviderSchema>;
 export type CodingAgentMode = z.infer<typeof codingAgentModeSchema>;
+export type ReviewAgentMode = z.infer<typeof reviewAgentModeSchema>;
 export type ScanningAgentMode = z.infer<typeof scanningAgentModeSchema>;
 export type CodingWorkflowStatus = z.infer<typeof codingWorkflowStatusSchema>;
 export type CodingWorkflowItemStatus = z.infer<typeof codingWorkflowItemStatusSchema>;
@@ -132,6 +171,8 @@ export type SecretSourceType = z.infer<typeof secretSourceTypeSchema>;
 export type PromptSourceType = z.infer<typeof promptSourceTypeSchema>;
 export type GraphPatchEntityType = z.infer<typeof graphPatchEntityTypeSchema>;
 export type WorkspaceCreationMode = z.infer<typeof workspaceCreationModeSchema>;
+export type ExtensionPackageId = z.infer<typeof extensionPackageIdSchema>;
+export type ExtensionFieldType = z.infer<typeof extensionFieldTypeSchema>;
 
 export const positionSchema = z.object({
   x: z.number(),
@@ -169,6 +210,68 @@ export const blockExecutionMetadataSchema = z.object({
 });
 
 export const styleColorSchema = z.string().min(1);
+
+const extensionScalarSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+
+export const extensionFieldDefinitionSchema = z.object({
+  key: z.string().min(1),
+  label: z.string().min(1),
+  type: extensionFieldTypeSchema,
+  required: z.boolean().optional(),
+  options: z.array(z.string()).optional(),
+  placeholder: z.string().optional(),
+  helpText: z.string().optional()
+});
+
+export const extensionNodeKindDefinitionSchema = z.object({
+  packageId: extensionPackageIdSchema,
+  kind: graphNodeKindSchema,
+  label: z.string().min(1),
+  description: z.string(),
+  category: z.enum(["domain", "attachment"]),
+  icon: z.string().min(1),
+  color: styleColorSchema,
+  sortOrder: z.number().int().nonnegative(),
+  defaultSize: sizeSchema,
+  parentKinds: z.array(graphNodeKindSchema).default([]),
+  attachableToKinds: z.array(graphNodeKindSchema).default([]),
+  detailSchemaId: z.string().min(1),
+  fields: z.array(extensionFieldDefinitionSchema).default([])
+});
+
+export const graphExtensionPackageSchema = z.object({
+  id: extensionPackageIdSchema,
+  name: z.string().min(1),
+  description: z.string(),
+  promptAddendum: z.string(),
+  nodeKinds: z.array(extensionNodeKindDefinitionSchema)
+});
+
+export const extensionNodeDetailsSchema = z.object({
+  nodeId: z.string(),
+  packageId: extensionPackageIdSchema,
+  schemaId: z.string().min(1),
+  payload: z.record(extensionScalarSchema).default({})
+});
+
+export const extensionNodeDetailsMutationSchema = z.object({
+  packageId: extensionPackageIdSchema,
+  schemaId: z.string().min(1),
+  payload: z.record(extensionScalarSchema).default({})
+});
+
+export const workspaceExtensionsConfigSchema = z.record(z.record(extensionScalarSchema));
+
+export const workspaceExtensionsSettingsSchema = z.object({
+  availablePackages: z.array(graphExtensionPackageSchema),
+  enabledPackageIds: z.array(extensionPackageIdSchema).default([]),
+  configs: workspaceExtensionsConfigSchema.default({})
+});
+
+export const workspaceExtensionsMutationSchema = z.object({
+  enabledPackageIds: z.array(extensionPackageIdSchema).default([]),
+  configs: workspaceExtensionsConfigSchema.default({})
+});
 
 export const graphTagSchema = z.object({
   id: z.string(),
@@ -392,6 +495,7 @@ export const nodeMutationSchema = z.object({
   parentId: z.string().nullable().optional(),
   attachedToId: z.string().nullable().optional(),
   customTypeId: z.string().nullable().optional(),
+  extensionDetails: extensionNodeDetailsMutationSchema.nullable().optional(),
   execution: blockExecutionMetadataSchema.partial().optional(),
   position: positionSchema.optional(),
   size: sizeSchema.optional()
@@ -462,6 +566,15 @@ export const codingAgentConfigViewSchema = codingAgentConfigSchema.extend({
   systemPromptConfigured: z.boolean()
 });
 
+export const reviewAgentConfigSchema = agentConfigBaseSchema.extend({
+  mode: reviewAgentModeSchema
+});
+
+export const reviewAgentConfigViewSchema = reviewAgentConfigSchema.extend({
+  apiKeyConfigured: z.boolean(),
+  systemPromptConfigured: z.boolean()
+});
+
 export const scanningAgentConfigSchema = agentConfigBaseSchema.extend({
   mode: scanningAgentModeSchema
 });
@@ -502,8 +615,10 @@ export const workspaceSettingsSchema = z.object({
   general: generalSettingsSchema,
   github: githubIntegrationSettingsSchema,
   automation: agentAutomationSettingsSchema,
+  extensions: workspaceExtensionsSettingsSchema.default({ availablePackages: [], enabledPackageIds: [], configs: {} }),
   agents: z.array(agentConfigViewSchema),
   codingAgents: z.array(codingAgentConfigViewSchema).default([]),
+  reviewAgents: z.array(reviewAgentConfigViewSchema).default([]),
   scanningAgents: z.array(scanningAgentConfigViewSchema).default([])
 });
 
@@ -511,8 +626,10 @@ export const workspaceSettingsMutationSchema = z.object({
   general: generalSettingsSchema,
   github: githubIntegrationSettingsMutationSchema,
   automation: agentAutomationSettingsSchema,
+  extensions: workspaceExtensionsMutationSchema.default({ enabledPackageIds: [], configs: {} }),
   agents: z.array(agentConfigSchema),
   codingAgents: z.array(codingAgentConfigSchema).default([]),
+  reviewAgents: z.array(reviewAgentConfigSchema).default([]),
   scanningAgents: z.array(scanningAgentConfigSchema).default([])
 });
 
@@ -633,7 +750,8 @@ export const codingWorkflowApplyLayerRequestSchema = z.object({
 
 export const reviewAgentRequestSchema = z.object({
   projectId: z.string().min(1),
-  runId: z.string().min(1)
+  runId: z.string().min(1),
+  mode: reviewAgentModeSchema.optional()
 });
 
 export const workspaceInitializationSchema = z.object({
@@ -652,6 +770,7 @@ export const scanningAgentRequestSchema = z.object({
   rootPath: z.string().optional(),
   projectDescription: z.string().optional(),
   scanningInstructions: z.string().optional(),
+  enabledExtensionPackageIds: z.array(extensionPackageIdSchema).optional().default([]),
   background: z.boolean().optional().default(false)
 });
 
@@ -672,6 +791,7 @@ export const agentRunSchema = z.object({
   projectId: z.string(),
   agentKind: agentKindSchema,
   codingMode: codingAgentModeSchema.nullable().default(null),
+  reviewMode: reviewAgentModeSchema.nullable().default(null),
   status: agentRunStatusSchema,
   baseGraphRevision: z.number().int().nonnegative().default(0),
   appliedGraphRevision: z.number().int().nonnegative().nullable().default(null),
@@ -731,12 +851,12 @@ export type OpenWorkspaceResult =
       status: "opened" | "created";
       project: Project;
       graphcodePath: string;
-	    }
-	  | {
-	      status: "missing_graphcode" | "empty_graphcode";
-	      rootPath: string;
-	      graphcodePath: string;
-	      message: string;
+      }
+    | {
+        status: "missing_graphcode" | "empty_graphcode";
+        rootPath: string;
+        graphcodePath: string;
+        message: string;
     };
 
 export type Project = z.infer<typeof projectSchema>;
@@ -758,6 +878,13 @@ export type IoDetails = z.infer<typeof ioDetailsSchema>;
 export type ProcessDetails = z.infer<typeof processDetailsSchema>;
 export type FormatDetails = z.infer<typeof formatDetailsSchema>;
 export type BasicBlockDetails = z.infer<typeof basicBlockDetailsSchema>;
+export type ExtensionFieldDefinition = z.infer<typeof extensionFieldDefinitionSchema>;
+export type ExtensionNodeKindDefinition = z.infer<typeof extensionNodeKindDefinitionSchema>;
+export type GraphExtensionPackage = z.infer<typeof graphExtensionPackageSchema>;
+export type ExtensionNodeDetails = z.infer<typeof extensionNodeDetailsSchema>;
+export type ExtensionNodeDetailsMutation = z.infer<typeof extensionNodeDetailsMutationSchema>;
+export type WorkspaceExtensionsSettings = z.infer<typeof workspaceExtensionsSettingsSchema>;
+export type WorkspaceExtensionsMutation = z.input<typeof workspaceExtensionsMutationSchema>;
 export type LayoutPatch = z.infer<typeof layoutPatchSchema>;
 export type CustomBlockType = z.infer<typeof customBlockTypeSchema>;
 export type NodeTypeStyle = z.infer<typeof nodeTypeStyleSchema>;
@@ -779,6 +906,8 @@ export type AgentConfig = z.infer<typeof agentConfigSchema>;
 export type AgentConfigView = z.infer<typeof agentConfigViewSchema>;
 export type CodingAgentConfig = z.infer<typeof codingAgentConfigSchema>;
 export type CodingAgentConfigView = z.infer<typeof codingAgentConfigViewSchema>;
+export type ReviewAgentConfig = z.infer<typeof reviewAgentConfigSchema>;
+export type ReviewAgentConfigView = z.infer<typeof reviewAgentConfigViewSchema>;
 export type ScanningAgentConfig = z.infer<typeof scanningAgentConfigSchema>;
 export type ScanningAgentConfigView = z.infer<typeof scanningAgentConfigViewSchema>;
 export type GeneralSettings = z.infer<typeof generalSettingsSchema>;
@@ -811,6 +940,187 @@ export type GithubDeviceStartResponse = z.infer<typeof githubDeviceStartResponse
 export type GithubDevicePollRequest = z.infer<typeof githubDevicePollRequestSchema>;
 export type GithubDevicePollResponse = z.infer<typeof githubDevicePollResponseSchema>;
 
+export const AVAILABLE_EXTENSION_PACKAGES: GraphExtensionPackage[] = [
+  {
+    id: "@graphcode/extension-embedded-systems",
+    name: "Embedded Systems",
+    description: "Native blocks for ROS runtime graphs, firmware tasks, and common embedded device I/O.",
+    promptAddendum:
+      "When the Embedded Systems extension is enabled, represent robotics and firmware evidence with embedded_system, embedded_device, ros_node, firmware_task, ROS interface blocks, and hardware I/O blocks such as GPIO, UART, I2C, SPI, PWM, ADC, CAN, interrupts, and timers.",
+    nodeKinds: [
+      extensionDomain("@graphcode/extension-embedded-systems", "embedded_system", "Embedded System", "Robot, device, firmware, or embedded subsystem.", "cpu", "#0f766e", 30, ["framework", "module"], [
+        textField("target", "Target", "robot, board, or product name"),
+        enumField("runtime", "Runtime", ["bare-metal", "freertos", "zephyr", "linux", "ros2", "mixed", "custom"]),
+        textField("clock", "Clock", "main clock or timing source")
+      ]),
+      extensionDomain("@graphcode/extension-embedded-systems", "embedded_device", "Embedded Device", "Board, controller, sensor, actuator, or peripheral.", "microchip", "#0891b2", 31, ["embedded_system", "module"], [
+        enumField("deviceType", "Device Type", ["board", "mcu", "sensor", "actuator", "peripheral", "gateway", "custom"]),
+        textField("partNumber", "Part Number", "STM32, Jetson, ESP32, IMU model"),
+        textField("voltage", "Voltage", "3.3V, 5V, 24V")
+      ]),
+      extensionDomain("@graphcode/extension-embedded-systems", "ros_node", "ROS Node", "ROS node, component, lifecycle node, or runtime process.", "radio-tower", "#0284c7", 32, ["embedded_system", "embedded_device", "module"], [
+        textField("nodeName", "Node Name", "/camera_driver"),
+        enumField("rosVersion", "ROS Version", ["ros1", "ros2"]),
+        textField("namespace", "Namespace", "/robot/front")
+      ]),
+      extensionDomain("@graphcode/extension-embedded-systems", "firmware_task", "Firmware Task", "RTOS task, control loop, ISR-adjacent task, or scheduled unit.", "timer", "#7c2d12", 33, ["embedded_system", "embedded_device", "ros_node"], [
+        enumField("taskType", "Task Type", ["rtos-task", "control-loop", "isr-handler", "scheduler-job", "polling-loop", "custom"]),
+        textField("period", "Period", "10ms"),
+        textField("priority", "Priority", "high, 4, realtime")
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "ros_topic", "ROS Topic", "Published or subscribed ROS topic.", "radio", "#2563eb", 110, ["ros_node"], rosInterfaceFields("topic")),
+      extensionAttachment("@graphcode/extension-embedded-systems", "ros_service", "ROS Service", "Request/response ROS service.", "workflow", "#4f46e5", 111, ["ros_node"], rosInterfaceFields("service")),
+      extensionAttachment("@graphcode/extension-embedded-systems", "ros_action", "ROS Action", "Long-running ROS action interface.", "workflow", "#7c3aed", 112, ["ros_node"], rosInterfaceFields("action")),
+      extensionAttachment("@graphcode/extension-embedded-systems", "gpio_pin", "GPIO Pin", "Digital input or output pin.", "plug", "#16a34a", 113, ["embedded_device", "firmware_task"], [
+        textField("pin", "Pin", "PA5, GPIO17"),
+        enumField("direction", "Direction", ["input", "output", "bidirectional"]),
+        enumField("pull", "Pull", ["none", "up", "down"]),
+        enumField("activeLevel", "Active Level", ["high", "low"])
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "uart_bus", "UART Bus", "Serial UART interface.", "terminal", "#0d9488", 114, ["embedded_device", "firmware_task", "ros_node"], [
+        textField("port", "Port", "USART1, /dev/ttyUSB0"),
+        numberField("baud", "Baud"),
+        enumField("parity", "Parity", ["none", "even", "odd"]),
+        enumField("stopBits", "Stop Bits", ["1", "1.5", "2"])
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "i2c_bus", "I2C Bus", "I2C peripheral bus.", "network", "#0f766e", 115, ["embedded_device", "firmware_task"], [
+        textField("bus", "Bus", "I2C1"),
+        textField("address", "Address", "0x68"),
+        textField("speed", "Speed", "100kHz, 400kHz")
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "spi_bus", "SPI Bus", "SPI peripheral bus.", "network", "#0369a1", 116, ["embedded_device", "firmware_task"], [
+        textField("bus", "Bus", "SPI2"),
+        textField("chipSelect", "Chip Select", "CS0, PB12"),
+        enumField("mode", "Mode", ["0", "1", "2", "3"]),
+        textField("speed", "Speed", "10MHz")
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "pwm_channel", "PWM Channel", "Pulse-width modulation output.", "activity", "#ca8a04", 117, ["embedded_device", "firmware_task"], [
+        textField("channel", "Channel", "TIM2_CH1"),
+        textField("frequency", "Frequency", "20kHz"),
+        textField("dutyCycle", "Duty Cycle", "50%")
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "adc_channel", "ADC Channel", "Analog-to-digital input.", "gauge", "#ea580c", 118, ["embedded_device", "firmware_task"], [
+        textField("channel", "Channel", "ADC1_IN4"),
+        textField("resolution", "Resolution", "12-bit"),
+        textField("range", "Range", "0-3.3V")
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "can_bus", "CAN Bus", "CAN or CAN-FD bus interface.", "network", "#be123c", 119, ["embedded_device", "firmware_task", "ros_node"], [
+        textField("bus", "Bus", "CAN1"),
+        textField("bitrate", "Bitrate", "500k"),
+        textField("frameId", "Frame ID", "0x123")
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "interrupt", "Interrupt", "Hardware or software interrupt.", "zap", "#dc2626", 120, ["embedded_device", "firmware_task"], [
+        textField("source", "Source", "EXTI0, DMA1"),
+        enumField("trigger", "Trigger", ["rising", "falling", "both", "level-high", "level-low", "timer", "custom"]),
+        textField("priority", "Priority", "0, high")
+      ]),
+      extensionAttachment("@graphcode/extension-embedded-systems", "timer", "Timer", "Hardware timer or scheduled tick.", "timer", "#a16207", 121, ["embedded_device", "firmware_task"], [
+        textField("timer", "Timer", "TIM3, SysTick"),
+        textField("period", "Period", "1ms"),
+        textField("source", "Source", "APB1, external")
+      ])
+    ]
+  },
+  {
+    id: "@graphcode/extension-ml-pipeline",
+    name: "ML Pipeline",
+    description: "Native blocks for model architecture, training stages, datasets, optimizers, metrics, and artifacts.",
+    promptAddendum:
+      "When the ML Pipeline extension is enabled, represent ML evidence with ml_pipeline, ml_training_stage, ml_model, ml_layer, datasets, dataloaders, preprocessing, loss, optimizer, scheduler, metrics, checkpoints, tensors, and experiments.",
+    nodeKinds: [
+      extensionDomain("@graphcode/extension-ml-pipeline", "ml_pipeline", "ML Pipeline", "Training, evaluation, export, or inference workflow.", "workflow", "#2563eb", 40, ["framework", "module"], [
+        enumField("pipelineType", "Pipeline Type", ["training", "inference", "evaluation", "export", "deployment", "custom"]),
+        textField("framework", "Framework", "PyTorch, TensorFlow, JAX, ONNX"),
+        textField("task", "Task", "classification, detection, language modeling")
+      ]),
+      extensionDomain("@graphcode/extension-ml-pipeline", "ml_training_stage", "Training Stage", "Data prep, train, validate, tune, evaluate, export, or deploy stage.", "flask-conical", "#0d9488", 41, ["ml_pipeline"], [
+        enumField("stageType", "Stage Type", ["data-prep", "train", "validate", "tune", "evaluate", "export", "deploy", "custom"]),
+        textField("entrypoint", "Entrypoint", "train.py, Trainer.fit"),
+        textField("device", "Device", "cpu, cuda, tpu")
+      ]),
+      extensionDomain("@graphcode/extension-ml-pipeline", "ml_model", "ML Model", "Model architecture or nested module.", "brain-circuit", "#7c3aed", 42, ["ml_pipeline", "ml_training_stage", "module"], [
+        textField("modelName", "Model Name", "ResNet, Transformer"),
+        textField("frameworkClass", "Framework Class", "torch.nn.Module"),
+        textField("inputShape", "Input Shape", "N,C,H,W")
+      ]),
+      extensionDomain("@graphcode/extension-ml-pipeline", "ml_layer", "ML Layer", "Layer or operation inside an ML model.", "layers", "#db2777", 43, ["ml_model", "ml_layer"], [
+        enumField("layerType", "Layer Type", [
+          "linear",
+          "conv1d",
+          "conv2d",
+          "conv3d",
+          "embedding",
+          "attention",
+          "normalization",
+          "activation",
+          "pooling",
+          "recurrent",
+          "dropout",
+          "reshape",
+          "concat",
+          "residual",
+          "custom"
+        ]),
+        textField("inputShape", "Input Shape", "N,C,H,W"),
+        textField("outputShape", "Output Shape", "N,D"),
+        textField("parameters", "Parameters", "hidden=768, heads=12")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_dataset", "ML Dataset", "Training, validation, test, or inference dataset.", "database", "#0891b2", 130, ["ml_pipeline", "ml_training_stage"], [
+        textField("source", "Source", "s3://, local path, Hugging Face ID"),
+        enumField("split", "Split", ["train", "validation", "test", "inference", "all", "custom"]),
+        textField("schema", "Schema", "feature/label columns or tensor shape")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_dataloader", "DataLoader", "Batching, sampling, and loading configuration.", "file-input", "#0284c7", 131, ["ml_training_stage", "ml_pipeline"], [
+        textField("batchSize", "Batch Size", "32"),
+        textField("shuffle", "Shuffle", "true/false"),
+        textField("numWorkers", "Workers", "8")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_preprocess", "Preprocess", "Transform, tokenization, augmentation, or feature step.", "wand", "#4f46e5", 132, ["ml_training_stage", "ml_pipeline", "ml_dataset"], [
+        enumField("preprocessType", "Preprocess Type", ["normalize", "tokenize", "augment", "resize", "feature-extract", "filter", "custom"]),
+        textField("operation", "Operation", "Normalize(mean, std)"),
+        textAreaField("notes", "Notes")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_loss", "Loss", "Training objective or criterion.", "activity", "#dc2626", 133, ["ml_training_stage", "ml_model"], [
+        enumField("lossType", "Loss Type", ["cross_entropy", "mse", "mae", "bce", "contrastive", "ctc", "custom"]),
+        textField("reduction", "Reduction", "mean, sum, none"),
+        textField("weights", "Weights", "class weights or coefficient")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_optimizer", "Optimizer", "Optimizer type and hyperparameters.", "sliders-horizontal", "#16a34a", 134, ["ml_training_stage", "ml_model"], [
+        enumField("optimizerType", "Optimizer Type", ["sgd", "adam", "adamw", "rmsprop", "adagrad", "lion", "custom"]),
+        textField("learningRate", "Learning Rate", "1e-3"),
+        textField("weightDecay", "Weight Decay", "0.01")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_scheduler", "Scheduler", "Learning-rate or training schedule.", "line-chart", "#65a30d", 135, ["ml_training_stage", "ml_optimizer"], [
+        enumField("schedulerType", "Scheduler Type", ["step", "cosine", "linear", "plateau", "warmup", "custom"]),
+        textField("schedule", "Schedule", "warmup=1000, T_max=10"),
+        textField("interval", "Interval", "step, epoch")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_metric", "Metric", "Training or evaluation metric.", "gauge", "#9333ea", 136, ["ml_training_stage", "ml_model"], [
+        textField("metricName", "Metric", "accuracy, F1, MAPE"),
+        enumField("phase", "Phase", ["train", "validation", "test", "inference", "all"]),
+        textField("target", "Target", "top-1 > 90%")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_checkpoint", "Checkpoint", "Model checkpoint, exported weights, or saved state.", "file-archive", "#b45309", 137, ["ml_training_stage", "ml_model"], [
+        textField("path", "Path", "checkpoints/best.pt"),
+        enumField("artifactType", "Artifact Type", ["weights", "optimizer-state", "full-state", "onnx", "safetensors", "custom"]),
+        textField("retention", "Retention", "best, last, every epoch")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_tensor", "Tensor", "Tensor flowing through a model or pipeline.", "box", "#0f766e", 138, ["ml_model", "ml_layer", "ml_training_stage"], [
+        textField("shape", "Shape", "N,C,H,W"),
+        textField("dtype", "DType", "float32, bf16"),
+        textField("semantic", "Semantic", "tokens, logits, labels")
+      ]),
+      extensionAttachment("@graphcode/extension-ml-pipeline", "ml_experiment", "Experiment", "Experiment run, sweep, or tracking metadata.", "flask-conical", "#c026d3", 139, ["ml_pipeline", "ml_training_stage"], [
+        textField("tracker", "Tracker", "wandb, mlflow, tensorboard"),
+        textField("runId", "Run ID", "abc123"),
+        textField("sweep", "Sweep", "lr x batch")
+      ])
+    ]
+  }
+];
+
+export const EXTENSION_NODE_KIND_DEFINITIONS: ExtensionNodeKindDefinition[] = AVAILABLE_EXTENSION_PACKAGES.flatMap((extensionPackage) => extensionPackage.nodeKinds);
+
 export type HierarchyNode = GraphNode & {
   children: HierarchyNode[];
   boundaryLabels: HierarchyBoundaryLabel[];
@@ -830,6 +1140,7 @@ export type CanvasGraph = {
   processes: ProcessDetails[];
   formats: FormatDetails[];
   basicDetails: BasicBlockDetails[];
+  extensionDetails: ExtensionNodeDetails[];
   customTypes: CustomBlockType[];
   nodeTypeStyles: NodeTypeStyle[];
   reuses: GraphNodeReuse[];
@@ -845,6 +1156,7 @@ export type NodeDetail = {
   processes: Array<{ node: GraphNode; details: ProcessDetails }>;
   formats: Array<{ node: GraphNode; details: FormatDetails }>;
   basicDetails: Array<{ node: GraphNode; details: BasicBlockDetails }>;
+  extensionDetails: Array<{ node: GraphNode; details: ExtensionNodeDetails }>;
   incomingEdges: GraphEdge[];
   outgoingEdges: GraphEdge[];
   relatedNodes: GraphNode[];
@@ -856,3 +1168,107 @@ export const isDomainNodeKind = (kind: GraphNodeKind): kind is DomainNodeKind =>
 
 export const isAttachmentNodeKind = (kind: GraphNodeKind): kind is AttachmentNodeKind =>
   ATTACHMENT_NODE_KINDS.includes(kind as AttachmentNodeKind);
+
+export const isExtensionNodeKind = (kind: GraphNodeKind): boolean =>
+  isExtensionDomainNodeKind(kind) || isExtensionAttachmentNodeKind(kind);
+
+export const isExtensionDomainNodeKind = (kind: GraphNodeKind): boolean =>
+  EXTENSION_DOMAIN_NODE_KINDS.includes(kind as (typeof EXTENSION_DOMAIN_NODE_KINDS)[number]);
+
+export const isExtensionAttachmentNodeKind = (kind: GraphNodeKind): boolean =>
+  EXTENSION_ATTACHMENT_NODE_KINDS.includes(kind as (typeof EXTENSION_ATTACHMENT_NODE_KINDS)[number]);
+
+export type ExtensionNodeKind = (typeof EXTENSION_DOMAIN_NODE_KINDS)[number] | (typeof EXTENSION_ATTACHMENT_NODE_KINDS)[number];
+
+export function extensionPackageForNodeKind(kind: GraphNodeKind): GraphExtensionPackage | null {
+  return AVAILABLE_EXTENSION_PACKAGES.find((extensionPackage) => extensionPackage.nodeKinds.some((definition) => definition.kind === kind)) ?? null;
+}
+
+export function extensionNodeDefinitionForKind(kind: GraphNodeKind): ExtensionNodeKindDefinition | null {
+  return EXTENSION_NODE_KIND_DEFINITIONS.find((definition) => definition.kind === kind) ?? null;
+}
+
+export function extensionPackageById(packageId: ExtensionPackageId): GraphExtensionPackage {
+  return AVAILABLE_EXTENSION_PACKAGES.find((extensionPackage) => extensionPackage.id === packageId)!;
+}
+
+function extensionDomain(
+  packageId: ExtensionPackageId,
+  kind: GraphNodeKind,
+  label: string,
+  description: string,
+  icon: string,
+  color: string,
+  sortOrder: number,
+  parentKinds: GraphNodeKind[],
+  fields: ExtensionFieldDefinition[]
+): ExtensionNodeKindDefinition {
+  return {
+    packageId,
+    kind,
+    label,
+    description,
+    category: "domain",
+    icon,
+    color,
+    sortOrder,
+    defaultSize: { width: 272, height: 140 },
+    parentKinds,
+    attachableToKinds: [],
+    detailSchemaId: kind,
+    fields
+  };
+}
+
+function extensionAttachment(
+  packageId: ExtensionPackageId,
+  kind: GraphNodeKind,
+  label: string,
+  description: string,
+  icon: string,
+  color: string,
+  sortOrder: number,
+  attachableToKinds: GraphNodeKind[],
+  fields: ExtensionFieldDefinition[]
+): ExtensionNodeKindDefinition {
+  return {
+    packageId,
+    kind,
+    label,
+    description,
+    category: "attachment",
+    icon,
+    color,
+    sortOrder,
+    defaultSize: { width: 224, height: 112 },
+    parentKinds: [],
+    attachableToKinds,
+    detailSchemaId: kind,
+    fields
+  };
+}
+
+function textField(key: string, label: string, placeholder?: string): ExtensionFieldDefinition {
+  return { key, label, type: "string", placeholder };
+}
+
+function numberField(key: string, label: string): ExtensionFieldDefinition {
+  return { key, label, type: "number" };
+}
+
+function enumField(key: string, label: string, options: string[]): ExtensionFieldDefinition {
+  return { key, label, type: "enum", options };
+}
+
+function textAreaField(key: string, label: string): ExtensionFieldDefinition {
+  return { key, label, type: "textarea" };
+}
+
+function rosInterfaceFields(interfaceKind: string): ExtensionFieldDefinition[] {
+  return [
+    textField("interfaceName", "Interface Name", `/${interfaceKind}_name`),
+    textField("messageType", "Message Type", "std_msgs/msg/String"),
+    enumField("direction", "Direction", ["publish", "subscribe", "client", "server", "feedback", "goal", "result"]),
+    textField("qos", "QoS", "reliable, best_effort, depth=10")
+  ];
+}

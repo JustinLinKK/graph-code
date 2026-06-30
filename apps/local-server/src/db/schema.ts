@@ -4,7 +4,7 @@ const GRAPH_NODES_SQL = `
   CREATE TABLE graph_nodes (
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL CHECK (kind IN ('framework', 'module', 'website', 'ui_component', 'function', 'object', 'dependency', 'input', 'output', 'process', 'format', 'environment', 'config', 'secret', 'command', 'file', 'database', 'api', 'event', 'artifact', 'custom')),
+    kind TEXT NOT NULL CHECK (kind IN ('framework', 'module', 'website', 'ui_component', 'function', 'object', 'embedded_system', 'embedded_device', 'ros_node', 'firmware_task', 'ml_pipeline', 'ml_training_stage', 'ml_model', 'ml_layer', 'dependency', 'input', 'output', 'process', 'format', 'environment', 'config', 'secret', 'command', 'file', 'database', 'api', 'event', 'artifact', 'custom', 'ros_topic', 'ros_service', 'ros_action', 'gpio_pin', 'uart_bus', 'i2c_bus', 'spi_bus', 'pwm_channel', 'adc_channel', 'can_bus', 'interrupt', 'timer', 'ml_dataset', 'ml_dataloader', 'ml_preprocess', 'ml_loss', 'ml_optimizer', 'ml_scheduler', 'ml_metric', 'ml_checkpoint', 'ml_tensor', 'ml_experiment')),
     name TEXT NOT NULL,
     summary TEXT NOT NULL DEFAULT '',
     code_context TEXT NOT NULL DEFAULT '',
@@ -88,7 +88,7 @@ const GRAPH_BOUNDARIES_SQL = `
 const GRAPH_NODE_TYPE_STYLES_SQL = `
   CREATE TABLE graph_node_type_styles (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    node_kind TEXT NOT NULL CHECK (node_kind IN ('framework', 'module', 'website', 'ui_component', 'function', 'object', 'dependency', 'input', 'output', 'process', 'format', 'environment', 'config', 'secret', 'command', 'file', 'database', 'api', 'event', 'artifact', 'custom')),
+    node_kind TEXT NOT NULL CHECK (node_kind IN ('framework', 'module', 'website', 'ui_component', 'function', 'object', 'embedded_system', 'embedded_device', 'ros_node', 'firmware_task', 'ml_pipeline', 'ml_training_stage', 'ml_model', 'ml_layer', 'dependency', 'input', 'output', 'process', 'format', 'environment', 'config', 'secret', 'command', 'file', 'database', 'api', 'event', 'artifact', 'custom', 'ros_topic', 'ros_service', 'ros_action', 'gpio_pin', 'uart_bus', 'i2c_bus', 'spi_bus', 'pwm_channel', 'adc_channel', 'can_bus', 'interrupt', 'timer', 'ml_dataset', 'ml_dataloader', 'ml_preprocess', 'ml_loss', 'ml_optimizer', 'ml_scheduler', 'ml_metric', 'ml_checkpoint', 'ml_tensor', 'ml_experiment')),
     color TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -184,6 +184,23 @@ const CODING_AGENT_SETTINGS_SQL = `
   );
 `;
 
+const REVIEW_AGENT_SETTINGS_SQL = `
+  CREATE TABLE review_agent_settings (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    review_mode TEXT NOT NULL CHECK (review_mode IN ('small', 'medium', 'large')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    model TEXT NOT NULL DEFAULT '',
+    parallel_limit INTEGER NOT NULL DEFAULT 4,
+    api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
+    api_key_source_value TEXT NOT NULL DEFAULT '',
+    system_prompt_source_type TEXT NOT NULL DEFAULT 'manual' CHECK (system_prompt_source_type IN ('manual', 'file')),
+    system_prompt_source_value TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, review_mode)
+  );
+`;
+
 const SCANNING_AGENT_SETTINGS_SQL = `
   CREATE TABLE scanning_agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -209,6 +226,29 @@ const SCAN_FILE_STATE_SQL = `
     last_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
     last_scanned_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (project_id, file_path)
+  );
+`;
+
+const WORKSPACE_EXTENSION_SETTINGS_SQL = `
+  CREATE TABLE workspace_extension_settings (
+    project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    package_id TEXT NOT NULL CHECK (package_id IN ('@graphcode/extension-embedded-systems', '@graphcode/extension-ml-pipeline')),
+    enabled INTEGER NOT NULL DEFAULT 0,
+    config_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (project_id, package_id)
+  );
+`;
+
+const EXTENSION_NODE_DETAILS_SQL = `
+  CREATE TABLE extension_node_details (
+    node_id TEXT PRIMARY KEY REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    package_id TEXT NOT NULL CHECK (package_id IN ('@graphcode/extension-embedded-systems', '@graphcode/extension-ml-pipeline')),
+    schema_id TEXT NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
 `;
 
@@ -263,15 +303,18 @@ const GRAPH_TABLES = [
   "process_details",
   "format_details",
   "basic_block_details",
+  "extension_node_details",
   "graph_entity_versions",
   "graph_edges",
   "graph_revisions",
   "graph_nodes",
   "custom_block_types",
-  "scan_file_state",
-  "workspace_settings",
-  "scanning_agent_settings",
-  "coding_agent_settings",
+    "scan_file_state",
+    "workspace_settings",
+  "workspace_extension_settings",
+    "scanning_agent_settings",
+    "review_agent_settings",
+    "coding_agent_settings",
   "agent_settings",
   "agent_runs",
   "agent_messages",
@@ -284,19 +327,19 @@ const GRAPH_TABLES = [
 export function migrate(db: GraphDatabase): void {
   db.pragma("foreign_keys = ON");
   db.exec(`
-	    CREATE TABLE IF NOT EXISTS projects (
-	      id TEXT PRIMARY KEY,
-	      name TEXT NOT NULL,
-	      root_path TEXT NOT NULL,
-	      description TEXT NOT NULL DEFAULT '',
-	      scanning_instructions TEXT NOT NULL DEFAULT '',
-	      created_at TEXT NOT NULL DEFAULT (datetime('now')),
-	      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-	    );
-	  `);
-	  ensureProjectsTable(db);
+      CREATE TABLE IF NOT EXISTS projects (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        root_path TEXT NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        scanning_instructions TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `);
+    ensureProjectsTable(db);
 
-	  ensureCustomBlockTypesTable(db);
+    ensureCustomBlockTypesTable(db);
 
   if (hasBrokenGraphTableReferences(db)) {
     resetGraphStorage(db);
@@ -348,6 +391,8 @@ export function migrate(db: GraphDatabase): void {
       required INTEGER NOT NULL DEFAULT 0,
       notes TEXT NOT NULL DEFAULT ''
     );
+
+    ${EXTENSION_NODE_DETAILS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
     CREATE TABLE IF NOT EXISTS graph_node_layouts (
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -402,6 +447,8 @@ export function migrate(db: GraphDatabase): void {
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    ${WORKSPACE_EXTENSION_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+
     CREATE TABLE IF NOT EXISTS agent_settings (
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
       agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
@@ -418,14 +465,16 @@ export function migrate(db: GraphDatabase): void {
     );
 
     ${CODING_AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${REVIEW_AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
     ${SCANNING_AGENT_SETTINGS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
     CREATE TABLE IF NOT EXISTS agent_runs (
       id TEXT PRIMARY KEY,
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-      agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
-      coding_mode TEXT CHECK (coding_mode IN ('small', 'medium', 'large')),
-      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
+        agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
+        coding_mode TEXT CHECK (coding_mode IN ('small', 'medium', 'large')),
+        review_mode TEXT CHECK (review_mode IN ('small', 'medium', 'large')),
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
       base_graph_revision INTEGER NOT NULL DEFAULT 0,
       applied_graph_revision INTEGER,
       conflict_reason TEXT,
@@ -458,20 +507,20 @@ export function migrate(db: GraphDatabase): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
-	    CREATE TABLE IF NOT EXISTS code_proposals (
-	      id TEXT PRIMARY KEY,
-	      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-	      agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
-	      target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
-	      diff TEXT NOT NULL,
-	      artifact_manifest_json TEXT,
-	      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-	    );
+      CREATE TABLE IF NOT EXISTS code_proposals (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
+        target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
+        diff TEXT NOT NULL,
+        artifact_manifest_json TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
 
-	    ${CODING_WORKFLOWS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
-	    ${CODING_WORKFLOW_ITEMS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${CODING_WORKFLOWS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${CODING_WORKFLOW_ITEMS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
-	    CREATE INDEX IF NOT EXISTS idx_graph_nodes_project ON graph_nodes(project_id);
+      CREATE INDEX IF NOT EXISTS idx_graph_nodes_project ON graph_nodes(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_nodes_parent ON graph_nodes(parent_id);
     CREATE INDEX IF NOT EXISTS idx_graph_nodes_attached_to ON graph_nodes(attached_to_id);
     CREATE INDEX IF NOT EXISTS idx_graph_nodes_custom_type ON graph_nodes(custom_type_id);
@@ -497,10 +546,14 @@ export function migrate(db: GraphDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_coding_workflows_project ON coding_workflows(project_id, created_at);
     CREATE INDEX IF NOT EXISTS idx_coding_workflow_items_workflow ON coding_workflow_items(workflow_id, layer_index, status);
     CREATE INDEX IF NOT EXISTS idx_scan_file_state_project ON scan_file_state(project_id, last_scanned_at);
+    CREATE INDEX IF NOT EXISTS idx_workspace_extension_settings_project ON workspace_extension_settings(project_id);
+    CREATE INDEX IF NOT EXISTS idx_extension_node_details_package ON extension_node_details(package_id);
   `);
   ensureWorkspaceSettingsTable(db);
-  ensureCodingAgentSettingsTable(db);
-  ensureScanningAgentSettingsTable(db);
+  ensureWorkspaceExtensionSettingsTable(db);
+    ensureCodingAgentSettingsTable(db);
+    ensureReviewAgentSettingsTable(db);
+    ensureScanningAgentSettingsTable(db);
   ensureScanFileStateTable(db);
   ensureAgentRunsTable(db);
   ensureAgentReferenceTables(db);
@@ -508,7 +561,7 @@ export function migrate(db: GraphDatabase): void {
   ensureGraphEntityVersionsTable(db);
   ensureGraphStatusHistoryTable(db);
   ensureProcessDetailsTable(db);
-	}
+  }
 
 function ensureProjectsTable(db: GraphDatabase): void {
   if (!getTableSql(db, "projects")) {
@@ -549,9 +602,21 @@ function ensureWorkspaceSettingsTable(db: GraphDatabase): void {
   }
 }
 
+function ensureWorkspaceExtensionSettingsTable(db: GraphDatabase): void {
+  if (!getTableSql(db, "workspace_extension_settings")) {
+    db.exec(WORKSPACE_EXTENSION_SETTINGS_SQL);
+  }
+}
+
 function ensureCodingAgentSettingsTable(db: GraphDatabase): void {
   if (!getTableSql(db, "coding_agent_settings")) {
     db.exec(CODING_AGENT_SETTINGS_SQL);
+  }
+}
+
+function ensureReviewAgentSettingsTable(db: GraphDatabase): void {
+  if (!getTableSql(db, "review_agent_settings")) {
+    db.exec(REVIEW_AGENT_SETTINGS_SQL);
   }
 }
 
@@ -579,6 +644,10 @@ function ensureAgentRunsTable(db: GraphDatabase): void {
   if (!tableHasColumn(db, "agent_runs", "coding_mode")) {
     db.exec("ALTER TABLE agent_runs ADD COLUMN coding_mode TEXT CHECK (coding_mode IN ('small', 'medium', 'large'));");
     db.exec("UPDATE agent_runs SET coding_mode = 'medium' WHERE agent_kind = 'coding' AND coding_mode IS NULL;");
+  }
+  if (!tableHasColumn(db, "agent_runs", "review_mode")) {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN review_mode TEXT CHECK (review_mode IN ('small', 'medium', 'large'));");
+    db.exec("UPDATE agent_runs SET review_mode = 'medium' WHERE agent_kind = 'review' AND review_mode IS NULL;");
   }
   if (!tableHasColumn(db, "agent_runs", "base_graph_revision")) {
     db.exec("ALTER TABLE agent_runs ADD COLUMN base_graph_revision INTEGER NOT NULL DEFAULT 0;");
@@ -727,15 +796,17 @@ function ensureGraphNodesTable(db: GraphDatabase): void {
     sql.includes("code_context") &&
     sql.includes("custom_type_id") &&
     sql.includes("'website'") &&
-    sql.includes("'ui_component'")
+    sql.includes("'ui_component'") &&
+    sql.includes("'embedded_system'") &&
+    sql.includes("'ml_layer'")
   ) {
-	    if (!tableHasColumn(db, "graph_nodes", "agent_status")) {
-	      db.exec("ALTER TABLE graph_nodes ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'none';");
-	    }
-	    ensureGraphNodeExecutionColumns(db);
-	    if (!sql.includes("'implemented'")) {
-	      rebuildGraphNodesTable(db);
-	    }
+      if (!tableHasColumn(db, "graph_nodes", "agent_status")) {
+        db.exec("ALTER TABLE graph_nodes ADD COLUMN agent_status TEXT NOT NULL DEFAULT 'none';");
+      }
+      ensureGraphNodeExecutionColumns(db);
+      if (!sql.includes("'implemented'")) {
+        rebuildGraphNodesTable(db);
+      }
     return;
   }
 
@@ -827,7 +898,7 @@ function ensureGraphNodeTypeStylesTable(db: GraphDatabase): void {
     db.exec(GRAPH_NODE_TYPE_STYLES_SQL);
     return;
   }
-  if (!sql.includes("'website'") || !sql.includes("'ui_component'")) {
+  if (!sql.includes("'website'") || !sql.includes("'ui_component'") || !sql.includes("'embedded_system'") || !sql.includes("'ml_layer'")) {
     db.pragma("foreign_keys = OFF");
     db.exec(`
       CREATE TABLE graph_node_type_styles_new AS SELECT * FROM graph_node_type_styles;
@@ -866,20 +937,23 @@ function resetGraphStorage(db: GraphDatabase): void {
     DROP TABLE IF EXISTS process_details;
     DROP TABLE IF EXISTS format_details;
     DROP TABLE IF EXISTS basic_block_details;
-	    DROP TABLE IF EXISTS graph_entity_versions;
-	    DROP TABLE IF EXISTS scan_file_state;
-	    DROP TABLE IF EXISTS graph_edges;
-	    DROP TABLE IF EXISTS graph_revisions;
-	    DROP TABLE IF EXISTS coding_workflow_items;
-	    DROP TABLE IF EXISTS coding_workflows;
-	    DROP TABLE IF EXISTS code_proposals;
+    DROP TABLE IF EXISTS extension_node_details;
+      DROP TABLE IF EXISTS graph_entity_versions;
+      DROP TABLE IF EXISTS scan_file_state;
+      DROP TABLE IF EXISTS graph_edges;
+      DROP TABLE IF EXISTS graph_revisions;
+      DROP TABLE IF EXISTS coding_workflow_items;
+      DROP TABLE IF EXISTS coding_workflows;
+      DROP TABLE IF EXISTS code_proposals;
     DROP TABLE IF EXISTS graph_status_history;
-	    DROP TABLE IF EXISTS agent_messages;
-	    DROP TABLE IF EXISTS agent_runs;
-	    DROP TABLE IF EXISTS scanning_agent_settings;
-	    DROP TABLE IF EXISTS coding_agent_settings;
+      DROP TABLE IF EXISTS agent_messages;
+        DROP TABLE IF EXISTS agent_runs;
+        DROP TABLE IF EXISTS scanning_agent_settings;
+        DROP TABLE IF EXISTS review_agent_settings;
+        DROP TABLE IF EXISTS coding_agent_settings;
     DROP TABLE IF EXISTS agent_settings;
     DROP TABLE IF EXISTS workspace_settings;
+    DROP TABLE IF EXISTS workspace_extension_settings;
     DROP TABLE IF EXISTS graph_edges_old;
     DROP TABLE IF EXISTS graph_nodes_old;
     DROP TABLE IF EXISTS graph_nodes;
@@ -894,14 +968,17 @@ function resetGraphStorage(db: GraphDatabase): void {
     ${GRAPH_NODE_TAGS_SQL}
     ${GRAPH_EDGE_TAGS_SQL}
     ${GRAPH_BOUNDARY_TAGS_SQL}
-	    ${GRAPH_NODE_REUSES_SQL}
-	    ${GRAPH_ENTITY_VERSIONS_SQL}
-	    ${SCAN_FILE_STATE_SQL}
-	    ${CODING_AGENT_SETTINGS_SQL}
-	    ${SCANNING_AGENT_SETTINGS_SQL}
-	    ${CODING_WORKFLOWS_SQL}
-	    ${CODING_WORKFLOW_ITEMS_SQL}
-	  `);
+    ${EXTENSION_NODE_DETAILS_SQL}
+      ${GRAPH_NODE_REUSES_SQL}
+      ${GRAPH_ENTITY_VERSIONS_SQL}
+    ${WORKSPACE_EXTENSION_SETTINGS_SQL}
+        ${SCAN_FILE_STATE_SQL}
+        ${CODING_AGENT_SETTINGS_SQL}
+        ${REVIEW_AGENT_SETTINGS_SQL}
+        ${SCANNING_AGENT_SETTINGS_SQL}
+      ${CODING_WORKFLOWS_SQL}
+      ${CODING_WORKFLOW_ITEMS_SQL}
+    `);
   db.pragma("foreign_keys = ON");
 }
 
@@ -913,24 +990,24 @@ function rebuildGraphNodesTable(db: GraphDatabase): void {
       id, project_id, kind, name, summary,
       code_context, code_directory, code_start_line, code_end_line, language,
       parent_id, attached_to_id, custom_type_id,
-	      source_path, source_start_line, source_end_line,
-	      test_script_directory, virtual_environment, working_directory, setup_command, test_command,
-	      ui_x, ui_y,
-	      ui_width, ui_height, agent_status, created_at, updated_at
-	    )
-	    SELECT
-	      id, project_id, kind, name, summary,
-	      code_context, code_directory, code_start_line, code_end_line, language,
-	      parent_id, attached_to_id, custom_type_id,
-	      source_path, source_start_line, source_end_line,
-	      ${tableHasColumn(db, "graph_nodes", "test_script_directory") ? "test_script_directory" : "NULL"},
-	      ${tableHasColumn(db, "graph_nodes", "virtual_environment") ? "virtual_environment" : "NULL"},
-	      ${tableHasColumn(db, "graph_nodes", "working_directory") ? "working_directory" : "NULL"},
-	      ${tableHasColumn(db, "graph_nodes", "setup_command") ? "setup_command" : "NULL"},
-	      ${tableHasColumn(db, "graph_nodes", "test_command") ? "test_command" : "NULL"},
-	      ui_x, ui_y,
-	      ui_width, ui_height, ${normalizedStatusSql("agent_status")}, created_at, updated_at
-	    FROM graph_nodes;
+        source_path, source_start_line, source_end_line,
+        test_script_directory, virtual_environment, working_directory, setup_command, test_command,
+        ui_x, ui_y,
+        ui_width, ui_height, agent_status, created_at, updated_at
+      )
+      SELECT
+        id, project_id, kind, name, summary,
+        code_context, code_directory, code_start_line, code_end_line, language,
+        parent_id, attached_to_id, custom_type_id,
+        source_path, source_start_line, source_end_line,
+        ${tableHasColumn(db, "graph_nodes", "test_script_directory") ? "test_script_directory" : "NULL"},
+        ${tableHasColumn(db, "graph_nodes", "virtual_environment") ? "virtual_environment" : "NULL"},
+        ${tableHasColumn(db, "graph_nodes", "working_directory") ? "working_directory" : "NULL"},
+        ${tableHasColumn(db, "graph_nodes", "setup_command") ? "setup_command" : "NULL"},
+        ${tableHasColumn(db, "graph_nodes", "test_command") ? "test_command" : "NULL"},
+        ui_x, ui_y,
+        ui_width, ui_height, ${normalizedStatusSql("agent_status")}, created_at, updated_at
+      FROM graph_nodes;
     DROP TABLE graph_nodes;
     ALTER TABLE graph_nodes_new RENAME TO graph_nodes;
   `);
@@ -972,6 +1049,7 @@ function rebuildGraphEdgesTable(db: GraphDatabase): void {
 
 function rebuildAgentRunsTable(db: GraphDatabase): void {
   const hasCodingMode = tableHasColumn(db, "agent_runs", "coding_mode");
+  const hasReviewMode = tableHasColumn(db, "agent_runs", "review_mode");
   const hasBaseGraphRevision = tableHasColumn(db, "agent_runs", "base_graph_revision");
   const hasAppliedGraphRevision = tableHasColumn(db, "agent_runs", "applied_graph_revision");
   const hasConflictReason = tableHasColumn(db, "agent_runs", "conflict_reason");
@@ -980,10 +1058,11 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
     ALTER TABLE agent_runs RENAME TO agent_runs_old;
     CREATE TABLE agent_runs (
       id TEXT PRIMARY KEY,
-      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-      agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
-      coding_mode TEXT CHECK (coding_mode IN ('small', 'medium', 'large')),
-      status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
+        project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+        agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
+        coding_mode TEXT CHECK (coding_mode IN ('small', 'medium', 'large')),
+        review_mode TEXT CHECK (review_mode IN ('small', 'medium', 'large')),
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
       base_graph_revision INTEGER NOT NULL DEFAULT 0,
       applied_graph_revision INTEGER,
       conflict_reason TEXT,
@@ -996,15 +1075,16 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-    INSERT INTO agent_runs (
-      id, project_id, agent_kind, coding_mode, status,
-      base_graph_revision, applied_graph_revision, conflict_reason,
-      target_node_id, prompt, response, diff, graph_patch_json, error, created_at, updated_at
-    )
-    SELECT
-      id, project_id, agent_kind,
-      ${hasCodingMode ? "coding_mode" : "CASE WHEN agent_kind = 'coding' THEN 'medium' ELSE NULL END"},
-      CASE status WHEN 'queued' THEN 'queued' WHEN 'running' THEN 'running' WHEN 'succeeded' THEN 'succeeded' WHEN 'failed' THEN 'failed' WHEN 'conflicted' THEN 'conflicted' ELSE 'failed' END,
+      INSERT INTO agent_runs (
+        id, project_id, agent_kind, coding_mode, review_mode, status,
+        base_graph_revision, applied_graph_revision, conflict_reason,
+        target_node_id, prompt, response, diff, graph_patch_json, error, created_at, updated_at
+      )
+      SELECT
+        id, project_id, agent_kind,
+        ${hasCodingMode ? "coding_mode" : "CASE WHEN agent_kind = 'coding' THEN 'medium' ELSE NULL END"},
+        ${hasReviewMode ? "review_mode" : "CASE WHEN agent_kind = 'review' THEN 'medium' ELSE NULL END"},
+        CASE status WHEN 'queued' THEN 'queued' WHEN 'running' THEN 'running' WHEN 'succeeded' THEN 'succeeded' WHEN 'failed' THEN 'failed' WHEN 'conflicted' THEN 'conflicted' ELSE 'failed' END,
       ${hasBaseGraphRevision ? "base_graph_revision" : "0"},
       ${hasAppliedGraphRevision ? "applied_graph_revision" : "NULL"},
       ${hasConflictReason ? "conflict_reason" : "NULL"},

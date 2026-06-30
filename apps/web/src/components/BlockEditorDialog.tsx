@@ -2,15 +2,21 @@ import {
   DOMAIN_NODE_KINDS,
   GRAPH_NODE_KINDS,
   LANGUAGE_TYPES,
+  extensionNodeDefinitionForKind,
+  extensionPackageForNodeKind,
+  isExtensionNodeKind,
   type CanvasGraph,
   type CreateCustomBlockType,
+  type ExtensionFieldDefinition,
   type CustomBlockType,
   type GraphNode,
   type GraphNodeKind,
   type HierarchyNode,
   type LanguageType,
+  type NodeDetail,
   type NodeMutation,
-  type NodeUpdate
+  type NodeUpdate,
+  type WorkspaceSettings
 } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
 import { Plus, Save, X } from "lucide-react";
@@ -22,8 +28,10 @@ type BlockEditorDialogProps = {
   open: boolean;
   mode: "create" | "edit";
   node: GraphNode | null;
+  detail: NodeDetail | null;
   hierarchy: HierarchyNode[];
   canvas: CanvasGraph | null;
+  settings: WorkspaceSettings | null;
   selectedNodeId: string | null;
   loading: boolean;
   error: string | null;
@@ -36,7 +44,7 @@ type BlockEditorDialogProps = {
   ) => void;
 };
 
-export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selectedNodeId, loading, error, onClose, onSave }: BlockEditorDialogProps) {
+export function BlockEditorDialog({ open, mode, node, detail, hierarchy, canvas, settings, selectedNodeId, loading, error, onClose, onSave }: BlockEditorDialogProps) {
   const domainOptions = useMemo(() => flattenHierarchy(hierarchy), [hierarchy]);
   const ownerOptions = useMemo(() => uniqueNodes([...domainOptions, ...(canvas?.nodes ?? [])]), [canvas?.nodes, domainOptions]);
   const defaultOwner = selectedNodeId ?? canvas?.scopeNodeId ?? ownerOptions[0]?.id ?? "";
@@ -59,6 +67,7 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
   const [newCustomTypeName, setNewCustomTypeName] = useState("");
   const [newCustomTypeColor, setNewCustomTypeColor] = useState("#475569");
   const [newCustomTypeIcon, setNewCustomTypeIcon] = useState(defaultCustomBlockIcon);
+  const [extensionPayload, setExtensionPayload] = useState<Record<string, string | number | boolean | null>>({});
 
   useEffect(() => {
     if (!open) {
@@ -84,7 +93,8 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
     setNewCustomTypeName("");
     setNewCustomTypeColor("#475569");
     setNewCustomTypeIcon(defaultCustomBlockIcon);
-  }, [canvas?.customTypes, canvas?.nodes.length, canvas?.scopeNodeId, defaultOwner, domainOptions, node, open]);
+    setExtensionPayload(detail?.extensionDetails.find((item) => item.node.id === node?.id)?.details.payload ?? {});
+  }, [canvas?.customTypes, canvas?.nodes.length, canvas?.scopeNodeId, defaultOwner, detail?.extensionDetails, domainOptions, node, open]);
 
   if (!open) {
     return null;
@@ -94,6 +104,18 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
   const isFramework = kind === "framework";
   const isCustom = kind === "custom";
   const customTypes = canvas?.customTypes ?? [];
+  const enabledExtensionPackageIds = new Set(settings?.extensions?.enabledPackageIds ?? []);
+  const visibleNodeKinds = GRAPH_NODE_KINDS.filter((nodeKind) => {
+    if (!isExtensionNodeKind(nodeKind)) {
+      return true;
+    }
+    if (node?.kind === nodeKind) {
+      return true;
+    }
+    const extensionPackage = extensionPackageForNodeKind(nodeKind);
+    return Boolean(extensionPackage && enabledExtensionPackageIds.has(extensionPackage.id));
+  });
+  const extensionDefinition = extensionNodeDefinitionForKind(kind);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -117,6 +139,16 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
         testCommand: testCommand.trim() || null
       }
     };
+
+    if (extensionDefinition) {
+      payload.extensionDetails = {
+        packageId: extensionDefinition.packageId,
+        schemaId: extensionDefinition.detailSchemaId,
+        payload: extensionPayload
+      };
+    } else if (mode === "edit" && node && isExtensionNodeKind(node.kind)) {
+      payload.extensionDetails = null;
+    }
 
     onSave(payload, {
       createCustomType:
@@ -147,7 +179,7 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
           <label className="form-field">
             <span>Type</span>
             <select value={kind} onChange={(event) => setKind(event.target.value as GraphNodeKind)}>
-              {GRAPH_NODE_KINDS.map((nodeKind) => (
+              {visibleNodeKinds.map((nodeKind) => (
                 <option key={nodeKind} value={nodeKind}>
                   {nodePalette[nodeKind].label}
                 </option>
@@ -191,7 +223,7 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
               <span>Attach to</span>
               <select value={attachedToId} onChange={(event) => setAttachedToId(event.target.value)}>
                 {ownerOptions
-                  .filter((item) => item.kind !== "format")
+                  .filter((item) => isAllowedAttachmentOwner(kind, item.kind))
                   .map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.name}
@@ -313,6 +345,19 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
           </div>
         ) : null}
 
+        {extensionDefinition ? (
+          <ExtensionDetailFields
+            fields={extensionDefinition.fields}
+            payload={extensionPayload}
+            onChange={(key, value) =>
+              setExtensionPayload((current) => ({
+                ...current,
+                [key]: value
+              }))
+            }
+          />
+        ) : null}
+
         {error ? <div className="error-strip">{error}</div> : null}
 
         <div className="dialog-actions">
@@ -342,6 +387,10 @@ function uniqueNodes(nodes: GraphNode[]): GraphNode[] {
 }
 
 function isAllowedParent(kind: GraphNodeKind, parentKind: GraphNodeKind): boolean {
+  const extensionDefinition = extensionNodeDefinitionForKind(kind);
+  if (extensionDefinition?.category === "domain") {
+    return extensionDefinition.parentKinds.includes(parentKind);
+  }
   if (kind === "module") {
     return parentKind === "framework" || parentKind === "module";
   }
@@ -352,6 +401,64 @@ function isAllowedParent(kind: GraphNodeKind, parentKind: GraphNodeKind): boolea
     return parentKind === "website" || parentKind === "module" || parentKind === "ui_component";
   }
   return parentKind === "module";
+}
+
+function isAllowedAttachmentOwner(kind: GraphNodeKind, ownerKind: GraphNodeKind): boolean {
+  const extensionDefinition = extensionNodeDefinitionForKind(kind);
+  if (extensionDefinition?.category === "attachment") {
+    return extensionDefinition.attachableToKinds.includes(ownerKind);
+  }
+  return ownerKind !== "format";
+}
+
+function ExtensionDetailFields({
+  fields,
+  payload,
+  onChange
+}: {
+  fields: ExtensionFieldDefinition[];
+  payload: Record<string, string | number | boolean | null>;
+  onChange: (key: string, value: string | number | boolean | null) => void;
+}) {
+  if (fields.length === 0) {
+    return null;
+  }
+  return (
+    <div className="custom-type-box">
+      <h3>Extension Details</h3>
+      <div className="form-grid">
+        {fields.map((field) => (
+          <label className="form-field" key={field.key}>
+            <span>{field.label}</span>
+            {field.type === "enum" ? (
+              <select value={String(payload[field.key] ?? "")} onChange={(event) => onChange(field.key, event.target.value || null)}>
+                <option value="">Unset</option>
+                {(field.options ?? []).map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
+            ) : field.type === "boolean" ? (
+              <label className="inline-control">
+                <input type="checkbox" checked={Boolean(payload[field.key])} onChange={(event) => onChange(field.key, event.target.checked)} />
+                <span>{field.helpText ?? field.label}</span>
+              </label>
+            ) : field.type === "textarea" ? (
+              <textarea rows={3} value={String(payload[field.key] ?? "")} placeholder={field.placeholder} onChange={(event) => onChange(field.key, event.target.value || null)} />
+            ) : (
+              <input
+                type={field.type === "number" ? "number" : "text"}
+                value={String(payload[field.key] ?? "")}
+                placeholder={field.placeholder}
+                onChange={(event) => onChange(field.key, field.type === "number" && event.target.value ? Number(event.target.value) : event.target.value || null)}
+              />
+            )}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function parseOptionalLine(value: string): number | null {

@@ -5,9 +5,11 @@ import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
 import {
-  type AgentConfig,
-  type AgentKind,
-  type AgentStatus,
+  AVAILABLE_EXTENSION_PACKAGES,
+    type AgentConfig,
+    type AgentKind,
+    type AgentRun,
+    type AgentStatus,
   type BlockExecutionMetadata,
   type CanvasGraph,
   type CodingAgentRequest,
@@ -17,8 +19,10 @@ import {
   type GraphPatch,
   type GraphStatusPatch,
   type NodeDetail,
-  type PlanningChatRequest,
-  type ReviewAgentRequest,
+    type PlanningChatRequest,
+    type ReviewAgentRequest,
+    type ReviewAgentMode,
+  extensionNodeDetailsMutationSchema,
   type ScanningAgentRequest,
   type ScanningAgentConfig,
   type ScanningAgentMode,
@@ -120,7 +124,8 @@ const scanDetailSchema = z.object({
   trigger: z.string().nullable().optional(),
   formatKind: formatKindSchema.optional(),
   spec: z.string().optional(),
-  notes: z.string().optional()
+  notes: z.string().optional(),
+  extensionDetails: extensionNodeDetailsMutationSchema.optional()
 });
 
 export const scanNodeDraftSchema = z.object({
@@ -274,31 +279,31 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
       const organizationScope = resolveCodingOrganizationScope(detail.node, graph.nodes);
       const scopeCanvas =
         organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
-	      const allowedPath = detail.node.source.path ?? detail.node.code.directory;
-	      const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
-	      const gitStatus = await options.toolbox.readGitStatus(input.projectId);
-	      const execution = await options.toolbox.resolveExecutionMetadata(input.nodeId);
-	      const context = buildCodingContextBundle({
-	        mode,
-	        detail,
-	        graph,
-	        organizationScope,
-	        scopeCanvas,
-	        allowedPath,
-	        source,
-	        gitStatus,
-	        execution,
-	        recommendedModeReason: input.recommendedModeReason,
-	        prompt: input.prompt
-	      });
-	      const response = await provider.invoke([
-	        { role: "system", content: resolveSystemPrompt(options.config, "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest.") },
-	        { role: "user", content: context }
-	      ]);
-	      const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(response);
-	      const diff = normalizeDiff(responseWithoutArtifacts, allowedPath);
-	      assertDiffInScope(diff, allowedPath);
-	      await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
+        const allowedPath = detail.node.source.path ?? detail.node.code.directory;
+        const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
+        const gitStatus = await options.toolbox.readGitStatus(input.projectId);
+        const execution = await options.toolbox.resolveExecutionMetadata(input.nodeId);
+        const context = buildCodingContextBundle({
+          mode,
+          detail,
+          graph,
+          organizationScope,
+          scopeCanvas,
+          allowedPath,
+          source,
+          gitStatus,
+          execution,
+          recommendedModeReason: input.recommendedModeReason,
+          prompt: input.prompt
+        });
+        const response = await provider.invoke([
+          { role: "system", content: resolveSystemPrompt(options.config, "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest.") },
+          { role: "user", content: context }
+        ]);
+        const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(response);
+        const diff = normalizeDiff(responseWithoutArtifacts, allowedPath);
+        assertDiffInScope(diff, allowedPath);
+        await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
       const touched: GraphStatusPatch[] = [
         {
           entityType: "node",
@@ -314,26 +319,59 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
   });
 }
 
-export async function runReviewAgent(input: ReviewAgentRequest & { diff?: string; targetNodeId?: string | null }, options: AgentRuntimeOptions): Promise<AgentResult> {
+export async function runReviewAgent(
+  input: ReviewAgentRequest & { diff?: string; targetNodeId?: string | null; targetRun?: AgentRun | null },
+  options: AgentRuntimeOptions
+): Promise<AgentResult> {
   return runLangGraphTask({
     kind: "review",
     prompt: input.runId,
     execute: async () => {
       const provider = createProvider(options.config);
+      const mode = input.mode ?? "medium";
       const diff = input.diff ?? "";
-      const hasBug = /\bBUG\b|\bFAIL\b|\berror\b/i.test(diff);
+      const graph = await options.toolbox.readGraph(input.projectId);
+      const detail = input.targetNodeId ? await options.toolbox.getNodeDetail(input.targetNodeId) : null;
+      const organizationScope = detail ? resolveCodingOrganizationScope(detail.node, graph.nodes) : null;
+      const scopeCanvas =
+        detail && organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
+      const allowedPath = detail?.node.source.path ?? detail?.node.code.directory ?? null;
+      const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath).catch(() => "") : "";
+      const gitStatus = await options.toolbox.readGitStatus(input.projectId);
+      const execution = input.targetNodeId ? await options.toolbox.resolveExecutionMetadata(input.targetNodeId) : null;
+      const context = buildReviewContextBundle({
+        mode,
+        targetRun: input.targetRun ?? null,
+        detail,
+        graph,
+        organizationScope,
+        scopeCanvas,
+        allowedPath,
+        source,
+        gitStatus,
+        execution,
+        diff
+      });
       const response = await provider.invoke([
-        { role: "system", content: resolveSystemPrompt(options.config, "Review diffs for bugs, test gaps, and scope leaks.") },
-        { role: "user", content: `Review this diff:\n${diff || "(no diff available)"}` }
+        {
+          role: "system",
+          content: resolveSystemPrompt(
+            options.config,
+            "Review GraphCode coding proposals for bugs, verification gaps, and scope leaks. End with GRAPHCODE_REVIEW_VERDICT: reviewed or GRAPHCODE_REVIEW_VERDICT: bugged."
+          )
+        },
+        { role: "user", content: context }
       ]);
-      const status: AgentStatus = hasBug ? "bugged" : "reviewed";
+      const forcedBug = hasFailureMarker(diff) || diffEscapesScope(diff, allowedPath);
+      const parsedVerdict = parseReviewVerdict(response);
+      const status: AgentStatus = forcedBug || parsedVerdict !== "reviewed" ? "bugged" : "reviewed";
       const touched = input.targetNodeId
         ? [
             {
               entityType: "node" as const,
               entityId: input.targetNodeId,
               status,
-              note: hasBug ? "Review agent found a likely issue." : "Review agent accepted the patch proposal.",
+              note: status === "bugged" ? "Review agent found a likely issue or failed a deterministic review guard." : "Review agent accepted the patch proposal.",
               agentRunId: options.runId ?? null
             }
           ]
@@ -397,11 +435,26 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
 }
 
 function scanningPrompt(input: ScanningAgentRequest): string {
+  const enabledExtensions = AVAILABLE_EXTENSION_PACKAGES.filter((extensionPackage) => input.enabledExtensionPackageIds?.includes(extensionPackage.id));
   return (
     [
       input.rootPath ? `Root path: ${input.rootPath}` : `Project: ${input.projectId}`,
       input.projectDescription ? `Project description:\n${input.projectDescription}` : "",
-      input.scanningInstructions ? `Scanning instructions:\n${input.scanningInstructions}` : ""
+      input.scanningInstructions ? `Scanning instructions:\n${input.scanningInstructions}` : "",
+      enabledExtensions.length > 0
+        ? [
+            "Enabled extension packages:",
+            ...enabledExtensions.map((extensionPackage) =>
+              [
+                `${extensionPackage.id}: ${extensionPackage.name}`,
+                extensionPackage.promptAddendum,
+                `Node kinds: ${extensionPackage.nodeKinds
+                  .map((definition) => `${definition.kind}(${definition.category}; schema=${definition.detailSchemaId}; fields=${definition.fields.map((field) => field.key).join("|") || "none"})`)
+                  .join(", ")}`
+              ].join("\n")
+            )
+          ].join("\n\n")
+        : "No extension packages are enabled. Do not emit extension node kinds."
     ]
       .filter(Boolean)
       .join("\n\n") || input.projectId
@@ -447,7 +500,7 @@ async function runLocalScan(
         `Mode: local`,
         `File: ${file.path}`,
         `Content hash: ${file.contentHash}`,
-        "Return only JSON matching this shape: {filePath, contentHash, summary, nodes:[{stableKey, kind, name, summary, codeContext, source:{path,startLine,endLine}, language, parentStableKey, attachedToStableKey, detail}], edges:[{stableKey, kind, sourceStableKey, targetStableKey, label, codeContext, source:{path,startLine,endLine}}]}.",
+        "Return only JSON matching this shape: {filePath, contentHash, summary, nodes:[{stableKey, kind, name, summary, codeContext, source:{path,startLine,endLine}, language, parentStableKey, attachedToStableKey, detail:{..., extensionDetails:{packageId,schemaId,payload}}}], edges:[{stableKey, kind, sourceStableKey, targetStableKey, label, codeContext, source:{path,startLine,endLine}}]}.",
         "Every source range must be exact and use 1-based inclusive line numbers from this file.",
         numberedSource(source)
       ].join("\n\n")
@@ -691,6 +744,78 @@ function buildCodingContextBundle(input: CodingContextInput): string {
     input.source ? `Source (${input.allowedPath ?? "unknown"}):\n${input.source.slice(0, sourceLimit)}` : "Source unavailable; produce a proposal note."
   ]
     .filter(Boolean)
+      .join("\n\n");
+}
+
+type ReviewContextInput = {
+  mode: ReviewAgentMode;
+  targetRun: AgentRun | null;
+  detail: NodeDetail | null;
+  graph: PlanningGraph;
+  organizationScope: GraphNode | null;
+  scopeCanvas: CanvasGraph | null;
+  allowedPath: string | null;
+  source: string;
+  gitStatus: string;
+  execution: BlockExecutionMetadata | null;
+  diff: string;
+};
+
+function buildReviewContextBundle(input: ReviewContextInput): string {
+  const detail = input.detail;
+  const directWorkflowNodes = detail
+    ? [
+        ...detail.inputs.map((row) => row.node),
+        ...detail.processes.map((row) => row.node),
+        ...detail.outputs.map((row) => row.node),
+        ...detail.formats.map((row) => row.node),
+        ...detail.basicDetails.map((row) => row.node),
+        ...detail.dependencies.map((row) => row.node)
+      ]
+    : [];
+  const canvasWorkflowNodes =
+    input.scopeCanvas?.nodes.filter((node) => isAttachmentNodeKind(node.kind) && (node.kind === "input" || node.kind === "process" || node.kind === "output" || node.kind === "format")) ?? [];
+  const workflowNodes = uniqueNodes(input.mode === "small" ? directWorkflowNodes : [...directWorkflowNodes, ...canvasWorkflowNodes]);
+  const directEdges = detail ? [...detail.incomingEdges, ...detail.outgoingEdges] : [];
+  const workflowEdges = input.scopeCanvas?.edges.filter((edge) => edge.kind === "flows" || edge.kind === "describes_format") ?? [];
+  const scopedEdges = uniqueEdges(input.mode === "small" ? directEdges : [...workflowEdges, ...directEdges]);
+  const largeGraph = input.mode === "large" && detail ? buildLargeGraphContext(input.graph, input.organizationScope ?? detail.node) : { nodes: [], edges: [] };
+  const sourceLimit = input.mode === "large" ? 20000 : input.mode === "medium" ? 12000 : 4000;
+
+  return [
+    `Review mode: ${input.mode}`,
+    input.targetRun
+      ? [
+          `Target run: ${input.targetRun.id}`,
+          `Target run kind: ${input.targetRun.agentKind}`,
+          `Target coding mode: ${input.targetRun.codingMode ?? "none"}`,
+          `Target run status: ${input.targetRun.status}`,
+          `Target run prompt:\n${input.targetRun.prompt || "(none)"}`,
+          `Target run response:\n${input.targetRun.response || "(none)"}`,
+          input.targetRun.error ? `Target run error:\n${input.targetRun.error}` : ""
+        ]
+          .filter(Boolean)
+          .join("\n")
+      : "Target run: (not provided)",
+    detail ? `Target node: ${formatNode(detail.node)}` : "Target node: none",
+    `Organization scope: ${input.organizationScope ? formatNode(input.organizationScope) : "none"}`,
+    `Allowed edit path: ${input.allowedPath ?? "none"}`,
+    detail
+      ? `Allowed source lines: ${detail.node.source.startLine ?? detail.node.code.startLine ?? "unknown"}-${detail.node.source.endLine ?? detail.node.code.endLine ?? "unknown"}`
+      : "Allowed source lines: unknown",
+    input.execution ? `Execution metadata:\n${formatExecutionMetadata(input.execution)}` : "Execution metadata: unavailable",
+    `Workflow blocks:\n${formatNodeList(workflowNodes, 28)}`,
+    `Workflow flow edges:\n${formatEdgeList(scopedEdges, 36)}`,
+    detail ? `Related nodes:\n${formatNodeList(detail.relatedNodes, 18)}` : "",
+    input.mode === "large" ? `Large-scope nodes:\n${formatNodeList(largeGraph.nodes, 50)}` : "",
+    input.mode === "large" ? `Large-scope edges:\n${formatEdgeList(largeGraph.edges, 80)}` : "",
+    detail ? `Code context:\n${detail.node.code.context || "(none)"}` : "",
+    `Git status:\n${input.gitStatus || "(clean or unavailable)"}`,
+    input.source ? `Source (${input.allowedPath ?? "unknown"}):\n${input.source.slice(0, sourceLimit)}` : "Source unavailable.",
+    `Diff under review:\n${input.diff || "(no diff available)"}`,
+    "Verdict rule: end the response with exactly one line: GRAPHCODE_REVIEW_VERDICT: reviewed or GRAPHCODE_REVIEW_VERDICT: bugged."
+  ]
+    .filter(Boolean)
     .join("\n\n");
 }
 
@@ -822,11 +947,18 @@ async function runLangGraphTask(task: AgentTask): Promise<AgentResult> {
 type ProviderConfig = Omit<AgentConfig, "agentKind"> & { agentKind?: AgentKind; mode?: string };
 
 function createProvider(config: ProviderConfig): { invoke: (messages: PromptMessage[]) => Promise<string> } {
-	  if (config.provider === "fake") {
-	    return {
-	      invoke: async (messages) => `Fake ${config.agentKind ?? config.mode ?? "agent"} response: ${messages.at(-1)?.content.slice(0, 4000) ?? ""}`
-	    };
-	  }
+      if (config.provider === "fake") {
+        return {
+          invoke: async (messages) => {
+            const content = messages.at(-1)?.content.slice(0, 4000) ?? "";
+            if (config.agentKind === "review") {
+              const verdict = hasFailureMarker(content) || diffEscapesScope(content, extractAllowedPath(content)) ? "bugged" : "reviewed";
+              return `Fake review response: ${content}\nGRAPHCODE_REVIEW_VERDICT: ${verdict}`;
+            }
+            return `Fake ${config.agentKind ?? config.mode ?? "agent"} response: ${content}`;
+          }
+        };
+      }
   if (config.provider === "openai" || config.provider === "openrouter") {
     const apiKey = resolveApiKey(config);
     const model = new ChatOpenAI({
@@ -936,15 +1068,33 @@ function normalizeDiff(response: string, allowedPath: string | null | undefined)
 }
 
 function assertDiffInScope(diff: string, allowedPath: string | null | undefined): void {
+  if (diffEscapesScope(diff, allowedPath)) {
+    throw new Error(`Coding agent diff escaped the selected block scope: ${allowedPath?.replace(/^\/+/, "")}`);
+  }
+}
+
+function diffEscapesScope(diff: string, allowedPath: string | null | undefined): boolean {
   if (!allowedPath) {
-    return;
+    return false;
   }
   const normalized = allowedPath.replace(/^\/+/, "");
   const touched = [...diff.matchAll(/^(?:\+\+\+|---) [ab]\/(.+)$/gm)].map((match) => match[1]);
-  const outOfScope = touched.some((path) => path !== normalized && !path.startsWith(`${normalized}/`));
-  if (outOfScope) {
-    throw new Error(`Coding agent diff escaped the selected block scope: ${normalized}`);
-  }
+  return touched.some((path) => path !== normalized && !path.startsWith(`${normalized}/`));
+}
+
+function hasFailureMarker(value: string): boolean {
+  return /\b(?:BUG|FAIL|FAILED|ERROR)\b/i.test(value);
+}
+
+function parseReviewVerdict(response: string): "reviewed" | "bugged" | null {
+  const match = response.trim().match(/GRAPHCODE_REVIEW_VERDICT:\s*(reviewed|bugged)\s*$/i);
+  return match ? (match[1].toLowerCase() as "reviewed" | "bugged") : null;
+}
+
+function extractAllowedPath(content: string): string | null {
+  const match = content.match(/^Allowed edit path:\s*(.+)$/m);
+  const value = match?.[1]?.trim();
+  return value && value !== "none" ? value : null;
 }
 
 function buildPlanningContextChunks(graph: PlanningGraph, parallelLimit: number): PlanningGraph[] {

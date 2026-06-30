@@ -12,7 +12,9 @@ import {
   type GraphTag,
   type NodeDetail,
   type NodeTypeStyle,
-  type TagAssignment
+  type TagAssignment,
+  extensionNodeDefinitionForKind,
+  extensionPackageById
 } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
 import { Boxes, Code2, Database, FileInput, FileOutput, FileType, GitBranch, Link2, Package, Palette, Pencil, Play, Route, Tags, Workflow } from "lucide-react";
@@ -395,6 +397,32 @@ export function Inspector({
         )}
       </section>
 
+      {detail.extensionDetails.length > 0 ? (
+        <section className="inspector-section">
+          <h3>
+            <Boxes size={15} />
+            Extension Details
+          </h3>
+          <div className="detail-list">
+            {detail.extensionDetails.map(({ node: extensionNode, details }) => {
+              const definition = extensionNodeDefinitionForKind(extensionNode.kind);
+              return (
+                <div className="detail-row" key={extensionNode.id}>
+                  <Boxes size={15} />
+                  <div>
+                    <span>{extensionNode.name}</span>
+                    <small>
+                      {definition?.label ?? extensionNode.kind} · {extensionPackageById(details.packageId).name}
+                    </small>
+                    <small>{formatExtensionPayload(details.payload)}</small>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      ) : null}
+
       <section className="inspector-section split">
         <BoundaryList title="Inputs" icon="input" rows={detail.inputs} />
         <BoundaryList title="Outputs" icon="output" rows={detail.outputs} />
@@ -574,6 +602,14 @@ function dedupeTagNames(value: string): string[] {
 
 function normalizeTagName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, "-");
+}
+
+function formatExtensionPayload(payload: Record<string, string | number | boolean | null>): string {
+  const entries = Object.entries(payload).filter(([, value]) => value !== null && value !== "");
+  if (entries.length === 0) {
+    return "No fields set";
+  }
+  return entries.map(([key, value]) => `${key}: ${String(value)}`).join(" · ");
 }
 
 function BoundaryList({
