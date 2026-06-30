@@ -576,6 +576,10 @@ type BoundaryDragState = {
   memberLayouts: MemberLayout[];
 };
 
+type Point = { x: number; y: number };
+type Size = { width: number; height: number };
+type Rect = Point & Size;
+
 function toFlowNodes(
   canvas: CanvasGraph | null,
   selectedNodeId: string | null,
@@ -664,11 +668,15 @@ type EdgeRenderData = {
   labelBackground: string;
   labelBorder: string;
   offset: number;
+  labelAnchor: Point | null;
+  labelSize: Size;
   selected: boolean;
 };
 
 export type EdgeRenderSummary = Pick<EdgeRenderData, "label" | "offset" | "title"> & {
   id: string;
+  labelAnchor: Point | null;
+  labelSize: Size;
 };
 
 export function buildEdgeRenderSummaries(canvas: CanvasGraph | null, selectedEdgeId: string | null, theme: "light" | "dark"): EdgeRenderSummary[] {
@@ -676,7 +684,9 @@ export function buildEdgeRenderSummaries(canvas: CanvasGraph | null, selectedEdg
     id: edge.id,
     label: String(edge.label ?? ""),
     title: String((edge.data as EdgeRenderData | undefined)?.title ?? edge.label ?? ""),
-    offset: Number((edge.data as EdgeRenderData | undefined)?.offset ?? 0)
+    offset: Number((edge.data as EdgeRenderData | undefined)?.offset ?? 0),
+    labelAnchor: (edge.data as EdgeRenderData | undefined)?.labelAnchor ?? null,
+    labelSize: (edge.data as EdgeRenderData | undefined)?.labelSize ?? measureEdgeLabelSize(String(edge.label ?? ""))
   }));
 }
 
@@ -690,14 +700,26 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
       .filter((node) => node.attachedToId)
       .map((node) => ({ id: `attachment-${node.attachedToId}-${node.id}`, source: node.attachedToId!, target: node.id }))
   ]);
+  const reuseByNodeId = new Map((canvas.reuses ?? []).map((reuse) => [reuse.nodeId, reuse]));
+  const nodeRects = new Map(canvas.nodes.map((node) => [node.id, nodeRectForLabelPlacement(node, reuseByNodeId.get(node.id))]));
+  const blockingRects = [...nodeRects.values()];
 
   const semanticEdges: Edge[] = canvas.edges.map((edge) => {
     const edgeColor = edge.id === selectedEdgeId ? "#2563eb" : edge.color;
+    const label = formatEdgeLabel(edge);
+    const offset = laneOffsets.get(edge.id) ?? 0;
     const data = edgeRenderData({
-      label: formatEdgeLabel(edge),
+      label,
       color: edgeColor,
       selected: edge.id === selectedEdgeId,
-      offset: laneOffsets.get(edge.id) ?? 0,
+      offset,
+      labelAnchor: chooseEdgeLabelAnchor({
+        sourceRect: nodeRects.get(edge.sourceNodeId),
+        targetRect: nodeRects.get(edge.targetNodeId),
+        blockingRects,
+        labelSize: measureEdgeLabelSize(label),
+        laneOffset: offset
+      }),
       theme
     });
     return {
@@ -722,11 +744,20 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
     .map((node) => {
       const color = colorForNode(node, canvas);
       const id = `attachment-${node.attachedToId}-${node.id}`;
+      const label = node.kind;
+      const offset = laneOffsets.get(id) ?? 0;
       const data = edgeRenderData({
-        label: node.kind,
+        label,
         color,
         selected: false,
-        offset: laneOffsets.get(id) ?? 0,
+        offset,
+        labelAnchor: chooseEdgeLabelAnchor({
+          sourceRect: nodeRects.get(node.attachedToId!),
+          targetRect: nodeRects.get(node.id),
+          blockingRects,
+          labelSize: measureEdgeLabelSize(label),
+          laneOffset: offset
+        }),
         theme
       });
       return {
@@ -767,6 +798,7 @@ function ReadableGraphEdge({
 }: EdgeProps<Edge<Record<string, unknown>>>) {
   const renderData = data as EdgeRenderData | undefined;
   const offset = renderData?.offset ?? 0;
+  const labelAnchor = renderData?.labelAnchor ?? null;
   const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX,
     sourceY,
@@ -775,8 +807,12 @@ function ReadableGraphEdge({
     targetY,
     targetPosition,
     borderRadius: 14,
+    centerX: labelAnchor?.x,
+    centerY: labelAnchor?.y,
     offset: 24 + Math.abs(offset)
   });
+  const renderedLabelX = labelAnchor?.x ?? labelX;
+  const renderedLabelY = labelAnchor?.y ?? labelY + offset;
 
   return (
     <>
@@ -790,7 +826,7 @@ function ReadableGraphEdge({
               "--edge-label-color": renderData.labelColor,
               "--edge-label-bg": renderData.labelBackground,
               "--edge-label-border": renderData.labelBorder,
-              transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY + offset}px)`
+              transform: `translate(-50%, -50%) translate(${renderedLabelX}px, ${renderedLabelY}px)`
             } as CSSProperties}
           >
             {renderData.label}
@@ -806,14 +842,17 @@ function edgeRenderData({
   color,
   selected,
   offset,
+  labelAnchor,
   theme
 }: {
   label: string;
   color: string;
   selected: boolean;
   offset: number;
+  labelAnchor: Point | null;
   theme: "light" | "dark";
 }): EdgeRenderData {
+  const labelSize = measureEdgeLabelSize(label);
   return {
     label,
     title: label,
@@ -822,8 +861,200 @@ function edgeRenderData({
     labelBackground: theme === "dark" ? "rgba(15, 23, 42, 0.94)" : "rgba(255, 255, 255, 0.96)",
     labelBorder: selected ? "#2563eb" : theme === "dark" ? "rgba(148, 163, 184, 0.42)" : "rgba(203, 213, 225, 0.92)",
     offset,
+    labelAnchor,
+    labelSize,
     selected
   };
+}
+
+export function measureEdgeLabelSize(label: string): Size {
+  const normalized = label.trim() || "edge";
+  const longestWord = Math.max(0, ...normalized.split(/\s+/).map((part) => part.length));
+  const width = Math.min(EDGE_LABEL_MAX_WIDTH, Math.max(EDGE_LABEL_MIN_WIDTH, 18 + Math.max(normalized.length * 6.4, longestWord * 7.2)));
+  const lineCount = Math.max(1, Math.ceil(normalized.length / Math.max(12, Math.floor(width / 6.4))));
+  return {
+    width: Math.round(width),
+    height: Math.round(10 + Math.min(3, lineCount) * 15)
+  };
+}
+
+export function chooseEdgeLabelAnchor({
+  sourceRect,
+  targetRect,
+  blockingRects,
+  labelSize,
+  laneOffset
+}: {
+  sourceRect?: Rect;
+  targetRect?: Rect;
+  blockingRects: Rect[];
+  labelSize: Size;
+  laneOffset: number;
+}): Point | null {
+  if (!sourceRect || !targetRect) {
+    return null;
+  }
+
+  const sourceCenter = rectCenter(sourceRect);
+  const targetCenter = rectCenter(targetRect);
+  const horizontalFlow = Math.abs(targetCenter.x - sourceCenter.x) >= Math.abs(targetCenter.y - sourceCenter.y);
+  const perpendicularOffset = horizontalFlow ? { x: 0, y: laneOffset } : { x: laneOffset, y: 0 };
+  const base = {
+    x: (sourceCenter.x + targetCenter.x) / 2 + perpendicularOffset.x,
+    y: (sourceCenter.y + targetCenter.y) / 2 + perpendicularOffset.y
+  };
+  const pairBounds = rectBounds([sourceRect, targetRect]);
+  const candidates: Point[] = [];
+  const xOffsets = offsetSeries(0, labelSize.width + EDGE_LABEL_CLEARANCE * 2, 4);
+  const yOffsets = offsetSeries(0, labelSize.height + EDGE_LABEL_CLEARANCE * 2, 4);
+  const horizontalGap = labelCenterGap(sourceRect, targetRect, "x", labelSize.width);
+  const verticalGap = labelCenterGap(sourceRect, targetRect, "y", labelSize.height);
+
+  if (horizontalGap) {
+    const x = (horizontalGap.min + horizontalGap.max) / 2;
+    for (const yOffset of yOffsets) {
+      candidates.push({ x, y: base.y + yOffset });
+    }
+  }
+
+  if (verticalGap) {
+    const y = (verticalGap.min + verticalGap.max) / 2;
+    for (const xOffset of xOffsets) {
+      candidates.push({ x: base.x + xOffset, y });
+    }
+  }
+
+  candidates.push(base);
+
+  const aboveY = pairBounds.y - EDGE_LABEL_CLEARANCE - labelSize.height / 2;
+  const belowY = pairBounds.y + pairBounds.height + EDGE_LABEL_CLEARANCE + labelSize.height / 2;
+  for (const xOffset of xOffsets) {
+    candidates.push({ x: base.x + xOffset, y: aboveY });
+    candidates.push({ x: base.x + xOffset, y: belowY });
+  }
+
+  const leftX = pairBounds.x - EDGE_LABEL_CLEARANCE - labelSize.width / 2;
+  const rightX = pairBounds.x + pairBounds.width + EDGE_LABEL_CLEARANCE + labelSize.width / 2;
+  for (const yOffset of yOffsets) {
+    candidates.push({ x: leftX, y: base.y + yOffset });
+    candidates.push({ x: rightX, y: base.y + yOffset });
+  }
+
+  const uniqueCandidates = dedupePoints(candidates);
+  return uniqueCandidates.find((candidate) => isLabelAnchorClear(candidate, labelSize, blockingRects)) ?? leastOverlappingCandidate(uniqueCandidates, labelSize, blockingRects);
+}
+
+function nodeRectForLabelPlacement(node: GraphNode, reuse?: GraphNodeReuse): Rect {
+  const size = measureNodeCardSize(node, reuse);
+  return {
+    x: node.position.x,
+    y: node.position.y,
+    width: size.width,
+    height: size.height
+  };
+}
+
+function rectCenter(rect: Rect): Point {
+  return {
+    x: rect.x + rect.width / 2,
+    y: rect.y + rect.height / 2
+  };
+}
+
+function rectBounds(rects: Rect[]): Rect {
+  const minX = Math.min(...rects.map((rect) => rect.x));
+  const minY = Math.min(...rects.map((rect) => rect.y));
+  const maxX = Math.max(...rects.map((rect) => rect.x + rect.width));
+  const maxY = Math.max(...rects.map((rect) => rect.y + rect.height));
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY
+  };
+}
+
+function labelCenterGap(sourceRect: Rect, targetRect: Rect, axis: "x" | "y", labelExtent: number): { min: number; max: number } | null {
+  const sourceCenter = rectCenter(sourceRect);
+  const targetCenter = rectCenter(targetRect);
+  const first = sourceCenter[axis] <= targetCenter[axis] ? sourceRect : targetRect;
+  const second = first === sourceRect ? targetRect : sourceRect;
+  const firstEnd = first[axis] + (axis === "x" ? first.width : first.height);
+  const secondStart = second[axis];
+  const min = firstEnd + EDGE_LABEL_CLEARANCE + labelExtent / 2;
+  const max = secondStart - EDGE_LABEL_CLEARANCE - labelExtent / 2;
+  return min <= max ? { min, max } : null;
+}
+
+function offsetSeries(center: number, step: number, count: number): number[] {
+  const offsets = [center];
+  for (let index = 1; index <= count; index += 1) {
+    offsets.push(center - step * index, center + step * index);
+  }
+  return offsets;
+}
+
+function dedupePoints(points: Point[]): Point[] {
+  const seen = new Set<string>();
+  const result: Point[] = [];
+  for (const point of points) {
+    const key = `${Math.round(point.x * 10) / 10}:${Math.round(point.y * 10) / 10}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(point);
+    }
+  }
+  return result;
+}
+
+function isLabelAnchorClear(anchor: Point, labelSize: Size, blockingRects: Rect[]): boolean {
+  const labelRect = labelRectFromAnchor(anchor, labelSize);
+  return blockingRects.every((rect) => !rectsOverlap(labelRect, expandRect(rect, EDGE_LABEL_CLEARANCE)));
+}
+
+function leastOverlappingCandidate(candidates: Point[], labelSize: Size, blockingRects: Rect[]): Point | null {
+  if (candidates.length === 0) {
+    return null;
+  }
+  let best = candidates[0];
+  let bestScore = Number.POSITIVE_INFINITY;
+  for (const candidate of candidates) {
+    const labelRect = labelRectFromAnchor(candidate, labelSize);
+    const score = blockingRects.reduce((total, rect) => total + rectOverlapArea(labelRect, expandRect(rect, EDGE_LABEL_CLEARANCE)), 0);
+    if (score < bestScore) {
+      best = candidate;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+function labelRectFromAnchor(anchor: Point, labelSize: Size): Rect {
+  return {
+    x: anchor.x - labelSize.width / 2,
+    y: anchor.y - labelSize.height / 2,
+    width: labelSize.width,
+    height: labelSize.height
+  };
+}
+
+function expandRect(rect: Rect, amount: number): Rect {
+  return {
+    x: rect.x - amount,
+    y: rect.y - amount,
+    width: rect.width + amount * 2,
+    height: rect.height + amount * 2
+  };
+}
+
+function rectsOverlap(a: Rect, b: Rect): boolean {
+  return a.x < b.x + b.width && a.x + a.width > b.x && a.y < b.y + b.height && a.y + a.height > b.y;
+}
+
+function rectOverlapArea(a: Rect, b: Rect): number {
+  const width = Math.max(0, Math.min(a.x + a.width, b.x + b.width) - Math.max(a.x, b.x));
+  const height = Math.max(0, Math.min(a.y + a.height, b.y + b.height) - Math.max(a.y, b.y));
+  return width * height;
 }
 
 function buildEdgeLaneOffsets(edges: Array<{ id: string; source: string; target: string }>): Map<string, number> {
@@ -977,6 +1208,9 @@ function useResolvedCanvasTheme(theme: WorkspaceSettings["general"]["theme"]): "
 
 const BOUNDARY_SIDE_PADDING = 48;
 const BOUNDARY_BOTTOM_PADDING = 44;
+const EDGE_LABEL_MIN_WIDTH = 58;
+const EDGE_LABEL_MAX_WIDTH = 260;
+const EDGE_LABEL_CLEARANCE = 14;
 const EDGE_LANE_STEP = 34;
 
 function canvasThemeColors(theme: "light" | "dark") {

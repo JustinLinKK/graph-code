@@ -1470,10 +1470,6 @@ select {
   cursor: pointer;
 }
 
-.workspace-flow .react-flow__edgelabel-renderer {
-  z-index: 30;
-}
-
 .graph-edge-label {
   position: absolute;
   max-width: 260px;

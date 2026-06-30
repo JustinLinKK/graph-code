@@ -1,6 +1,6 @@
 import type { CanvasGraph, GraphEdge, GraphNode, GraphNodeReuse, Project } from "@graphcode/graph-model";
 import { describe, expect, it } from "vitest";
-import { buildEdgeRenderSummaries, measureNodeCardSize } from "./WorkspaceCanvas";
+import { buildEdgeRenderSummaries, chooseEdgeLabelAnchor, measureEdgeLabelSize, measureNodeCardSize } from "./WorkspaceCanvas";
 
 describe("WorkspaceCanvas node card sizing", () => {
   it("expands reused tagged cards enough for wrapped chips", () => {
@@ -117,6 +117,59 @@ describe("WorkspaceCanvas edge rendering metadata", () => {
 
     expect(summary.offset).toBe(0);
   });
+
+  it("places labels in the clear gap between separated cards", () => {
+    const sourceRect = { x: 0, y: 0, width: 220, height: 120 };
+    const targetRect = { x: 430, y: 0, width: 220, height: 120 };
+    const labelSize = measureEdgeLabelSize("clear label");
+    const anchor = chooseEdgeLabelAnchor({
+      sourceRect,
+      targetRect,
+      blockingRects: [sourceRect, targetRect],
+      labelSize,
+      laneOffset: 0
+    });
+
+    expect(anchor).not.toBeNull();
+    expect(overlapsAny(labelRect(anchor!, labelSize), [sourceRect, targetRect])).toBe(false);
+    expect(anchor!.x).toBeGreaterThan(sourceRect.x + sourceRect.width);
+    expect(anchor!.x).toBeLessThan(targetRect.x);
+  });
+
+  it("moves labels outside cramped card gaps instead of overlapping blocks", () => {
+    const sourceRect = { x: 0, y: 0, width: 220, height: 120 };
+    const targetRect = { x: 250, y: 0, width: 220, height: 120 };
+    const labelSize = measureEdgeLabelSize("branch condition label");
+    const anchor = chooseEdgeLabelAnchor({
+      sourceRect,
+      targetRect,
+      blockingRects: [sourceRect, targetRect],
+      labelSize,
+      laneOffset: 0
+    });
+
+    expect(anchor).not.toBeNull();
+    expect(overlapsAny(labelRect(anchor!, labelSize), [sourceRect, targetRect])).toBe(false);
+    expect(anchor!.y).not.toBe(60);
+  });
+
+  it("avoids unrelated cards in the edge label corridor", () => {
+    const sourceRect = { x: 0, y: 0, width: 220, height: 120 };
+    const targetRect = { x: 430, y: 0, width: 220, height: 120 };
+    const blockerRect = { x: 290, y: 0, width: 80, height: 120 };
+    const labelSize = measureEdgeLabelSize("clear label");
+    const anchor = chooseEdgeLabelAnchor({
+      sourceRect,
+      targetRect,
+      blockingRects: [sourceRect, targetRect, blockerRect],
+      labelSize,
+      laneOffset: 0
+    });
+
+    expect(anchor).not.toBeNull();
+    expect(overlapsAny(labelRect(anchor!, labelSize), [sourceRect, targetRect, blockerRect])).toBe(false);
+    expect(anchor!.y).not.toBe(60);
+  });
 });
 
 const project: Project = {
@@ -198,4 +251,17 @@ function canvas(edges: GraphEdge[]): CanvasGraph {
     nodeTypeStyles: [],
     reuses: []
   };
+}
+
+function labelRect(center: { x: number; y: number }, size: { width: number; height: number }) {
+  return {
+    x: center.x - size.width / 2,
+    y: center.y - size.height / 2,
+    width: size.width,
+    height: size.height
+  };
+}
+
+function overlapsAny(rect: { x: number; y: number; width: number; height: number }, others: Array<{ x: number; y: number; width: number; height: number }>): boolean {
+  return others.some((other) => rect.x < other.x + other.width && rect.x + rect.width > other.x && rect.y < other.y + other.height && rect.y + rect.height > other.y);
 }

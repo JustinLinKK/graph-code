@@ -21,9 +21,9 @@ export async function layoutCanvasWithElk(nodes: GraphNode[], edges: GraphEdge[]
       "elk.spacing.nodeNode": "44",
       "elk.spacing.edgeEdge": "28",
       "elk.spacing.edgeNode": "36",
-      "elk.layered.spacing.nodeNodeBetweenLayers": "92",
+      "elk.layered.spacing.nodeNodeBetweenLayers": "160",
       "elk.layered.spacing.edgeEdgeBetweenLayers": "30",
-      "elk.layered.spacing.edgeNodeBetweenLayers": "44",
+      "elk.layered.spacing.edgeNodeBetweenLayers": "72",
       "elk.layered.nodePlacement.strategy": "NETWORK_SIMPLEX",
       "elk.edgeRouting": "ORTHOGONAL"
     },
