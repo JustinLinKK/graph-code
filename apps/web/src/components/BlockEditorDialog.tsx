@@ -15,6 +15,7 @@ import {
 import { Button } from "@heroui/react";
 import { Plus, Save, X } from "lucide-react";
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { customBlockIconOptions, defaultCustomBlockIcon } from "../customBlockIcons";
 import { nodePalette } from "../graphStyles";
 
 type BlockEditorDialogProps = {
@@ -57,6 +58,7 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
   const [customTypeId, setCustomTypeId] = useState(node?.customTypeId ?? canvas?.customTypes[0]?.id ?? "");
   const [newCustomTypeName, setNewCustomTypeName] = useState("");
   const [newCustomTypeColor, setNewCustomTypeColor] = useState("#475569");
+  const [newCustomTypeIcon, setNewCustomTypeIcon] = useState(defaultCustomBlockIcon);
 
   useEffect(() => {
     if (!open) {
@@ -81,6 +83,7 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
     setCustomTypeId(node?.customTypeId ?? canvas?.customTypes[0]?.id ?? "");
     setNewCustomTypeName("");
     setNewCustomTypeColor("#475569");
+    setNewCustomTypeIcon(defaultCustomBlockIcon);
   }, [canvas?.customTypes, canvas?.nodes.length, canvas?.scopeNodeId, defaultOwner, domainOptions, node, open]);
 
   if (!open) {
@@ -121,7 +124,7 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
           ? {
               name: newCustomTypeName.trim(),
               color: newCustomTypeColor,
-              icon: "square"
+              icon: newCustomTypeIcon
             }
           : undefined
     });
@@ -269,16 +272,43 @@ export function BlockEditorDialog({ open, mode, node, hierarchy, canvas, selecte
               </select>
             </label>
             {!customTypeId ? (
-              <div className="form-grid">
+              <>
+                <div className="form-grid">
+                  <label className="form-field">
+                    <span>New Type Name</span>
+                    <input value={newCustomTypeName} onChange={(event) => setNewCustomTypeName(event.target.value)} />
+                  </label>
+                  <label className="form-field">
+                    <span>Color</span>
+                    <input type="color" value={newCustomTypeColor} onChange={(event) => setNewCustomTypeColor(event.target.value)} />
+                  </label>
+                </div>
                 <label className="form-field">
-                  <span>New Type Name</span>
-                  <input value={newCustomTypeName} onChange={(event) => setNewCustomTypeName(event.target.value)} />
+                  <span>Icon</span>
+                  <div className="icon-picker-grid" role="group" aria-label="Custom type icon">
+                    {customBlockIconOptions.map((option) => {
+                      const Icon = option.Icon;
+                      const selected = newCustomTypeIcon === option.key;
+                      return (
+                        <span key={option.key} className="icon-picker-tooltip" title={option.label}>
+                          <Button
+                            type="button"
+                            isIconOnly
+                            size="sm"
+                            variant="ghost"
+                            className={`icon-picker-button ${selected ? "selected" : ""}`}
+                            aria-label={`Use ${option.label} icon`}
+                            aria-pressed={selected}
+                            onPress={() => setNewCustomTypeIcon(option.key)}
+                          >
+                            <Icon size={16} />
+                          </Button>
+                        </span>
+                      );
+                    })}
+                  </div>
                 </label>
-                <label className="form-field">
-                  <span>Color</span>
-                  <input type="color" value={newCustomTypeColor} onChange={(event) => setNewCustomTypeColor(event.target.value)} />
-                </label>
-              </div>
+              </>
             ) : null}
           </div>
         ) : null}

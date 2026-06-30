@@ -1470,6 +1470,10 @@ select {
   cursor: pointer;
 }
 
+.workspace-flow .react-flow__edgelabel-renderer {
+  z-index: 30;
+}
+
 .graph-edge-label {
   position: absolute;
   max-width: 260px;
@@ -1670,6 +1674,33 @@ select {
   background: #f8fafc;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
+}
+
+.icon-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(34px, 34px));
+  gap: 8px;
+}
+
+.icon-picker-tooltip {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+}
+
+.icon-picker-button {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  border: 1px solid #dbe2ea;
+  color: #475569;
+  background: #ffffff;
+}
+
+.icon-picker-button.selected {
+  color: #0f766e;
+  border-color: #0f766e;
+  background: #ecfdf5;
 }
 
 .dialog-warning {

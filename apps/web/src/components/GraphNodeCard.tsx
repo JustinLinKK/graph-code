@@ -1,4 +1,4 @@
-import type { GraphNode, GraphNodeKind, GraphNodeReuse } from "@graphcode/graph-model";
+import type { CustomBlockType, GraphNode, GraphNodeKind, GraphNodeReuse } from "@graphcode/graph-model";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import {
   Box,
@@ -24,11 +24,13 @@ import {
   Workflow
 } from "lucide-react";
 import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
+import { iconForCustomBlockType } from "../customBlockIcons";
 import { nodePalette } from "../graphStyles";
 
 export type GraphNodeCardData = {
   node: GraphNode;
   accentColor: string;
+  customType?: CustomBlockType | null;
   reuse?: GraphNodeReuse;
   selected: boolean;
   onResizeEnd?: (nodeId: string, size: { width: number; height: number }) => void;
@@ -38,9 +40,10 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
   const cardData = data as unknown as GraphNodeCardData;
   const { node } = cardData;
   const isSelected = selected || cardData.selected;
-  const Icon = iconForKind(node.kind);
+  const Icon = node.kind === "custom" ? iconForCustomBlockType(cardData.customType?.icon) : iconForKind(node.kind);
   const palette = nodePalette[node.kind];
   const accentColor = cardData.accentColor;
+  const typeLabel = node.kind === "custom" ? cardData.customType?.name ?? palette.label : palette.label;
   const tags = node.tags ?? [];
 
   return (
@@ -58,7 +61,7 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
         <span className="node-card-icon" style={{ color: accentColor, backgroundColor: `color-mix(in srgb, ${accentColor} 14%, white)` }}>
           <Icon size={16} />
         </span>
-        <span>{palette.label}</span>
+        <span>{typeLabel}</span>
       </div>
       <div className="node-card-name">{node.name}</div>
       <p>{node.summary}</p>

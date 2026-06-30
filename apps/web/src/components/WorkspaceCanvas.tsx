@@ -631,6 +631,7 @@ function toFlowGraphNode(
 ): Node {
   const displaySize = measureNodeCardSize(node, reuseByNodeId.get(node.id));
   const isSelected = node.id === selectedNodeId || node.id === edgeDraftSourceId;
+  const customType = node.kind === "custom" && node.customTypeId ? canvas.customTypes.find((item) => item.id === node.customTypeId) ?? null : null;
   return {
     id: node.id,
     type: "graphNode",
@@ -647,6 +648,7 @@ function toFlowGraphNode(
         size: displaySize
       },
       accentColor: colorForNode(node, canvas),
+      customType,
       reuse: reuseByNodeId.get(node.id),
       selected: isSelected,
       onResizeEnd

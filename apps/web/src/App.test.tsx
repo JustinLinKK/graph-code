@@ -861,8 +861,22 @@ describe("GraphCode app shell", () => {
         if (url === "/api/projects/graphcode-self/layout/auto") {
           return json({ ...moduleCanvasGraph, nodes: moduleCanvasGraph.nodes.map((item) => ({ ...item, position: { x: item.position.x + 10, y: item.position.y + 10 } })) });
         }
+        if (url === "/api/projects/graphcode-self/custom-node-types" && init?.method === "POST") {
+          const payload = JSON.parse(String(init.body ?? "{}"));
+          return json({
+            id: "custom-type-created",
+            projectId: project.id,
+            name: payload.name,
+            description: payload.description ?? "",
+            color: payload.color ?? "#475569",
+            icon: payload.icon ?? "square",
+            createdAt: "now",
+            updatedAt: "now"
+          });
+        }
         if (url === "/api/projects/graphcode-self/nodes" && init?.method === "POST") {
-          return json(node({ id: "created-block", kind: "framework", name: "Created Block" }));
+          const payload = JSON.parse(String(init.body ?? "{}"));
+          return json(node({ id: "created-block", kind: payload.kind ?? "framework", name: payload.name ?? "Created Block", customTypeId: payload.customTypeId ?? null }));
         }
         if (url === "/api/projects/graphcode-self/edges" && init?.method === "POST") {
           const payload = JSON.parse(String(init.body ?? "{}"));
@@ -1305,6 +1319,37 @@ describe("GraphCode app shell", () => {
           method: "POST"
         })
       );
+    });
+  });
+
+  it("posts the selected custom icon when creating a custom block type", async () => {
+    render(<App />);
+
+    await screen.findByTestId("react-flow");
+    fireEvent.click(screen.getByText("Add"));
+    fireEvent.click(await screen.findByText("Block"));
+    fireEvent.change(await screen.findByLabelText("Type"), { target: { value: "custom" } });
+    fireEvent.change(await screen.findByLabelText("Name"), { target: { value: "Custom Runtime" } });
+    fireEvent.change(await screen.findByLabelText("New Type Name"), { target: { value: "Experiment Type" } });
+    fireEvent.click(screen.getByRole("button", { name: "Use Experiment icon" }));
+    fireEvent.click(screen.getByText("Add block"));
+
+    await waitFor(() => {
+      const calls = vi.mocked(fetch).mock.calls;
+      const customTypeCall = calls.find(([url]) => url === "/api/projects/graphcode-self/custom-node-types");
+      expect(customTypeCall).toBeTruthy();
+      expect(JSON.parse(String(customTypeCall?.[1]?.body))).toMatchObject({
+        name: "Experiment Type",
+        icon: "flask-conical"
+      });
+
+      const nodeCall = calls.find(([url]) => url === "/api/projects/graphcode-self/nodes");
+      expect(nodeCall).toBeTruthy();
+      expect(JSON.parse(String(nodeCall?.[1]?.body))).toMatchObject({
+        kind: "custom",
+        name: "Custom Runtime",
+        customTypeId: "custom-type-created"
+      });
     });
   });
 
