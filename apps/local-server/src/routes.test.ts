@@ -753,6 +753,49 @@ describe("graph API routes", () => {
     expect(blankHierarchyResponse.json()).toEqual([]);
   });
 
+  it("opens an existing .graphcode database without rebuilding the default graph", async () => {
+    const rootPath = path.join(os.tmpdir(), `graphcode-existing-${crypto.randomUUID()}`);
+    const graphcodePath = path.join(rootPath, ".graphcode");
+    await fs.promises.mkdir(graphcodePath, { recursive: true });
+    const workspaceDbPath = path.join(graphcodePath, "graphcode.sqlite");
+    const db = openDatabase(workspaceDbPath);
+    migrate(db);
+    const repo = new GraphRepository(db);
+    const project = repo.createProject({ id: "persisted-open-project", name: "Persisted Open Project", rootPath });
+    repo.createNode({ id: "persisted-open-root", projectId: project.id, kind: "framework", name: "Persisted Root" });
+    repo.createNode({ id: "persisted-open-module", projectId: project.id, kind: "module", name: "Persisted Module", parentId: "persisted-open-root" });
+    repo.updateNodeLayout("persisted-open-module", {
+      scopeNodeId: "persisted-open-root",
+      position: { x: 321, y: 654 },
+      size: { width: 222, height: 111 }
+    });
+    db.close();
+
+    const openResponse = await app.inject({
+      method: "POST",
+      url: "/api/workspaces/open",
+      payload: { rootPath }
+    });
+    expect(openResponse.statusCode).toBe(200);
+    expect(openResponse.json().status).toBe("opened");
+    expect(openResponse.json().project).toEqual(expect.objectContaining({ id: project.id, name: "Persisted Open Project" }));
+
+    const canvasResponse = await app.inject({
+      method: "GET",
+      url: `/api/projects/${project.id}/canvas?rootNodeId=persisted-open-root`
+    });
+    expect(canvasResponse.statusCode).toBe(200);
+    const moduleNode = canvasResponse.json().nodes.find((node: { id: string }) => node.id === "persisted-open-module");
+    expect(moduleNode).toEqual(
+      expect.objectContaining({
+        name: "Persisted Module",
+        position: { x: 321, y: 654 },
+        size: { width: 222, height: 111 }
+      })
+    );
+    expect(JSON.stringify(canvasResponse.json())).not.toContain("GraphCode Self Workspace");
+  });
+
   it("prompts before initializing an empty self workspace database", async () => {
     await app.close();
     const rootPath = path.join(os.tmpdir(), `graphcode-self-open-${crypto.randomUUID()}`);
@@ -777,7 +820,15 @@ describe("graph API routes", () => {
     const dbPath = path.join(os.tmpdir(), `graphcode-preserve-${crypto.randomUUID()}.sqlite`);
     const db = openDatabase(dbPath);
     migrate(db);
-    new GraphRepository(db).createProject({ id: "persisted-project", name: "Persisted Project", rootPath: "/tmp/persisted" });
+    const repo = new GraphRepository(db);
+    const project = repo.createProject({ id: "persisted-project", name: "Persisted Project", rootPath: "/tmp/persisted" });
+    repo.createNode({ id: "persisted-root", projectId: project.id, kind: "framework", name: "Persisted Root" });
+    repo.createNode({ id: "persisted-module", projectId: project.id, kind: "module", name: "Persisted Module", parentId: "persisted-root" });
+    repo.updateNodeLayout("persisted-module", {
+      scopeNodeId: "persisted-root",
+      position: { x: 123, y: 456 },
+      size: { width: 240, height: 135 }
+    });
     db.close();
 
     app = await buildServer({ dbPath, selfRootPath });
@@ -791,6 +842,19 @@ describe("graph API routes", () => {
           name: "Persisted Project"
         })
       ])
+    );
+
+    const canvasResponse = await app.inject({
+      method: "GET",
+      url: "/api/projects/persisted-project/canvas?rootNodeId=persisted-root"
+    });
+    expect(canvasResponse.statusCode).toBe(200);
+    const moduleNode = canvasResponse.json().nodes.find((node: { id: string }) => node.id === "persisted-module");
+    expect(moduleNode).toEqual(
+      expect.objectContaining({
+        position: { x: 123, y: 456 },
+        size: { width: 240, height: 135 }
+      })
     );
   });
 });

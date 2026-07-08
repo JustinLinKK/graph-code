@@ -338,7 +338,117 @@ describe("SQLite graph repository", () => {
       expect(proposal?.id).toBe(proposalId);
       expect(proposal?.artifactManifest?.testScriptDirectory).toBe(path.join(".graphcode", "artifacts", "code-proposals", proposalId));
       expect(fs.existsSync(path.join(rootPath, ".graphcode", "artifacts", "code-proposals", proposalId, "leaf.test.ts"))).toBe(true);
-      expect(fs.existsSync(path.join(rootPath, "tests", "generated", "leaf.test.ts"))).toBe(true);
+      expect(fs.existsSync(path.join(rootPath, "tests", "generated", "__graphcode_generated__", proposalId, "leaf.test.ts"))).toBe(true);
+      expect(fs.existsSync(path.join(rootPath, "tests", "generated", "leaf.test.ts"))).toBe(false);
+    });
+
+    it("rejects unsafe code proposal artifact paths and generated test overwrites", () => {
+      const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-artifacts-"));
+      const project = repo.createProject({ id: "artifact-project", name: "Artifact Project", rootPath });
+      repo.createNode({ id: "artifact-framework", projectId: project.id, kind: "framework", name: "Root", agentStatus: "implemented" });
+      repo.createNode({
+        id: "artifact-module",
+        projectId: project.id,
+        kind: "module",
+        name: "Module",
+        parentId: "artifact-framework",
+        agentStatus: "implemented",
+        execution: { testScriptDirectory: "tests/generated" }
+      });
+      repo.createNode({
+        id: "artifact-process",
+        projectId: project.id,
+        kind: "process",
+        name: "Process",
+        attachedToId: "artifact-module",
+        agentStatus: "planning"
+      });
+      const run = repo.createAgentRun({ projectId: project.id, agentKind: "coding", targetNodeId: "artifact-process", status: "succeeded" });
+
+      expect(() =>
+        repo.storeCodeProposal({
+          projectId: project.id,
+          agentRunId: run.id,
+          targetNodeId: "artifact-process",
+          diff: "diff --git",
+          artifactManifest: {
+            testScriptDirectory: "ignored-by-storage",
+            scripts: [{ relativePath: "../escape.test.ts", content: "test('escape', () => {})" }]
+          }
+        })
+      ).toThrow(/parent directory traversal/);
+
+      const proposalId = repo.storeCodeProposal({
+        projectId: project.id,
+        agentRunId: run.id,
+        targetNodeId: "artifact-process",
+        diff: "diff --git",
+        artifactManifest: {
+          testScriptDirectory: "ignored-by-storage",
+          scripts: [{ relativePath: "process.test.ts", content: "test('process', () => {})" }]
+        }
+      });
+      const workflow = repo.createCodingWorkflow(project.id, "artifact-module", [], "running");
+      const item = workflow.items.find((candidate) => candidate.nodeId === "artifact-process")!;
+      repo.updateCodingWorkflowItem({ itemId: item.id, status: "proposed", proposalId });
+      const generatedPath = path.join(rootPath, "tests", "generated", "__graphcode_generated__", proposalId, "process.test.ts");
+      fs.mkdirSync(path.dirname(generatedPath), { recursive: true });
+      fs.writeFileSync(generatedPath, "existing", "utf8");
+
+      expect(() => repo.applyCodingWorkflowLayer(project.id, workflow.id, 0)).toThrow(/overwrite generated test artifact/);
+      expect(fs.existsSync(path.join(rootPath, "escape.test.ts"))).toBe(false);
+    });
+
+    it("rejects cross-project repository mutations and planning patch updates", () => {
+      const firstRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-project-a-"));
+      const secondRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-project-b-"));
+      const first = repo.createProject({ id: "project-a", name: "Project A", rootPath: firstRoot });
+      const second = repo.createProject({ id: "project-b", name: "Project B", rootPath: secondRoot });
+      repo.createNode({ id: "a-root", projectId: first.id, kind: "framework", name: "A Root", agentStatus: "implemented" });
+      repo.createNode({ id: "a-module", projectId: first.id, kind: "module", name: "A Module", parentId: "a-root", agentStatus: "planning" });
+      repo.createNode({ id: "b-root", projectId: second.id, kind: "framework", name: "B Root", agentStatus: "implemented" });
+      repo.createNode({ id: "b-module", projectId: second.id, kind: "module", name: "B Module", parentId: "b-root", agentStatus: "planning" });
+      const secondEdge = repo.createEdge({
+        id: "b-edge",
+        projectId: second.id,
+        kind: "uses",
+        sourceNodeId: "b-root",
+        targetNodeId: "b-module"
+      });
+      const secondBoundary = repo.createBoundary(second.id, {
+        scopeNodeId: "b-root",
+        name: "B Boundary",
+        position: { x: 0, y: 0 },
+        size: { width: 300, height: 180 }
+      });
+      const secondRun = repo.createAgentRun({ projectId: second.id, agentKind: "coding", targetNodeId: "b-module", status: "succeeded" });
+      const secondProposal = repo.storeCodeProposal({ projectId: second.id, agentRunId: secondRun.id, targetNodeId: "b-module", diff: "diff --git" });
+
+      expect(() => repo.createAgentRun({ projectId: first.id, agentKind: "coding", targetNodeId: "b-module" })).toThrow(/does not belong/);
+      expect(() => repo.setGraphStatuses(first.id, [{ entityType: "node", entityId: "b-module", status: "coded" }])).toThrow(/does not belong/);
+      expect(() => repo.setGraphStatuses(first.id, [{ entityType: "edge", entityId: secondEdge.id, status: "coded" }])).toThrow(/does not belong/);
+      expect(() => repo.setGraphStatuses(first.id, [{ entityType: "boundary", entityId: secondBoundary.id, status: "coded" }])).toThrow(/does not belong/);
+      expect(() => repo.storeCodeProposal({ projectId: first.id, agentRunId: secondRun.id, targetNodeId: "a-module", diff: "diff --git" })).toThrow(/does not belong/);
+      expect(() => repo.storeCodeProposal({ projectId: first.id, targetNodeId: "b-module", diff: "diff --git" })).toThrow(/does not belong/);
+      expect(() => repo.createCodingWorkflow(first.id, "b-module")).toThrow(/does not belong/);
+
+      const firstWorkflow = repo.createCodingWorkflow(first.id, "a-module", [], "running");
+      expect(() => repo.updateCodingWorkflowItem({ itemId: firstWorkflow.items[0].id, proposalId: secondProposal })).toThrow(/does not belong/);
+
+      const crossProjectPatch = repo.createAgentRun({
+        projectId: first.id,
+        agentKind: "planning",
+        status: "succeeded",
+        graphPatch: {
+          summary: "Try to edit project B",
+          operations: [{ entityType: "node", entityId: "b-module", action: "update", fields: { summary: "Wrong project edit" } }]
+        }
+      });
+      const applied = repo.applyAgentGraphPatch(first.id, crossProjectPatch.id);
+
+      expect(applied.status).toBe("conflicted");
+      expect(applied.conflictReason).toContain("no longer exists");
+      expect(repo.getNode("b-module").summary).toBe("");
     });
 
     it("applies planning graph patches transactionally and conflicts overlapping stale edits", () => {
@@ -374,6 +484,41 @@ describe("SQLite graph repository", () => {
     expect(conflicted.status).toBe("conflicted");
     expect(conflicted.conflictReason).toContain("changed after this ticket started");
     expect(repo.getNode("module-web").summary).toBe("First planning edit.");
+  });
+
+  it("lets earlier planning agents take priority over later overlapping edits", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const early = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      prompt: "Early retitle web module",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Early update",
+        operations: [{ entityType: "node", entityId: "module-web", action: "update", fields: { summary: "Early planning edit." } }]
+      }
+    });
+    const late = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      prompt: "Late retitle same web module",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Late update",
+        operations: [{ entityType: "node", entityId: "module-web", action: "update", fields: { summary: "Late planning edit." } }]
+      }
+    });
+
+    expect(early.baseGraphRevision).toBe(late.baseGraphRevision);
+
+    const appliedLate = repo.applyAgentGraphPatch(project.id, late.id);
+    expect(appliedLate.status).toBe("succeeded");
+    expect(repo.getNode("module-web").summary).toBe("Late planning edit.");
+
+    const appliedEarly = repo.applyAgentGraphPatch(project.id, early.id);
+    expect(appliedEarly.status).toBe("succeeded");
+    expect(appliedEarly.appliedGraphRevision).toBeGreaterThan(appliedLate.appliedGraphRevision ?? 0);
+    expect(repo.getNode("module-web").summary).toBe("Early planning edit.");
   });
 
   it("allows stale planning graph patches when touched entities do not overlap", () => {

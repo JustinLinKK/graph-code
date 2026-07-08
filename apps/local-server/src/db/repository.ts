@@ -109,6 +109,7 @@ import type { GraphDatabase } from "./connection";
 import { layoutCanvasWithBoundaryGroups } from "../layout/elk";
 
 const ROLE_AGENT_KINDS: AgentKind[] = ["planning", "scanning"];
+const GENERATED_TEST_ARTIFACT_DIR = "__graphcode_generated__";
 
 type ProjectRow = {
   id: string;
@@ -288,6 +289,7 @@ type GraphEntityVersionRow = {
   entity_id: string;
   revision: number;
   deleted: 0 | 1;
+  agent_run_id: string | null;
   updated_at: string;
 };
 
@@ -295,6 +297,7 @@ type GraphEntityVersionInput = {
   entityType: GraphPatchOperation["entityType"];
   entityId: string;
   deleted: boolean;
+  agentRunId?: string | null;
 };
 
 type CodeProposalRow = {
@@ -1186,6 +1189,46 @@ export class GraphRepository {
     return mapAgentRun(row);
   }
 
+  private assertRunInProject(projectId: string, runId: string): AgentRun {
+    const run = this.getAgentRun(runId);
+    if (run.projectId !== projectId) {
+      throw validationError("Agent run does not belong to this project.");
+    }
+    return run;
+  }
+
+  private assertNodeInProject(projectId: string, nodeId: string): GraphNode {
+    const node = this.getNode(nodeId);
+    if (node.projectId !== projectId) {
+      throw validationError("Graph node does not belong to this project.");
+    }
+    return node;
+  }
+
+  private assertEdgeInProject(projectId: string, edgeId: string): GraphEdge {
+    const edge = this.getEdge(edgeId);
+    if (edge.projectId !== projectId) {
+      throw validationError("Graph edge does not belong to this project.");
+    }
+    return edge;
+  }
+
+  private assertBoundaryInProject(projectId: string, boundaryId: string): GraphBoundary {
+    const boundary = this.getBoundary(boundaryId);
+    if (boundary.projectId !== projectId) {
+      throw validationError("Graph boundary does not belong to this project.");
+    }
+    return boundary;
+  }
+
+  private assertProposalInProject(projectId: string, proposalId: string): StoredCodeProposal {
+    const proposal = this.getCodeProposal(proposalId);
+    if (proposal.projectId !== projectId) {
+      throw validationError("Code proposal does not belong to this project.");
+    }
+    return proposal;
+  }
+
   createAgentRun(input: {
     projectId: string;
     agentKind: AgentKind;
@@ -1201,7 +1244,7 @@ export class GraphRepository {
   }): AgentRun {
     this.getProject(input.projectId);
     if (input.targetNodeId) {
-      this.getNode(input.targetNodeId);
+      this.assertNodeInProject(input.projectId, input.targetNodeId);
     }
     const id = `run-${crypto.randomUUID()}`;
     this.db
@@ -1294,14 +1337,17 @@ export class GraphRepository {
     const saved: GraphStatusHistory[] = [];
     const write = this.db.transaction(() => {
       for (const patch of patches) {
+        if (patch.agentRunId) {
+          this.assertRunInProject(projectId, patch.agentRunId);
+        }
         if (patch.entityType === "node") {
-          this.getNode(patch.entityId);
+          this.assertNodeInProject(projectId, patch.entityId);
           this.db.prepare("UPDATE graph_nodes SET agent_status = ?, updated_at = datetime('now') WHERE id = ?").run(patch.status, patch.entityId);
         } else if (patch.entityType === "edge") {
-          this.getEdge(patch.entityId);
+          this.assertEdgeInProject(projectId, patch.entityId);
           this.db.prepare("UPDATE graph_edges SET agent_status = ? WHERE id = ?").run(patch.status, patch.entityId);
         } else {
-          this.getBoundary(patch.entityId);
+          this.assertBoundaryInProject(projectId, patch.entityId);
         }
         saved.push(this.recordGraphStatusHistory(projectId, patch));
       }
@@ -1402,7 +1448,8 @@ export class GraphRepository {
           touched.push({
             entityType: operation.entityType,
             entityId: operation.entityId,
-            deleted: false
+            deleted: false,
+            agentRunId: run.id
           });
         }
       } finally {
@@ -1421,18 +1468,25 @@ export class GraphRepository {
 
   private findGraphPatchConflict(projectId: string, run: AgentRun, operations: GraphPatchOperation[]): string | null {
     for (const operation of operations) {
-      const exists = this.graphEntityExists(operation.entityType, operation.entityId);
+      const existsInProject = this.graphEntityExistsInProject(projectId, operation.entityType, operation.entityId);
+      const existsAnywhere = existsInProject || this.graphEntityExists(operation.entityType, operation.entityId);
       const version = this.getGraphEntityVersion(projectId, operation.entityType, operation.entityId);
       if (operation.action === "create") {
-        if (exists || (version && version.deleted === 0)) {
+        if (existsAnywhere || (version && version.deleted === 0)) {
           return `${operation.entityType} ${operation.entityId} already exists.`;
         }
         continue;
       }
-      if (!exists || version?.deleted === 1) {
+      if (!existsInProject || version?.deleted === 1) {
         return `${operation.entityType} ${operation.entityId} no longer exists.`;
       }
       if ((version?.revision ?? 0) > run.baseGraphRevision) {
+        if (version?.agent_run_id && this.agentRunHasTimelinePriority(run.id, version.agent_run_id)) {
+          continue;
+        }
+        if (version?.agent_run_id) {
+          return `${operation.entityType} ${operation.entityId} changed after this ticket started by earlier agent run ${version.agent_run_id}.`;
+        }
         return `${operation.entityType} ${operation.entityId} changed after this ticket started.`;
       }
     }
@@ -1466,6 +1520,7 @@ export class GraphRepository {
           agentStatus: "implemented"
         });
       } else {
+        this.assertNodeInProject(projectId, operation.entityId);
         this.updateNode(operation.entityId, nodeUpdateSchema.parse(operation.fields));
       }
       return;
@@ -1492,6 +1547,7 @@ export class GraphRepository {
           agentStatus: "implemented"
         });
       } else {
+        this.assertEdgeInProject(projectId, operation.entityId);
         this.updateEdge(operation.entityId, edgeUpdateSchema.parse(operation.fields));
       }
       return;
@@ -1511,6 +1567,7 @@ export class GraphRepository {
         size: input.size
       });
     } else {
+      this.assertBoundaryInProject(projectId, operation.entityId);
       this.updateBoundary(operation.entityId, boundaryUpdateSchema.parse(operation.fields));
     }
   }
@@ -1532,6 +1589,23 @@ export class GraphRepository {
     return Boolean(row);
   }
 
+  private graphEntityExistsInProject(projectId: string, entityType: GraphPatchOperation["entityType"], entityId: string): boolean {
+    const tableName = entityType === "node" ? "graph_nodes" : entityType === "edge" ? "graph_edges" : "graph_boundaries";
+    const row = this.db.prepare(`SELECT id FROM ${tableName} WHERE project_id = ? AND id = ?`).get(projectId, entityId) as { id: string } | undefined;
+    return Boolean(row);
+  }
+
+  private agentRunHasTimelinePriority(candidateRunId: string, existingRunId: string): boolean {
+    const candidateOrder = this.agentRunTimelineOrder(candidateRunId);
+    const existingOrder = this.agentRunTimelineOrder(existingRunId);
+    return candidateOrder !== null && existingOrder !== null && candidateOrder < existingOrder;
+  }
+
+  private agentRunTimelineOrder(runId: string): number | null {
+    const row = this.db.prepare("SELECT rowid AS rowid FROM agent_runs WHERE id = ?").get(runId) as { rowid: number } | undefined;
+    return row?.rowid ?? null;
+  }
+
   private bumpGraphEntities(projectId: string, entities: GraphEntityVersionInput[], note: string): number {
     if (this.suppressGraphVersionBumps || entities.length === 0) {
       return this.currentGraphRevision(projectId);
@@ -1539,12 +1613,13 @@ export class GraphRepository {
     const revision = this.recordGraphRevision(projectId, note);
     const upsert = this.db.prepare(
       `
-      INSERT INTO graph_entity_versions (project_id, entity_type, entity_id, revision, deleted, updated_at)
-      VALUES (@projectId, @entityType, @entityId, @revision, @deleted, datetime('now'))
+      INSERT INTO graph_entity_versions (project_id, entity_type, entity_id, revision, deleted, agent_run_id, updated_at)
+      VALUES (@projectId, @entityType, @entityId, @revision, @deleted, @agentRunId, datetime('now'))
       ON CONFLICT(project_id, entity_type, entity_id)
       DO UPDATE SET
         revision = excluded.revision,
         deleted = excluded.deleted,
+        agent_run_id = excluded.agent_run_id,
         updated_at = datetime('now')
     `
     );
@@ -1560,7 +1635,8 @@ export class GraphRepository {
         entityType: entity.entityType,
         entityId: entity.entityId,
         revision,
-        deleted: entity.deleted ? 1 : 0
+        deleted: entity.deleted ? 1 : 0,
+        agentRunId: entity.agentRunId ?? null
       });
     }
     return revision;
@@ -1577,7 +1653,10 @@ export class GraphRepository {
   storeCodeProposal(input: { projectId: string; agentRunId?: string | null; targetNodeId?: string | null; diff: string; artifactManifest?: CodeProposalArtifactManifest | null }): string {
     const project = this.getProject(input.projectId);
     if (input.targetNodeId) {
-      this.getNode(input.targetNodeId);
+      this.assertNodeInProject(input.projectId, input.targetNodeId);
+    }
+    if (input.agentRunId) {
+      this.assertRunInProject(input.projectId, input.agentRunId);
     }
     const id = `proposal-${crypto.randomUUID()}`;
     const artifactManifest = this.writeProposalArtifacts(project, id, input.artifactManifest ?? null);
@@ -1609,7 +1688,7 @@ export class GraphRepository {
 
   createCodingWorkflow(projectId: string, scopeNodeId: string, modeOverrides: CodingWorkflowModeOverride[] = [], status: CodingWorkflow["status"] = "running"): CodingWorkflow {
     const project = this.getProject(projectId);
-    const scope = this.getNode(scopeNodeId);
+    const scope = this.assertNodeInProject(projectId, scopeNodeId);
     const planItems = this.planCodingWorkflowItems(project.id, scope, modeOverrides);
     const id = `workflow-${crypto.randomUUID()}`;
     const summary = planItems.length > 0 ? `${planItems.length} coding item${planItems.length === 1 ? "" : "s"} planned under ${scope.name}.` : `No planning blocks found under ${scope.name}.`;
@@ -1668,6 +1747,16 @@ export class GraphRepository {
   }
 
   updateCodingWorkflowItem(input: { itemId: string; status?: CodingWorkflowItemStatus; agentRunId?: string | null; proposalId?: string | null; appliedAt?: string | null }): CodingWorkflowItem {
+    const existingItem = this.db.prepare("SELECT project_id FROM coding_workflow_items WHERE id = ?").get(input.itemId) as { project_id: string } | undefined;
+    if (!existingItem) {
+      throw notFound(`Coding workflow item not found: ${input.itemId}`);
+    }
+    if (input.agentRunId) {
+      this.assertRunInProject(existingItem.project_id, input.agentRunId);
+    }
+    if (input.proposalId) {
+      this.assertProposalInProject(existingItem.project_id, input.proposalId);
+    }
     this.db
       .prepare(
         `
@@ -1744,9 +1833,10 @@ export class GraphRepository {
 
   private applyCodeProposalArtifacts(projectId: string, proposalId: string, targetNodeId: string): void {
     const project = this.getProject(projectId);
-    const proposal = this.getCodeProposal(proposalId);
-    if (proposal.projectId !== project.id) {
-      throw validationError("Code proposal does not belong to this project.");
+    const proposal = this.assertProposalInProject(projectId, proposalId);
+    this.assertNodeInProject(projectId, targetNodeId);
+    if (proposal.targetNodeId && proposal.targetNodeId !== targetNodeId) {
+      throw validationError("Code proposal target does not match this workflow item.");
     }
     const manifest = proposal.artifactManifest;
     if (!manifest || manifest.scripts.length === 0) {
@@ -1760,16 +1850,28 @@ export class GraphRepository {
     if (!manifest.testScriptDirectory) {
       throw validationError(`Cannot apply test artifacts for ${proposalId}: artifact directory is missing.`);
     }
-    const artifactDirectory = path.resolve(project.rootPath, manifest.testScriptDirectory);
-    const targetRoot = path.resolve(project.rootPath, sanitizeArtifactPath(targetDirectory));
+    const artifactDirectory = path.resolve(project.rootPath, assertSafeRelativePath(manifest.testScriptDirectory, "artifact directory"));
+    const configuredTargetDirectory = assertSafeRelativePath(targetDirectory, "test script directory", { allowDot: true });
+    const targetRoot = path.resolve(project.rootPath, configuredTargetDirectory, GENERATED_TEST_ARTIFACT_DIR, proposalId);
     if (!isPathInside(project.rootPath, artifactDirectory) || !isPathInside(project.rootPath, targetRoot)) {
       throw validationError("Code proposal artifact paths must stay inside the workspace.");
     }
+    assertExistingPathInside(project.rootPath, artifactDirectory, "Code proposal artifact directory must stay inside the workspace.");
+    const plannedTargets = new Set<string>();
     for (const script of manifest.scripts) {
-      const safeRelativePath = sanitizeArtifactPath(script.relativePath);
-      const sourcePath = path.join(artifactDirectory, safeRelativePath);
-      const targetPath = path.join(targetRoot, safeRelativePath);
+      const safeRelativePath = assertSafeRelativePath(script.relativePath, "artifact script path");
+      const sourcePath = path.resolve(artifactDirectory, safeRelativePath);
+      const targetPath = path.resolve(targetRoot, safeRelativePath);
+      if (!isPathInside(artifactDirectory, sourcePath) || !isPathInside(targetRoot, targetPath)) {
+        throw validationError("Code proposal artifact paths must stay inside their generated directories.");
+      }
+      assertNearestExistingParentInside(project.rootPath, targetPath, "Generated test artifact path must stay inside the workspace.");
+      if (plannedTargets.has(targetPath) || fs.existsSync(targetPath)) {
+        throw validationError(`Refusing to overwrite generated test artifact: ${safeRelativePath}`);
+      }
+      plannedTargets.add(targetPath);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      assertExistingPathInside(project.rootPath, path.dirname(targetPath), "Generated test artifact directory must stay inside the workspace.");
       if (fs.existsSync(sourcePath)) {
         fs.copyFileSync(sourcePath, targetPath);
       } else {
@@ -1820,15 +1922,31 @@ export class GraphRepository {
     }
     const artifactRelativeDir = path.join(".graphcode", "artifacts", "code-proposals", proposalId);
     const artifactDir = path.join(project.rootPath, artifactRelativeDir);
+    assertNearestExistingParentInside(project.rootPath, artifactDir, "Code proposal artifact directory must stay inside the workspace.");
     fs.mkdirSync(artifactDir, { recursive: true });
-    for (const script of parsed.scripts) {
-      const safeRelativePath = sanitizeArtifactPath(script.relativePath);
-      const targetPath = path.join(artifactDir, safeRelativePath);
+    assertExistingPathInside(project.rootPath, artifactDir, "Code proposal artifact directory must stay inside the workspace.");
+    const scripts = parsed.scripts.map((script) => ({
+      ...script,
+      relativePath: assertSafeRelativePath(script.relativePath, "artifact script path")
+    }));
+    const plannedTargets = new Set<string>();
+    for (const script of scripts) {
+      const targetPath = path.resolve(artifactDir, script.relativePath);
+      if (!isPathInside(artifactDir, targetPath)) {
+        throw validationError("Code proposal artifact paths must stay inside the proposal artifact directory.");
+      }
+      assertNearestExistingParentInside(artifactDir, targetPath, "Code proposal artifact path must stay inside the proposal artifact directory.");
+      if (plannedTargets.has(targetPath)) {
+        throw validationError(`Duplicate code proposal artifact path: ${script.relativePath}`);
+      }
+      plannedTargets.add(targetPath);
       fs.mkdirSync(path.dirname(targetPath), { recursive: true });
+      assertExistingPathInside(artifactDir, path.dirname(targetPath), "Code proposal artifact path must stay inside the proposal artifact directory.");
       fs.writeFileSync(targetPath, script.content, "utf8");
     }
     return {
       ...parsed,
+      scripts,
       testScriptDirectory: artifactRelativeDir
     };
   }
@@ -6921,15 +7039,48 @@ function resolveConflictOwner(node: GraphNode, nodeById: Map<string, GraphNode>)
   return null;
 }
 
-function sanitizeArtifactPath(value: string): string {
-  const normalized = value.replace(/\\/g, "/").replace(/^\/+/, "");
-  const parts = normalized.split("/").filter((part) => part && part !== "." && part !== "..");
-  return parts.join("/") || "test-script.txt";
+function assertSafeRelativePath(value: string, label: string, options: { allowDot?: boolean } = {}): string {
+  const trimmed = value.trim();
+  if (!trimmed || path.isAbsolute(trimmed) || path.win32.isAbsolute(trimmed)) {
+    throw validationError(`Code proposal ${label} must be a relative path.`);
+  }
+  const normalized = trimmed.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (normalized.split("/").some((part) => part === "..")) {
+    throw validationError(`Code proposal ${label} cannot contain parent directory traversal.`);
+  }
+  const parts = normalized.split("/").filter((part) => part && part !== ".");
+  if (parts.length === 0) {
+    if (options.allowDot) {
+      return ".";
+    }
+    throw validationError(`Code proposal ${label} must name a file or directory.`);
+  }
+  return parts.join("/");
 }
 
 function isPathInside(rootPath: string, candidatePath: string): boolean {
   const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function assertExistingPathInside(rootPath: string, candidatePath: string, message: string): void {
+  const realRoot = fs.realpathSync.native(rootPath);
+  const realCandidate = fs.realpathSync.native(candidatePath);
+  if (!isPathInside(realRoot, realCandidate)) {
+    throw validationError(message);
+  }
+}
+
+function assertNearestExistingParentInside(rootPath: string, candidatePath: string, message: string): void {
+  let currentPath = path.resolve(candidatePath);
+  while (!fs.existsSync(currentPath)) {
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) {
+      break;
+    }
+    currentPath = parentPath;
+  }
+  assertExistingPathInside(rootPath, currentPath, message);
 }
 
 const EDGE_COLORS: Record<GraphEdgeKind, string> = {

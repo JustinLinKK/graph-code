@@ -1,5 +1,6 @@
 import type { CanvasGraph, GraphEdge, GraphNode, GraphNodeReuse, Project } from "@graphcode/graph-model";
 import { describe, expect, it } from "vitest";
+import { moduleAgentBoundaryClass } from "./GraphNodeCard";
 import { buildEdgeRenderSummaries, chooseEdgeLabelAnchor, measureEdgeLabelSize, measureNodeCardSize } from "./WorkspaceCanvas";
 
 describe("WorkspaceCanvas node card sizing", () => {
@@ -86,6 +87,20 @@ describe("WorkspaceCanvas node card sizing", () => {
     });
 
     expect(measured.height).toBeGreaterThanOrEqual(180);
+  });
+});
+
+describe("GraphNodeCard agent module boundaries", () => {
+  it("maps active module agent statuses to visible boundary classes", () => {
+    expect(moduleAgentBoundaryClass(node({ id: "module-plan", kind: "module", name: "Plan", agentStatus: "planning" }))).toBe("agent-boundary-planning");
+    expect(moduleAgentBoundaryClass(node({ id: "module-coded", kind: "module", name: "Code", agentStatus: "coded" }))).toBe("agent-boundary-coded");
+    expect(moduleAgentBoundaryClass(node({ id: "module-reviewed", kind: "module", name: "Review", agentStatus: "reviewed" }))).toBe("agent-boundary-review");
+    expect(moduleAgentBoundaryClass(node({ id: "module-bugged", kind: "module", name: "Bug", agentStatus: "bugged" }))).toBe("agent-boundary-review");
+  });
+
+  it("hides the status boundary for implemented modules and non-module nodes", () => {
+    expect(moduleAgentBoundaryClass(node({ id: "module-implemented", kind: "module", name: "Done", agentStatus: "implemented" }))).toBe("");
+    expect(moduleAgentBoundaryClass(node({ id: "function-plan", kind: "function", name: "Plan", agentStatus: "planning" }))).toBe("");
   });
 });
 

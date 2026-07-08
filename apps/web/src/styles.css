@@ -626,6 +626,26 @@ select {
   outline-offset: 3px;
 }
 
+.graph-node-card.agent-boundary-planning,
+.graph-node-card.agent-boundary-coded,
+.graph-node-card.agent-boundary-review {
+  box-shadow:
+    0 0 0 2px var(--agent-boundary-color),
+    0 10px 24px rgba(17, 24, 39, 0.08);
+}
+
+.graph-node-card.agent-boundary-planning {
+  --agent-boundary-color: #2563eb;
+}
+
+.graph-node-card.agent-boundary-coded {
+  --agent-boundary-color: #059669;
+}
+
+.graph-node-card.agent-boundary-review {
+  --agent-boundary-color: #ca8a04;
+}
+
 .node-card-topline {
   gap: 7px;
   min-width: 0;

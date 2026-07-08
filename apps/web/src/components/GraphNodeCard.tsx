@@ -1,4 +1,4 @@
-import type { CustomBlockType, GraphNode, GraphNodeReuse } from "@graphcode/graph-model";
+import type { AgentStatus, CustomBlockType, GraphNode, GraphNodeReuse } from "@graphcode/graph-model";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
 import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { iconForCustomBlockType } from "../customBlockIcons";
@@ -24,8 +24,11 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
   const typeLabel = node.kind === "custom" ? cardData.customType?.name ?? palette.label : palette.label;
   const tags = node.tags ?? [];
 
+  const statusBoundaryClass = moduleAgentBoundaryClass(node);
+  const className = ["graph-node-card", palette.className, statusBoundaryClass, isSelected ? "selected" : ""].filter(Boolean).join(" ");
+
   return (
-    <div className={`graph-node-card ${palette.className} ${isSelected ? "selected" : ""}`} style={{ borderLeftColor: accentColor }}>
+    <div className={className} style={{ borderLeftColor: accentColor }}>
       <NodeResizer
         isVisible={isSelected}
         minWidth={node.kind === "format" ? 96 : 150}
@@ -63,4 +66,25 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
       <Handle type="source" position={Position.Right} />
     </div>
   );
+}
+
+export function moduleAgentBoundaryClass(node: Pick<GraphNode, "kind" | "agentStatus">): string {
+  if (node.kind !== "module") {
+    return "";
+  }
+  return agentBoundaryClassForStatus(node.agentStatus);
+}
+
+function agentBoundaryClassForStatus(status: AgentStatus): string {
+  switch (status) {
+    case "planning":
+      return "agent-boundary-planning";
+    case "coded":
+      return "agent-boundary-coded";
+    case "reviewed":
+    case "bugged":
+      return "agent-boundary-review";
+    default:
+      return "";
+  }
 }

@@ -360,7 +360,7 @@ export async function runReviewAgent(
         },
         { role: "user", content: context }
       ]);
-      const forcedBug = hasFailureMarker(diff) || diffEscapesScope(diff, allowedPath);
+      const forcedBug = diffEscapesScope(diff, allowedPath);
       const parsedVerdict = parseReviewVerdict(response);
       const status: AgentStatus = forcedBug || parsedVerdict !== "reviewed" ? "bugged" : "reviewed";
       const touched = input.targetNodeId
@@ -953,7 +953,7 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
           invoke: async (messages) => {
             const content = messages.at(-1)?.content.slice(0, 4000) ?? "";
             if (config.agentKind === "review") {
-              const verdict = hasFailureMarker(content) || diffEscapesScope(content, extractAllowedPath(content)) ? "bugged" : "reviewed";
+              const verdict = diffEscapesScope(content, extractAllowedPath(content)) ? "bugged" : "reviewed";
               return `Fake review response: ${content}\nGRAPHCODE_REVIEW_VERDICT: ${verdict}`;
             }
             return `Fake ${config.agentKind ?? config.mode ?? "agent"} response: ${content}`;
@@ -1213,10 +1213,6 @@ function diffEscapesScope(diff: string, allowedPath: string | null | undefined):
   const normalized = allowedPath.replace(/^\/+/, "");
   const touched = [...diff.matchAll(/^(?:\+\+\+|---) [ab]\/(.+)$/gm)].map((match) => match[1]);
   return touched.some((path) => path !== normalized && !path.startsWith(`${normalized}/`));
-}
-
-function hasFailureMarker(value: string): boolean {
-  return /\b(?:BUG|FAIL|FAILED|ERROR)\b/i.test(value);
 }
 
 function parseReviewVerdict(response: string): "reviewed" | "bugged" | null {

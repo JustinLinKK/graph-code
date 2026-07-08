@@ -10,4 +10,6 @@ Current responsibilities:
 - Persist graph node layouts and block metadata in SQLite.
 - Keep generated workspace state local and ignored by git.
 
-Run `pnpm seed` from the repo root to rebuild the self workspace, then `pnpm dev` to start the server and web app together.
+Run `pnpm seed` from the repo root only for first-time fixture creation or an intentional destructive reset; it rebuilds the self workspace and erases local graph edits, saved placements, agent runs, and settings in `.graphcode/graphcode.sqlite`.
+
+For normal development after the database exists, run `pnpm dev` from the repo root. Normal server startup opens and migrates the existing database without reseeding it.

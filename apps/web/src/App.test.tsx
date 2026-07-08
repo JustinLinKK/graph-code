@@ -1249,7 +1249,19 @@ describe("GraphCode app shell", () => {
     });
   });
 
-  it("resets the self workspace from the toolbar", async () => {
+  it("requires confirmation before resetting the self workspace from the toolbar", async () => {
+    vi.spyOn(window, "confirm").mockReturnValueOnce(false);
+    render(<App />);
+
+    await screen.findByTestId("react-flow");
+    fireEvent.click(screen.getByLabelText("Reset self workspace"));
+
+    expect(window.confirm).toHaveBeenCalledWith(expect.stringContaining("erases local graph edits"));
+    expect(fetch).not.toHaveBeenCalledWith("/api/dev/seed-self", expect.anything());
+  });
+
+  it("resets the self workspace from the toolbar after confirmation", async () => {
+    vi.spyOn(window, "confirm").mockReturnValueOnce(true);
     render(<App />);
 
     await screen.findByTestId("react-flow");

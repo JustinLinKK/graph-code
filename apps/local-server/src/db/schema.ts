@@ -162,6 +162,7 @@ const GRAPH_ENTITY_VERSIONS_SQL = `
     entity_id TEXT NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0,
     deleted INTEGER NOT NULL DEFAULT 0,
+    agent_run_id TEXT,
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (project_id, entity_type, entity_id)
   );
@@ -730,6 +731,9 @@ function ensureCodingWorkflowTables(db: GraphDatabase): void {
 function ensureGraphEntityVersionsTable(db: GraphDatabase): void {
   if (!getTableSql(db, "graph_entity_versions")) {
     db.exec(GRAPH_ENTITY_VERSIONS_SQL);
+  }
+  if (!tableHasColumn(db, "graph_entity_versions", "agent_run_id")) {
+    db.exec("ALTER TABLE graph_entity_versions ADD COLUMN agent_run_id TEXT;");
   }
   db.exec(`
     INSERT OR IGNORE INTO graph_entity_versions (project_id, entity_type, entity_id, revision, deleted)

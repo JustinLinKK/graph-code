@@ -349,7 +349,7 @@ export function AppShell({
               <Undo2 size={16} />
             </Button>
           </span>
-          <span title="Rebuild the self-repo workspace database">
+          <span title="Destructive reset: rebuilds the self-repo workspace database and erases graph edits and saved placements">
             <Button isIconOnly size="sm" variant="primary" aria-label="Reset self workspace" onPress={onResetSelfWorkspace}>
               <RotateCcw size={16} />
             </Button>

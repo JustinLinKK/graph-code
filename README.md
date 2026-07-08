@@ -39,13 +39,13 @@ GraphCode is a local pnpm workspace. The root `package.json` pins `pnpm@10.33.0`
    pnpm install
    ```
 
-6. Build the local self-repo workspace fixture:
+6. Create the local self-repo workspace fixture the first time, or when you intentionally want to reset it:
 
    ```bash
    pnpm seed
    ```
 
-   This creates `.graphcode/graphcode.sqlite`, which is intentionally ignored by git.
+   This creates `.graphcode/graphcode.sqlite`, which is intentionally ignored by git. Running this command again rebuilds the fixture and erases local graph edits, saved placements, agent runs, and settings in that database.
 
 7. Start the local server and web app:
 
@@ -61,6 +61,8 @@ GraphCode is a local pnpm workspace. The root `package.json` pins `pnpm@10.33.0`
 
 The web app runs through Vite on port `5173`. The local Fastify API runs on `127.0.0.1:3010`, and the Vite dev server proxies `/api` requests to it.
 
+For daily development after the fixture exists, run `pnpm dev` directly. Do not rerun `pnpm seed` unless you want a destructive reset back to the curated self-repo graph.
+
 Optional verification commands:
 
 ```bash
@@ -73,7 +75,7 @@ pnpm build
 
 This repository now contains a narrow local prototype: a Fastify local server, a React/React Flow web workspace, shared graph-model DTOs, and a deterministic self-repo seed. The generated workspace lives in `.graphcode/graphcode.sqlite` and is intentionally ignored by git.
 
-The current development fixture is this repository itself. Follow the [installation steps](#installation) to install dependencies, rebuild the curated self-repo graph, and run the local workspace. Normal server startup preserves existing graph data. Use the toolbar reset action or `pnpm seed` when you want to rebuild the fixture from source.
+The current development fixture is this repository itself. Follow the [installation steps](#installation) to install dependencies, create the curated self-repo graph once, and run the local workspace. Normal server startup, browser refresh, and reopening an existing `.graphcode` workspace preserve existing graph data and saved placements. Use the confirmed toolbar reset action or `pnpm seed` only when you want to destructively rebuild the fixture from source.
 
 The first development milestone is a narrow prototype that can:
 

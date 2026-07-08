@@ -288,6 +288,9 @@ export class WorkspaceRuntime {
 
     async runReview(input: ReviewAgentRequest): Promise<AgentRun> {
       const targetRun = this.repository.getAgentRun(input.runId);
+      if (targetRun.projectId !== input.projectId) {
+        throw validationError("Review target run does not belong to this project.");
+      }
       const mode: ReviewAgentMode = input.mode ?? targetRun.codingMode ?? "medium";
       const run = this.repository.createAgentRun({
         projectId: input.projectId,
@@ -582,11 +585,7 @@ export class WorkspaceRuntime {
 
   private async readSourceFile(projectId: string, relativePath: string): Promise<string> {
     const project = this.repository.getProject(projectId);
-    const absolutePath = path.resolve(project.rootPath, relativePath);
-    const rootPath = path.resolve(project.rootPath);
-    if (!absolutePath.startsWith(rootPath)) {
-      throw validationError(`Refusing to read outside workspace: ${relativePath}`);
-    }
+    const absolutePath = resolveWorkspaceRelativePath(project.rootPath, relativePath, "source file");
     const stat = await fsp.stat(absolutePath).catch(() => null);
     if (!stat) {
       return "";
@@ -594,6 +593,7 @@ export class WorkspaceRuntime {
     if (!stat.isFile()) {
       return "";
     }
+    await assertRealPathInside(project.rootPath, absolutePath, `Refusing to read outside workspace: ${relativePath}`);
     const text = await fsp.readFile(absolutePath, "utf8");
     return text.slice(0, 200000);
   }
@@ -623,15 +623,17 @@ export class WorkspaceRuntime {
   }
 
   private async scannableFile(rootPath: string, relativePath: string): Promise<ScannableFile | null> {
-    const absolutePath = path.resolve(rootPath, relativePath);
-    const root = path.resolve(rootPath);
-    if (!absolutePath.startsWith(root)) {
+    let absolutePath: string;
+    try {
+      absolutePath = resolveWorkspaceRelativePath(rootPath, relativePath, "scannable file");
+    } catch {
       return null;
     }
     const stat = await fsp.stat(absolutePath).catch(() => null);
     if (!stat?.isFile()) {
       return null;
     }
+    await assertRealPathInside(rootPath, absolutePath, `Refusing to scan outside workspace: ${relativePath}`);
     const buffer = await fsp.readFile(absolutePath);
     return {
       path: normalizeGitPath(relativePath),
@@ -943,11 +945,8 @@ export class WorkspaceRuntime {
       }
       let lineCount = lineCountByPath.get(range.path);
       if (lineCount === undefined) {
-        const absolutePath = path.resolve(project.rootPath, range.path);
-        const rootPath = path.resolve(project.rootPath);
-        if (!absolutePath.startsWith(rootPath)) {
-          throw validationError(`Scanner source range escaped workspace: ${range.path}`);
-        }
+        const absolutePath = resolveWorkspaceRelativePath(project.rootPath, range.path, "scan source range");
+        await assertRealPathInside(project.rootPath, absolutePath, `Scanner source range escaped workspace: ${range.path}`);
         const text = await fsp.readFile(absolutePath, "utf8").catch(() => "");
         lineCount = Math.max(1, text.split(/\r?\n/).length);
         lineCountByPath.set(range.path, lineCount);
@@ -1068,6 +1067,33 @@ function hashPath(value: string): string {
 
 function samePath(first: string, second: string): boolean {
   return realPathOrResolve(first) === realPathOrResolve(second);
+}
+
+function resolveWorkspaceRelativePath(rootPath: string, relativePath: string, label: string): string {
+  const normalizedPath = normalizeGitPath(relativePath);
+  if (!normalizedPath || path.isAbsolute(relativePath) || path.win32.isAbsolute(relativePath)) {
+    throw validationError(`Workspace ${label} must be a relative path.`);
+  }
+  if (normalizedPath.split("/").some((part) => part === "..")) {
+    throw validationError(`Workspace ${label} cannot contain parent directory traversal.`);
+  }
+  const absolutePath = path.resolve(rootPath, normalizedPath);
+  if (!isPathInside(rootPath, absolutePath)) {
+    throw validationError(`Workspace ${label} escaped the workspace.`);
+  }
+  return absolutePath;
+}
+
+async function assertRealPathInside(rootPath: string, absolutePath: string, message: string): Promise<void> {
+  const [realRoot, realCandidate] = await Promise.all([fsp.realpath(rootPath), fsp.realpath(absolutePath)]);
+  if (!isPathInside(realRoot, realCandidate)) {
+    throw validationError(message);
+  }
+}
+
+function isPathInside(rootPath: string, candidatePath: string): boolean {
+  const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 function realPathOrResolve(value: string): string {

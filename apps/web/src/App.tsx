@@ -1132,6 +1132,12 @@ export default function App() {
   }, [handleUndo]);
 
   const handleResetSelfWorkspace = useCallback(async () => {
+    const confirmed = window.confirm(
+      "Reset the self workspace? This rebuilds .graphcode/graphcode.sqlite and erases local graph edits, saved placements, agent runs, and settings."
+    );
+    if (!confirmed) {
+      return;
+    }
     setLoading(true);
     setError(null);
     try {

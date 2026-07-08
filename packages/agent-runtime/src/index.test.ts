@@ -557,12 +557,17 @@ describe("GraphCode agent runtime", () => {
       expect(passTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "reviewed" })]);
       expect(passTools.getCanvasGraph).toHaveBeenCalledWith("project", "node-1", true);
 
-      const failTools = toolbox();
+      const errorDiffTools = toolbox();
       await runReviewAgent(
-        { projectId: "project", runId: "run-coded", targetNodeId: "node-1", diff: "diff --git a/src/module.ts b/src/module.ts\n+BUG" },
-        { config: { ...baseConfig, agentKind: "review" }, runId: "run-review-fail", toolbox: failTools }
+        {
+          projectId: "project",
+          runId: "run-coded",
+          targetNodeId: "node-1",
+          diff: "diff --git a/src/module.ts b/src/module.ts\n--- a/src/module.ts\n+++ b/src/module.ts\n+throw new Error('invalid state');"
+        },
+        { config: { ...baseConfig, agentKind: "review" }, runId: "run-review-error", toolbox: errorDiffTools }
       );
-      expect(failTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "bugged" })]);
+      expect(errorDiffTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "reviewed" })]);
 
       const scopeLeakTools = toolbox();
       const scopeLeakResult = await runReviewAgent(
