@@ -71,6 +71,15 @@ pnpm test
 pnpm build
 ```
 
+Optional Docker smoke path:
+
+```bash
+docker build -t graphcode .
+docker run --rm -p 3010:3010 -p 5173:5173 graphcode
+```
+
+The repository also includes a GitHub Actions workflow at `.github/workflows/ci.yml` that installs with the pinned pnpm version, runs typecheck, tests, build, and verifies the Docker image builds.
+
 ## Status
 
 This repository now contains a narrow local prototype: a Fastify local server, a React/React Flow web workspace, shared graph-model DTOs, and a deterministic self-repo seed. The generated workspace lives in `.graphcode/graphcode.sqlite` and is intentionally ignored by git.
@@ -100,7 +109,7 @@ The core design principles are:
 
 ## Core Workflow
 
-1. **Index the repository:** a local server scans a target repo and extracts code entities with Tree-sitter.
+1. **Index the repository:** a local server scans a target repo and extracts code entities with the deterministic parser and scanner pipeline.
 2. **Build the graph:** extracted entities become graph nodes and relationships become graph edges.
 3. **Explore the architecture:** the web app renders architecture and symbol views with search, filters, expansion, and collapse.
 4. **Inspect a node:** selecting a node opens its summary, exact source range, dependencies, tests, prompts, and review state.
@@ -110,7 +119,7 @@ The core design principles are:
 
 ## Initial MVP Scope
 
-The first prototype should target a TypeScript or Python repository shape before expanding to broader language coverage. The MVP is expected to prove the main interaction loop, not to support every parser, framework, or repository style.
+The first prototype keeps TypeScript and JavaScript as the deepest parser path, including call and control-flow extraction through the TypeScript compiler API. It also includes structural extraction for common repository languages such as Python, Java, Go, Rust, C, C++, C#, Kotlin, Swift, Ruby, PHP, SQL, and shell scripts so mixed-language repositories can still produce file, import, class/object, function/method, and call graph nodes.
 
 The initial graph model should include:
 
@@ -130,7 +139,7 @@ apps/
 
 packages/
   graph-model/      Shared graph concepts, snapshots, schemas, and validation.
-  parser/           Tree-sitter based extraction and incremental refresh.
+  parser/           Deterministic TS/JS extraction plus common-language structural parsing.
   agent-runtime/    Local and global agent orchestration.
 
 docs/
@@ -147,7 +156,7 @@ tests/fixtures/     Tiny repositories for parser and indexer tests.
 - [apps/web](apps/web/README.md): React Flow graph workspace with ELK-based layout, search, filtering, node inspectors, and review controls.
 - [apps/local-server](apps/local-server/README.md): local service boundary for repository indexing, graph snapshots, source access, test execution, and diff proposal APIs.
 - [packages/graph-model](packages/graph-model/README.md): stable node and edge concepts shared by the parser, server, UI, and agent runtime.
-- [packages/parser](packages/parser/README.md): Tree-sitter extraction, entity identity, and incremental graph refresh.
+- [packages/parser](packages/parser/README.md): deterministic code extraction, entity identity, and common-language structural graph coverage.
 - [packages/agent-runtime](packages/agent-runtime/README.md): local and global agent workflows that produce transparent proposals instead of silent edits.
 - [docs/architecture](docs/architecture/README.md): system design notes and interface decisions.
 - [docs/research](docs/research/README.md): research assessment, prior art, and prototype rationale.
@@ -160,7 +169,7 @@ tests/fixtures/     Tiny repositories for parser and indexer tests.
 ### Milestone 1: Repository Graph Foundation
 
 - Define the internal graph snapshot format.
-- Implement parser extraction for one language family.
+- Implement deep parser extraction for TS/JS plus structural extraction for common repository languages.
 - Preserve stable entity identity across edits.
 - Add tiny fixture repositories and parser/indexer tests.
 

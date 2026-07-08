@@ -188,6 +188,11 @@ export type ScanMediumOutput = z.infer<typeof scanMediumOutputSchema>;
 export type ScanGlobalOutput = z.infer<typeof scanGlobalOutputSchema>;
 export type ScanPipelineResult = z.infer<typeof scanPipelineResultSchema>;
 
+const planningAgentOutputSchema = z.object({
+  response: z.string().default(""),
+  graphPatch: graphPatchSchema
+});
+
 const AgentState = Annotation.Root({
   task: Annotation<AgentTask>(),
   result: Annotation<AgentResult | null>({
@@ -203,7 +208,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
     execute: async () => {
       const provider = createProvider(options.config, options.workspaceRoot);
       const graph = await options.toolbox.readGraph(input.projectId);
-      const scope = input.scopeNodeId ? graph.nodes.find((node) => node.id === input.scopeNodeId) : null;
+      const scope = input.scopeNodeId ? graph.nodes.find((node) => node.id === input.scopeNodeId) ?? null : null;
       const planningChunks = buildPlanningContextChunks(graph, options.config.parallelLimit);
       const chunkNotes = await boundedMap(planningChunks, options.config.parallelLimit, async (chunk, index) =>
         provider.invoke([
@@ -221,33 +226,50 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
         ])
       );
       const response = await provider.invoke([
-        { role: "system", content: resolveSystemPrompt(options.config, "Plan safe GraphCode graph patches from user intent.") },
+        {
+          role: "system",
+          content: resolveSystemPrompt(
+            options.config,
+            "Plan safe GraphCode graph patches from user intent. Return only strict JSON with {response, graphPatch:{summary, operations}}."
+          )
+        },
         {
           role: "user",
           content: [
             `Prompt: ${input.prompt}`,
             scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
+            `Writable node ids:\n${graph.nodes.slice(0, 120).map((node) => `${node.id}: ${node.name} (${node.kind})`).join("\n")}`,
+            `Writable edge ids:\n${graph.edges.slice(0, 160).map((edge) => `${edge.id}: ${edge.sourceNodeId}->${edge.targetNodeId} (${edge.kind})`).join("\n")}`,
+            `Return shape:
+{
+  "response": "human-readable plan summary",
+  "graphPatch": {
+    "summary": "short patch summary",
+    "operations": [
+      { "entityType": "node", "entityId": "existing-node-id", "action": "update", "fields": { "summary": "planned summary" } }
+    ]
+  }
+}`,
+            "Emit at least one graphPatch operation when a scoped or root node can represent the plan. Prefer updating existing node summaries or codeContext over creating speculative new nodes.",
             `Parallel graph slice notes:\n${chunkNotes.map((note, index) => `Slice ${index + 1}: ${note}`).join("\n\n")}`
           ].join("\n")
         }
       ]);
-      const patch = graphPatchSchema.parse({
-        summary: response.trim() || `Planned graph changes for: ${input.prompt}`,
-        operations: []
-      });
+      const output = parsePlanningAgentOutput(response, input.prompt, graph, scope);
+      const patch = output.graphPatch;
       if (input.scopeNodeId) {
         await options.toolbox.setStatuses(input.projectId, [
           {
             entityType: "node",
             entityId: input.scopeNodeId,
             status: "planning",
-            note: "Planning agent scoped this graph block.",
+            note: patch.summary,
             agentRunId: options.runId ?? null
           }
         ]);
       }
       return {
-        response,
+        response: output.response,
         graphPatch: patch,
         touched: input.scopeNodeId
           ? [
@@ -255,7 +277,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
                 entityType: "node",
                 entityId: input.scopeNodeId,
                 status: "planning",
-                note: "Planning agent scoped this graph block.",
+                note: patch.summary,
                 agentRunId: options.runId ?? null
               }
             ]
@@ -690,6 +712,59 @@ function parseJsonResponse(response: string): unknown {
     return JSON.parse(trimmed.slice(start, end + 1));
   }
   throw new Error("Scanning agent did not return JSON.");
+}
+
+function parsePlanningAgentOutput(response: string, prompt: string, graph: PlanningGraph, scope: GraphNode | null): z.infer<typeof planningAgentOutputSchema> {
+  try {
+    const parsed = planningAgentOutputSchema.parse(parseJsonResponse(response));
+    if (parsed.graphPatch.operations.length > 0 && graphPatchOperationsReferenceKnownEntities(parsed.graphPatch, graph)) {
+      return parsed;
+    }
+    return fallbackPlanningOutput(response, prompt, graph, scope);
+  } catch {
+    return fallbackPlanningOutput(response, prompt, graph, scope);
+  }
+}
+
+function graphPatchOperationsReferenceKnownEntities(patch: GraphPatch, graph: PlanningGraph): boolean {
+  const nodeIds = new Set(graph.nodes.map((node) => node.id));
+  const edgeIds = new Set(graph.edges.map((edge) => edge.id));
+  return patch.operations.every((operation) => {
+    if (operation.action === "create" || operation.entityType === "boundary") {
+      return true;
+    }
+    if (operation.entityType === "node") {
+      return nodeIds.has(operation.entityId);
+    }
+    return edgeIds.has(operation.entityId);
+  });
+}
+
+function fallbackPlanningOutput(response: string, prompt: string, graph: PlanningGraph, scope: GraphNode | null): z.infer<typeof planningAgentOutputSchema> {
+  const target = scope ?? graph.nodes.find((node) => node.parentId === null) ?? graph.nodes[0] ?? null;
+  const summary = compactPlanningSummary(response.trim() || `Planned graph changes for: ${prompt}`);
+  return planningAgentOutputSchema.parse({
+    response: response.trim() || summary,
+    graphPatch: {
+      summary,
+      operations: target
+        ? [
+            {
+              entityType: "node",
+              entityId: target.id,
+              action: "update",
+              fields: {
+                summary
+              }
+            }
+          ]
+        : []
+    }
+  });
+}
+
+function compactPlanningSummary(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 1000) || "Planning agent proposed graph updates.";
 }
 
 type CodingContextInput = {

@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
-import { resolveDbPath, resolveRepoRoot, resolveServerPort } from "./config";
+import { resolveDbPath, resolveRepoRoot, resolveServerHost, resolveServerPort } from "./config";
 import { registerApiRoutes } from "./routes";
 import { WorkspaceRuntime } from "./workspace";
 
@@ -39,8 +39,9 @@ export async function buildServer(options: { dbPath?: string; seedSelf?: boolean
 
 async function main(): Promise<void> {
   const port = resolveServerPort();
+  const host = resolveServerHost();
   const app = await buildServer();
-  await app.listen({ port, host: "127.0.0.1" });
+  await app.listen({ port, host });
 
   const close = async () => {
     await app.close();

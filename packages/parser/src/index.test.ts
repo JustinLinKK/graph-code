@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { codeGraphId, scanRepositoryCodeGraph } from "./index";
 
@@ -110,5 +111,26 @@ describe("TypeScript code graph scanner", () => {
         expect.objectContaining({ kind: "calls", sourceId: widget?.id, targetId: add?.id })
       ])
     );
+  });
+
+  it("extracts structural symbols from common non-TypeScript languages", () => {
+    const fixtureRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../tests/fixtures/common-languages");
+    const snapshot = scanRepositoryCodeGraph(fixtureRoot);
+    const fileByPath = new Map(snapshot.files.map((file) => [file.path, file]));
+    const symbolNames = snapshot.symbols.map((symbol) => symbol.name);
+
+    expect(fileByPath.get("python/app.py")?.language).toBe("python");
+    expect(fileByPath.get("cpp/math.cpp")?.language).toBe("cpp");
+    expect(fileByPath.get("go/main.go")?.language).toBe("go");
+    expect(fileByPath.get("rust/lib.rs")?.language).toBe("rust");
+    expect(fileByPath.get("java/App.java")?.language).toBe("java");
+    expect(fileByPath.get("python/app.py")?.imports[0]).toEqual({ moduleSpecifier: "helpers", resolvedPath: "python/helpers.py" });
+    expect(fileByPath.get("cpp/math.cpp")?.imports[0]).toEqual({ moduleSpecifier: "math.hpp", resolvedPath: "cpp/math.hpp" });
+    expect(symbolNames).toEqual(
+      expect.arrayContaining(["Greeter", "Greeter.greet", "run", "Calculator", "Calculator.add", "total", "greet", "Counter", "make_counter", "App", "App.title"])
+    );
+    expect(snapshot.symbols.find((symbol) => symbol.name === "Greeter.greet")?.calls).toContain("normalize");
+    expect(snapshot.symbols.find((symbol) => symbol.name === "total")?.calls).toContain("add");
+    expect(snapshot.symbols.find((symbol) => symbol.name === "Greeter.greet")?.workflow?.nodes[0].kind).toBe("entry");
   });
 });

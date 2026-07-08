@@ -3034,7 +3034,7 @@ export class GraphRepository {
             : `Generated directory module for ${directory.path}.`,
           codeDirectory: directory.path,
           sourcePath: directory.path,
-          language: "typescript",
+          language: "unknown",
           parentId,
           position: { x: 80 + pathDepth(directory.path) * 260, y: 100 },
           agentStatus: "implemented"
@@ -3089,7 +3089,7 @@ export class GraphRepository {
           sourcePath: symbol.filePath,
           sourceStartLine: symbol.startLine,
           sourceEndLine: symbol.endLine,
-          language: symbol.filePath.endsWith(".js") || symbol.filePath.endsWith(".jsx") ? "javascript" : "typescript",
+          language: sourceLanguage(symbol.filePath),
           parentId,
           agentStatus: "implemented"
         });
@@ -7189,9 +7189,67 @@ function symbolHierarchyDepth(symbol: CodeGraphSymbol, symbolById: Map<string, C
 }
 
 function sourceLanguage(sourcePath: string): LanguageType {
-  return sourcePath.endsWith(".js") || sourcePath.endsWith(".jsx") || sourcePath.endsWith(".mjs") || sourcePath.endsWith(".cjs")
-    ? "javascript"
-    : "typescript";
+  if (/\.(ts|tsx)$/.test(sourcePath)) {
+    return "typescript";
+  }
+  if (/\.(js|jsx|mjs|cjs)$/.test(sourcePath)) {
+    return "javascript";
+  }
+  if (sourcePath.endsWith(".py")) {
+    return "python";
+  }
+  if (sourcePath.endsWith(".java")) {
+    return "java";
+  }
+  if (sourcePath.endsWith(".go")) {
+    return "go";
+  }
+  if (sourcePath.endsWith(".rs")) {
+    return "rust";
+  }
+  if (/\.(c|h)$/.test(sourcePath)) {
+    return "c";
+  }
+  if (/\.(cpp|cc|cxx|hpp|hh|hxx)$/.test(sourcePath)) {
+    return "cpp";
+  }
+  if (sourcePath.endsWith(".cs")) {
+    return "csharp";
+  }
+  if (/\.(kt|kts)$/.test(sourcePath)) {
+    return "kotlin";
+  }
+  if (sourcePath.endsWith(".swift")) {
+    return "swift";
+  }
+  if (sourcePath.endsWith(".rb")) {
+    return "ruby";
+  }
+  if (sourcePath.endsWith(".php")) {
+    return "php";
+  }
+  if (sourcePath.endsWith(".sql")) {
+    return "sql";
+  }
+  if (/\.(sh|bash|zsh|fish)$/.test(sourcePath)) {
+    return "shell";
+  }
+  if (sourcePath.endsWith(".json")) {
+    return "json";
+  }
+  if (/\.(yaml|yml)$/.test(sourcePath)) {
+    return "yaml";
+  }
+  if (sourcePath.endsWith(".md")) {
+    return "markdown";
+  }
+  if (sourcePath.endsWith(".html")) {
+    return "html";
+  }
+  if (sourcePath.endsWith(".css")) {
+    return "css";
+  }
+  return "other";
 }
 
 function pathDepth(value: string): number {

@@ -158,6 +158,9 @@ describe("GraphCode agent runtime", () => {
 
     expect(result.response).toContain("Fake planning response");
     expect(result.response).toContain("Parallel graph slice notes");
+    expect(result.graphPatch?.operations).toEqual([
+      expect.objectContaining({ entityType: "node", entityId: "node-1", action: "update" })
+    ]);
     expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ entityId: "node-1", status: "planning" })]);
   });
 

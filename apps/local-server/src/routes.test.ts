@@ -341,6 +341,7 @@ describe("graph API routes", () => {
     expect(typeof backgroundPlanningResponse.json().baseGraphRevision).toBe("number");
 
     const completedPlanningTicket = await waitForAgentRun(backgroundPlanningResponse.json().id, "succeeded");
+    expect(completedPlanningTicket.graphPatch.operations.length).toBeGreaterThan(0);
     const applyPlanningResponse = await app.inject({
       method: "POST",
       url: `/api/projects/graphcode-self/agent-runs/${completedPlanningTicket.id}/apply-graph-patch`
@@ -359,6 +360,7 @@ describe("graph API routes", () => {
     });
     expect(planningResponse.statusCode).toBe(200);
     expect(planningResponse.json().status).toBe("succeeded");
+    expect(planningResponse.json().graphPatch.operations.length).toBeGreaterThan(0);
 
     const codingResponse = await app.inject({
       method: "POST",

@@ -3,7 +3,22 @@ import fs from "node:fs";
 import path from "node:path";
 import ts from "typescript";
 
-export type CodeGraphLanguage = "typescript" | "javascript";
+export type CodeGraphLanguage =
+  | "typescript"
+  | "javascript"
+  | "python"
+  | "java"
+  | "go"
+  | "rust"
+  | "c"
+  | "cpp"
+  | "csharp"
+  | "kotlin"
+  | "swift"
+  | "ruby"
+  | "php"
+  | "sql"
+  | "shell";
 
 export type CodeGraphDirectory = {
   id: string;
@@ -125,6 +140,38 @@ type WorkflowBuildContext = {
 
 const CODE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 const IGNORED_DIRECTORIES = new Set([".git", ".graphcode", "node_modules", "dist", "build", "coverage"]);
+const CODE_LANGUAGE_BY_EXTENSION = new Map<string, CodeGraphLanguage>([
+  [".ts", "typescript"],
+  [".tsx", "typescript"],
+  [".js", "javascript"],
+  [".jsx", "javascript"],
+  [".mjs", "javascript"],
+  [".cjs", "javascript"],
+  [".py", "python"],
+  [".java", "java"],
+  [".go", "go"],
+  [".rs", "rust"],
+  [".c", "c"],
+  [".h", "c"],
+  [".cpp", "cpp"],
+  [".cc", "cpp"],
+  [".cxx", "cpp"],
+  [".hpp", "cpp"],
+  [".hh", "cpp"],
+  [".hxx", "cpp"],
+  [".cs", "csharp"],
+  [".kt", "kotlin"],
+  [".kts", "kotlin"],
+  [".swift", "swift"],
+  [".rb", "ruby"],
+  [".php", "php"],
+  [".sql", "sql"],
+  [".sh", "shell"],
+  [".bash", "shell"],
+  [".zsh", "shell"],
+  [".fish", "shell"]
+]);
+const RESOLUTION_EXTENSIONS = [...CODE_LANGUAGE_BY_EXTENSION.keys()];
 
 export function scanRepositoryCodeGraph(rootPath: string, options: CodeGraphScanOptions = {}): CodeGraphSnapshot {
   const resolvedRoot = path.resolve(rootPath);
@@ -192,6 +239,13 @@ function walkFiles(rootPath: string, currentPath: string): string[] {
 }
 
 function parseSourceFile(rootPath: string, relativePath: string): CodeGraphFile {
+  if (!isTypeScriptFamily(relativePath)) {
+    return parseTextSourceFile(rootPath, relativePath);
+  }
+  return parseTypeScriptSourceFile(rootPath, relativePath);
+}
+
+function parseTypeScriptSourceFile(rootPath: string, relativePath: string): CodeGraphFile {
   const absolutePath = path.join(rootPath, relativePath);
   const text = fs.readFileSync(absolutePath, "utf8");
   const sourceFile = ts.createSourceFile(relativePath, text, ts.ScriptTarget.Latest, true, scriptKindForPath(relativePath));
@@ -228,6 +282,518 @@ function parseSourceFile(rootPath: string, relativePath: string): CodeGraphFile 
     imports,
     exports
   };
+}
+
+function parseTextSourceFile(rootPath: string, relativePath: string): CodeGraphFile {
+  const absolutePath = path.join(rootPath, relativePath);
+  const text = fs.readFileSync(absolutePath, "utf8");
+  const language = languageForPath(relativePath);
+  const imports = extractTextImports(text, language);
+  const symbols = extractTextSymbols(relativePath, text, language);
+  fileSymbolsByPath.set(relativePath, symbols);
+
+  return {
+    id: codeGraphId("code-file", relativePath),
+    path: relativePath,
+    name: path.posix.basename(relativePath),
+    directoryPath: normalizeDirectoryPath(path.posix.dirname(relativePath)),
+    language,
+    startLine: 1,
+    endLine: Math.max(1, text.split(/\r?\n/).length),
+    imports,
+    exports: symbols.filter((symbol) => symbol.exported && !symbol.parentSymbolId).map((symbol) => symbol.name)
+  };
+}
+
+type TextSymbolDraft = {
+  name: string;
+  symbolKind: CodeGraphSymbolKind;
+  kind: "function" | "object";
+  signature: string;
+  parameters: CodeGraphParameter[];
+  returnHint: string | null;
+  exported: boolean;
+  startLine: number;
+  endLine: number;
+};
+
+function extractTextImports(text: string, language: CodeGraphLanguage): CodeGraphImport[] {
+  const imports: CodeGraphImport[] = [];
+  const seen = new Set<string>();
+  const addImport = (moduleSpecifier: string | undefined) => {
+    const normalized = moduleSpecifier?.trim().replace(/^["'<]+|[>"']+$/g, "");
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    imports.push({ moduleSpecifier: normalized, resolvedPath: null });
+  };
+  const lines = text.split(/\r?\n/);
+  let inGoImportBlock = false;
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (!line) {
+      continue;
+    }
+    if (language === "go" && /^import\s*\($/.test(line)) {
+      inGoImportBlock = true;
+      continue;
+    }
+    if (inGoImportBlock) {
+      if (line === ")") {
+        inGoImportBlock = false;
+        continue;
+      }
+      addImport(line.match(/"([^"]+)"/)?.[1]);
+      continue;
+    }
+
+    switch (language) {
+      case "python":
+        addImport(line.match(/^from\s+([.\w]+)\s+import\s+/)?.[1] ?? line.match(/^import\s+([.\w]+)/)?.[1]);
+        break;
+      case "c":
+      case "cpp":
+        addImport(line.match(/^#\s*include\s+["<]([^">]+)[">]/)?.[1]);
+        break;
+      case "java":
+      case "kotlin":
+        addImport(line.match(/^import\s+(?:static\s+)?([\w.*]+)\s*;?/)?.[1]);
+        break;
+      case "go":
+        addImport(line.match(/^import\s+(?:\w+\s+)?["]([^"]+)["]/)?.[1]);
+        break;
+      case "rust":
+        addImport(line.match(/^(?:pub\s+)?mod\s+([A-Za-z_]\w*)\s*;?/)?.[1] ?? line.match(/^use\s+([^;]+);?/)?.[1]);
+        break;
+      case "csharp":
+        addImport(line.match(/^using\s+([\w.]+)\s*;?/)?.[1]);
+        break;
+      case "swift":
+        addImport(line.match(/^import\s+([\w.]+)/)?.[1]);
+        break;
+      case "ruby":
+        addImport(line.match(/^require(?:_relative)?\s+["']([^"']+)["']/)?.[1]);
+        break;
+      case "php":
+        addImport(line.match(/^(?:require|require_once|include|include_once)\s*\(?\s*["']([^"']+)["']/)?.[1] ?? line.match(/^use\s+([^;]+);?/)?.[1]);
+        break;
+      case "shell":
+        addImport(line.match(/^(?:source|\.)\s+(.+)$/)?.[1]);
+        break;
+      default:
+        break;
+    }
+  }
+
+  return imports;
+}
+
+function extractTextSymbols(filePath: string, text: string, language: CodeGraphLanguage): CodeGraphSymbol[] {
+  const lines = text.split(/\r?\n/);
+  const objectDrafts: TextSymbolDraft[] = [];
+  const functionDrafts: TextSymbolDraft[] = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const rawLine = lines[index];
+    const line = stripInlineComment(rawLine, language).trim();
+    if (!line) {
+      continue;
+    }
+    const objectDraft = matchObjectDeclaration(line, lines, index, language);
+    if (objectDraft) {
+      objectDrafts.push(objectDraft);
+    }
+    const functionDraft = matchFunctionDeclaration(line, lines, index, language);
+    if (functionDraft) {
+      functionDrafts.push(functionDraft);
+    }
+  }
+
+  const objectSymbols = objectDrafts.map((draft) => createTextObjectSymbol(filePath, draft));
+  const objectByDraft = new Map<TextSymbolDraft, CodeGraphSymbol>(objectDrafts.map((draft, index) => [draft, objectSymbols[index]]));
+  const functionSymbols = functionDrafts.map((draft) => {
+    const parentDraft = nearestParentObject(draft, objectDrafts);
+    const parentSymbol = parentDraft ? objectByDraft.get(parentDraft) ?? null : null;
+    const name = parentSymbol && !draft.name.includes(".") ? `${parentSymbol.name}.${draft.name}` : draft.name.replaceAll("::", ".");
+    return createTextFunctionSymbol(filePath, draft, name, Boolean(parentSymbol), lines);
+  });
+
+  return [...objectSymbols, ...functionSymbols].sort((a, b) => a.startLine - b.startLine || a.name.localeCompare(b.name));
+}
+
+function createTextObjectSymbol(filePath: string, draft: TextSymbolDraft): CodeGraphSymbol {
+  return {
+    id: codeGraphId("code-symbol", `${filePath}:${draft.name}:${draft.startLine}`),
+    filePath,
+    kind: "object",
+    symbolKind: draft.symbolKind,
+    name: draft.name,
+    exported: draft.exported,
+    parentSymbolId: null,
+    startLine: draft.startLine,
+    endLine: draft.endLine,
+    signature: draft.signature,
+    parameters: [],
+    returnHint: null,
+    calls: [],
+    workflow: null,
+    summary: `${draft.exported ? "Exported " : ""}${draft.symbolKind} ${draft.name} from ${filePath}.`
+  };
+}
+
+function createTextFunctionSymbol(
+  filePath: string,
+  draft: TextSymbolDraft,
+  name: string,
+  methodLike: boolean,
+  lines: string[]
+): CodeGraphSymbol {
+  return {
+    id: codeGraphId("code-symbol", `${filePath}:${name}:${draft.startLine}`),
+    filePath,
+    kind: "function",
+    symbolKind: methodLike ? "method" : draft.symbolKind,
+    name,
+    exported: draft.exported,
+    parentSymbolId: null,
+    startLine: draft.startLine,
+    endLine: draft.endLine,
+    signature: draft.signature,
+    parameters: draft.parameters,
+    returnHint: draft.returnHint,
+    calls: extractTextCalls(lines.slice(draft.startLine - 1, draft.endLine).join("\n"), name),
+    workflow: createTextFunctionWorkflow(filePath, name, draft),
+    summary: `${draft.exported ? "Exported " : ""}${methodLike ? "method" : draft.symbolKind} ${name} from ${filePath}.`
+  };
+}
+
+function createTextFunctionWorkflow(filePath: string, name: string, draft: TextSymbolDraft): CodeGraphFunctionWorkflow {
+  const symbolId = codeGraphId("code-symbol", `${filePath}:${name}:${draft.startLine}`);
+  return {
+    nodes: [
+      {
+        id: `${symbolId}-process`,
+        kind: "entry",
+        name: `Entry ${name}`,
+        summary: `Function entry for ${name}`,
+        codeContext: draft.signature,
+        startLine: draft.startLine,
+        endLine: draft.endLine
+      }
+    ],
+    edges: []
+  };
+}
+
+function matchObjectDeclaration(
+  line: string,
+  lines: string[],
+  index: number,
+  language: CodeGraphLanguage
+): TextSymbolDraft | null {
+  let match: RegExpMatchArray | null = null;
+  let symbolKind: CodeGraphSymbolKind = "class";
+
+  if (language === "python") {
+    match = line.match(/^class\s+([A-Za-z_]\w*)/);
+  } else if (language === "ruby") {
+    match = line.match(/^(?:class|module)\s+([A-Za-z_][\w:]*)/);
+  } else if (language === "rust") {
+    match = line.match(/^(?:pub\s+)?(?:struct|trait|enum)\s+([A-Za-z_]\w*)/) ?? line.match(/^impl(?:\s+[\w:<>,\s]+?\s+for)?\s+([A-Za-z_]\w*)/);
+    if (line.includes("trait")) {
+      symbolKind = "interface";
+    } else if (line.includes("enum")) {
+      symbolKind = "enum";
+    }
+  } else if (language === "go") {
+    match = line.match(/^type\s+([A-Za-z_]\w*)\s+(?:struct|interface)\b/);
+    symbolKind = line.includes("interface") ? "interface" : "class";
+  } else {
+    match = line.match(/^(?:(?:export|public|private|protected|abstract|final|sealed|open|data|internal|static)\s+)*(class|interface|enum|struct|trait|protocol|object)\s+([A-Za-z_]\w*)/);
+    if (match?.[1] === "interface" || match?.[1] === "protocol" || match?.[1] === "trait") {
+      symbolKind = "interface";
+    } else if (match?.[1] === "enum") {
+      symbolKind = "enum";
+    }
+  }
+
+  const name = language === "rust" || language === "go" || language === "python" || language === "ruby" ? match?.[1] : match?.[2];
+  if (!name) {
+    return null;
+  }
+  return {
+    name: name.replaceAll("::", "."),
+    symbolKind,
+    kind: "object",
+    signature: line,
+    parameters: [],
+    returnHint: null,
+    exported: isExportedLine(line, name, language),
+    startLine: index + 1,
+    endLine: findTextSymbolEnd(lines, index, language)
+  };
+}
+
+function matchFunctionDeclaration(
+  line: string,
+  lines: string[],
+  index: number,
+  language: CodeGraphLanguage
+): TextSymbolDraft | null {
+  const startLine = index + 1;
+  const exportedFromLine = (name: string) => isExportedLine(line, name, language);
+  let name: string | null = null;
+  let params = "";
+  let returnHint: string | null = null;
+
+  if (language === "python") {
+    const match = line.match(/^(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*([^:]+))?:/);
+    name = match?.[1] ?? null;
+    params = match?.[2] ?? "";
+    returnHint = match?.[3]?.trim() ?? null;
+  } else if (language === "ruby") {
+    const match = line.match(/^def\s+(?:self\.)?([A-Za-z_]\w*[!?=]?)\s*(?:\(([^)]*)\)|\s+([^#]+))?/);
+    name = match?.[1] ?? null;
+    params = match?.[2] ?? match?.[3] ?? "";
+  } else if (language === "go") {
+    const match = line.match(/^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)\s*\(([^)]*)\)\s*([^{]*)/);
+    name = match?.[1] ?? null;
+    params = match?.[2] ?? "";
+    returnHint = match?.[3]?.trim().replace(/\s*\{.*$/, "") || null;
+  } else if (language === "rust") {
+    const match = line.match(/^(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*([^{]+))?/);
+    name = match?.[1] ?? null;
+    params = match?.[2] ?? "";
+    returnHint = match?.[3]?.trim() ?? null;
+  } else if (language === "kotlin") {
+    const match = line.match(/^(?:(?:public|private|protected|internal|override|suspend|inline|export)\s+)*fun\s+(?:[A-Za-z_]\w*\.)?([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?::\s*([^{=]+))?/);
+    name = match?.[1] ?? null;
+    params = match?.[2] ?? "";
+    returnHint = match?.[3]?.trim() ?? null;
+  } else if (language === "swift") {
+    const match = line.match(/^(?:(?:public|private|internal|open|static|class|mutating|override)\s+)*func\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?:->\s*([^{]+))?/);
+    name = match?.[1] ?? null;
+    params = match?.[2] ?? "";
+    returnHint = match?.[3]?.trim() ?? null;
+  } else if (language === "php") {
+    const match = line.match(/^(?:(?:public|private|protected|static|final|abstract)\s+)*function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)\s*(?::\s*([^{]+))?/);
+    name = match?.[1] ?? null;
+    params = match?.[2] ?? "";
+    returnHint = match?.[3]?.trim() ?? null;
+  } else if (language === "sql") {
+    const match = line.match(/^CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\s+([\w."]+)\s*\(([^)]*)\)/i);
+    name = match?.[1]?.replaceAll('"', "") ?? null;
+    params = match?.[2] ?? "";
+  } else if (language === "shell") {
+    const match = line.match(/^(?:function\s+)?([A-Za-z_][\w-]*)\s*(?:\(\))?\s*\{/);
+    name = match?.[1] ?? null;
+  } else {
+    const match = matchCLikeFunction(line);
+    name = match?.name ?? null;
+    params = match?.params ?? "";
+    returnHint = match?.returnHint ?? null;
+  }
+
+  if (!name || isReservedCallName(name)) {
+    return null;
+  }
+  return {
+    name: name.replaceAll("::", "."),
+    symbolKind: "function",
+    kind: "function",
+    signature: line,
+    parameters: parseTextParameters(params),
+    returnHint,
+    exported: exportedFromLine(name),
+    startLine,
+    endLine: findTextSymbolEnd(lines, index, language)
+  };
+}
+
+function matchCLikeFunction(line: string): { name: string; params: string; returnHint: string | null } | null {
+  if (!line.includes("(") || line.startsWith("#") || /^[}\])]/.test(line) || /\b(?:if|for|while|switch|catch|return|throw|new)\s*\(/.test(line)) {
+    return null;
+  }
+  const match = line.match(/^([^=;{}]*?)\b([~A-Za-z_]\w*(?:::[~A-Za-z_]\w*)?)\s*\(([^;{}]*)\)\s*(?:const\s*)?(?:->\s*([^{;]+))?\s*(?:\{|$|;)/);
+  if (!match) {
+    return null;
+  }
+  const prefix = match[1].trim();
+  const name = match[2].trim();
+  if (!line.includes("{") && prefix.split(/\s+/).filter(Boolean).length < 1) {
+    return null;
+  }
+  const prefixReturnHint = prefix
+    .split(/\s+/)
+    .filter((token) => !/^(?:public|private|protected|static|virtual|override|constexpr|inline|extern|async|final|abstract|export)$/.test(token))
+    .join(" ");
+  const returnHint = match[4]?.trim() ?? (prefixReturnHint || null);
+  return { name, params: match[3], returnHint };
+}
+
+function parseTextParameters(params: string): CodeGraphParameter[] {
+  return params
+    .split(",")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((part) => {
+      const cleaned = part.replace(/=.*$/, "").trim();
+      const pieces = cleaned.split(/\s+/);
+      const name = pieces.at(-1)?.replace(/[*&:]+/g, "").trim() || cleaned;
+      const typeHint = pieces.length > 1 ? pieces.slice(0, -1).join(" ") : null;
+      return { name, typeHint };
+    });
+}
+
+function nearestParentObject(draft: TextSymbolDraft, objectDrafts: TextSymbolDraft[]): TextSymbolDraft | null {
+  return (
+    objectDrafts
+      .filter((object) => object.startLine < draft.startLine && object.endLine >= draft.endLine)
+      .sort((a, b) => b.startLine - a.startLine)[0] ?? null
+  );
+}
+
+function findTextSymbolEnd(lines: string[], startIndex: number, language: CodeGraphLanguage): number {
+  if (language === "python") {
+    return findIndentBlockEnd(lines, startIndex);
+  }
+  if (language === "ruby") {
+    return findEndKeywordBlockEnd(lines, startIndex);
+  }
+  if (language === "sql") {
+    return findSqlStatementEnd(lines, startIndex);
+  }
+  return findBraceBlockEnd(lines, startIndex);
+}
+
+function findBraceBlockEnd(lines: string[], startIndex: number): number {
+  let balance = 0;
+  let sawOpening = false;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index];
+    for (const char of line) {
+      if (char === "{") {
+        balance += 1;
+        sawOpening = true;
+      } else if (char === "}") {
+        balance -= 1;
+      }
+    }
+    if (sawOpening && balance <= 0) {
+      return index + 1;
+    }
+    if (!sawOpening && index > startIndex && line.trim()) {
+      return index;
+    }
+  }
+  return lines.length;
+}
+
+function findIndentBlockEnd(lines: string[], startIndex: number): number {
+  const baseIndent = indentation(lines[startIndex]);
+  for (let index = startIndex + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (!line.trim() || line.trimStart().startsWith("#")) {
+      continue;
+    }
+    if (indentation(line) <= baseIndent) {
+      return index;
+    }
+  }
+  return lines.length;
+}
+
+function findEndKeywordBlockEnd(lines: string[], startIndex: number): number {
+  let depth = 0;
+  for (let index = startIndex; index < lines.length; index += 1) {
+    const line = lines[index].trim();
+    if (/^(?:class|module|def|if|unless|case|begin|for|while)\b/.test(line) || /\bdo\b/.test(line)) {
+      depth += 1;
+    }
+    if (line === "end" || line.startsWith("end ")) {
+      depth -= 1;
+      if (depth <= 0) {
+        return index + 1;
+      }
+    }
+  }
+  return lines.length;
+}
+
+function findSqlStatementEnd(lines: string[], startIndex: number): number {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    if (lines[index].trim().endsWith(";")) {
+      return index + 1;
+    }
+  }
+  return lines.length;
+}
+
+function extractTextCalls(text: string, symbolName: string): string[] {
+  const ownSimpleName = symbolName.split(".").at(-1) ?? symbolName;
+  const calls = new Set<string>();
+  for (const match of text.matchAll(/\b([A-Za-z_]\w*)\s*\(/g)) {
+    const name = match[1];
+    if (name !== ownSimpleName && !isReservedCallName(name)) {
+      calls.add(name);
+    }
+  }
+  return [...calls].sort();
+}
+
+function stripInlineComment(line: string, language: CodeGraphLanguage): string {
+  if (language === "python" || language === "ruby" || language === "shell") {
+    return line.replace(/\s+#.*$/, "");
+  }
+  if (language === "sql") {
+    return line.replace(/\s+--.*$/, "");
+  }
+  return line.replace(/\s+\/\/.*$/, "");
+}
+
+function indentation(line: string): number {
+  return line.match(/^\s*/)?.[0].replace(/\t/g, "  ").length ?? 0;
+}
+
+function isExportedLine(line: string, name: string, language: CodeGraphLanguage): boolean {
+  if (/^(?:export|pub|public|open)\b/.test(line) || /\bpublic\b/.test(line)) {
+    return true;
+  }
+  if (language === "python" || language === "ruby" || language === "go") {
+    return !name.startsWith("_") && /^[A-Z]/.test(name[0]) === (language === "go");
+  }
+  return !line.includes(" private ") && !name.startsWith("_");
+}
+
+const RESERVED_CALL_NAMES = new Set([
+  "if",
+  "for",
+  "while",
+  "switch",
+  "catch",
+  "return",
+  "throw",
+  "sizeof",
+  "typeof",
+  "new",
+  "class",
+  "struct",
+  "enum",
+  "func",
+  "function",
+  "def",
+  "fn",
+  "print",
+  "echo",
+  "SELECT",
+  "FROM",
+  "WHERE"
+]);
+
+function isReservedCallName(name: string): boolean {
+  return RESERVED_CALL_NAMES.has(name) || RESERVED_CALL_NAMES.has(name.toLowerCase());
 }
 
 function collectSymbolsFromNode(node: ts.Node, parentSymbolId: string | null, context: SymbolCollectionContext): void {
@@ -827,24 +1393,32 @@ function buildSymbolNameIndex(symbols: CodeGraphSymbol[]): Map<string, CodeGraph
 }
 
 function resolveImportPath(sourceFilePath: string, moduleSpecifier: string, filePathSet: Set<string>): string | null {
-  if (!moduleSpecifier.startsWith(".")) {
-    return null;
-  }
-  const base = normalizeRelativePath(path.posix.join(path.posix.dirname(sourceFilePath), moduleSpecifier));
-  const candidates = [
-    base,
-    `${base}.ts`,
-    `${base}.tsx`,
-    `${base}.js`,
-    `${base}.jsx`,
-    `${base}.mjs`,
-    `${base}.cjs`,
-    `${base}/index.ts`,
-    `${base}/index.tsx`,
-    `${base}/index.js`,
-    `${base}/index.jsx`
-  ];
+  const directory = path.posix.dirname(sourceFilePath);
+  const normalizedSpecifier = moduleSpecifier.replace(/^\.\//, "").replaceAll("\\", "/");
+  const dottedPath = normalizedSpecifier.replace(/^\.+/, "").replaceAll(".", "/");
+  const bases = [
+    moduleSpecifier.startsWith(".") ? path.posix.join(directory, moduleSpecifier) : "",
+    path.posix.join(directory, normalizedSpecifier),
+    normalizedSpecifier,
+    path.posix.join(directory, dottedPath),
+    dottedPath
+  ]
+    .filter(Boolean)
+    .map((base) => normalizeRelativePath(base));
+  const candidates = [...new Set(bases.flatMap(importResolutionCandidates))];
   return candidates.find((candidate) => filePathSet.has(candidate)) ?? null;
+}
+
+function importResolutionCandidates(base: string): string[] {
+  const extension = path.posix.extname(base);
+  if (extension && RESOLUTION_EXTENSIONS.includes(extension)) {
+    return [base];
+  }
+  return [
+    base,
+    ...RESOLUTION_EXTENSIONS.map((candidateExtension) => `${base}${candidateExtension}`),
+    ...RESOLUTION_EXTENSIONS.map((candidateExtension) => `${base}/index${candidateExtension}`)
+  ];
 }
 
 function signatureText(node: ts.FunctionLikeDeclaration, sourceFile: ts.SourceFile, name: string): string {
@@ -917,13 +1491,17 @@ function scriptKindForPath(filePath: string): ts.ScriptKind {
 }
 
 function languageForPath(filePath: string): CodeGraphLanguage {
-  return filePath.endsWith(".js") || filePath.endsWith(".jsx") || filePath.endsWith(".mjs") || filePath.endsWith(".cjs") ? "javascript" : "typescript";
+  return CODE_LANGUAGE_BY_EXTENSION.get(path.extname(filePath)) ?? "typescript";
 }
 
 function isCodeFile(filePath: string): boolean {
   if (filePath.endsWith(".d.ts")) {
     return false;
   }
+  return CODE_LANGUAGE_BY_EXTENSION.has(path.extname(filePath));
+}
+
+function isTypeScriptFamily(filePath: string): boolean {
   return CODE_EXTENSIONS.has(path.extname(filePath));
 }
 

@@ -1,0 +1,1 @@
+int normalize(int value);
