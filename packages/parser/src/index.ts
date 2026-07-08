@@ -1511,7 +1511,7 @@ function normalizeDirectoryPath(value: string): string {
 }
 
 function normalizeRelativePath(value: string): string {
-  const normalized = value.replaceAll(path.sep, "/").replace(/^\.\/+/, "");
+  const normalized = value.replace(/\\/g, "/").replace(/^\.\/+/, "");
   return normalized === "." ? "." : normalized;
 }
 

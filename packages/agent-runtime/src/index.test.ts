@@ -144,6 +144,58 @@ function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
   };
 }
 
+function writeFakeCli(outputLines: string[], options: { argsLog?: string; stdinLog?: string } = {}): string {
+  const command = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}${process.platform === "win32" ? ".cmd" : ".sh"}`);
+  if (process.platform === "win32") {
+    fs.writeFileSync(command, windowsFakeCli(outputLines, options), { mode: 0o755 });
+  } else {
+    fs.writeFileSync(command, unixFakeCli(outputLines, options), { mode: 0o755 });
+  }
+  return command;
+}
+
+function unixFakeCli(outputLines: string[], options: { argsLog?: string; stdinLog?: string }): string {
+  return [
+    "#!/bin/sh",
+    options.argsLog ? `printf '%s\\n' "$@" > ${shellQuote(options.argsLog)}` : "",
+    options.stdinLog ? `cat > ${shellQuote(options.stdinLog)}` : "",
+    "cat <<'EOF'",
+    ...outputLines,
+    "EOF"
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
+function windowsFakeCli(outputLines: string[], options: { argsLog?: string; stdinLog?: string }): string {
+  return [
+    "@echo off",
+    options.argsLog ? `if exist "${options.argsLog}" del "${options.argsLog}"` : "",
+    options.argsLog ? ":args_loop" : "",
+    options.argsLog ? "if \"%~1\"==\"\" goto after_args" : "",
+    options.argsLog ? `>>"${options.argsLog}" echo(%~1` : "",
+    options.argsLog ? "shift" : "",
+    options.argsLog ? "goto args_loop" : "",
+    options.argsLog ? ":after_args" : "",
+    options.stdinLog ? `more > "${options.stdinLog}"` : "",
+    ...outputLines.map((line) => `echo(${escapeBatchEcho(line)}`)
+  ]
+    .filter(Boolean)
+    .join("\r\n");
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function escapeBatchEcho(value: string): string {
+  return value.replace(/\^/g, "^^").replace(/%/g, "%%").replace(/&/g, "^&").replace(/</g, "^<").replace(/>/g, "^>").replace(/\|/g, "^|");
+}
+
+function normalizeNewlines(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}
+
 describe("GraphCode agent runtime", () => {
   it("runs the planning agent through LangGraph and marks scoped status", async () => {
     const tools = toolbox();
@@ -184,24 +236,18 @@ describe("GraphCode agent runtime", () => {
     });
 
     it("stores parsed test artifact manifests with coding proposals", async () => {
-      const command = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.sh`);
       const argsLog = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.args`);
-      fs.writeFileSync(
-        command,
+      const command = writeFakeCli(
         [
-          "#!/bin/sh",
-          `printf '%s\\n' "$@" > ${argsLog}`,
-          "cat <<'EOF'",
           "diff --git a/src/module.ts b/src/module.ts",
           "--- a/src/module.ts",
           "+++ b/src/module.ts",
           "@@",
           "+export const value = 2;",
           "GRAPHCODE_TEST_ARTIFACTS_JSON",
-          "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}",
-          "EOF"
-        ].join("\n"),
-        { mode: 0o755 }
+          "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}"
+        ],
+        { argsLog }
       );
       const tools = toolbox();
 
@@ -224,7 +270,7 @@ describe("GraphCode agent runtime", () => {
           scripts: [expect.objectContaining({ relativePath: "module.test.ts" })]
         })
       );
-      const args = fs.readFileSync(argsLog, "utf8");
+      const args = normalizeNewlines(fs.readFileSync(argsLog, "utf8"));
       expect(args).toContain("--append-system-prompt\nTest prompt");
       expect(args).toContain("--permission-mode\nplan");
       expect(args).toContain("--disallowedTools\nEdit\nMultiEdit\nWrite\nNotebookEdit");
@@ -232,25 +278,12 @@ describe("GraphCode agent runtime", () => {
     });
 
     it("runs Codex CLI providers with workspace root and prompt skills on stdin", async () => {
-      const command = path.join(os.tmpdir(), `graphcode-codex-${crypto.randomUUID()}.sh`);
       const argsLog = path.join(os.tmpdir(), `graphcode-codex-${crypto.randomUUID()}.args`);
       const stdinLog = path.join(os.tmpdir(), `graphcode-codex-${crypto.randomUUID()}.stdin`);
       const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-workspace-"));
-      fs.writeFileSync(
-        command,
-        [
-          "#!/bin/sh",
-          `printf '%s\\n' "$@" > ${argsLog}`,
-          `cat > ${stdinLog}`,
-          "cat <<'EOF'",
-          "diff --git a/src/module.ts b/src/module.ts",
-          "--- a/src/module.ts",
-          "+++ b/src/module.ts",
-          "@@",
-          "+export const value = 3;",
-          "EOF"
-        ].join("\n"),
-        { mode: 0o755 }
+      const command = writeFakeCli(
+        ["diff --git a/src/module.ts b/src/module.ts", "--- a/src/module.ts", "+++ b/src/module.ts", "@@", "+export const value = 3;"],
+        { argsLog, stdinLog }
       );
       const tools = toolbox();
 
@@ -265,7 +298,7 @@ describe("GraphCode agent runtime", () => {
       );
 
       expect(result.diff).toContain("src/module.ts");
-      expect(fs.readFileSync(argsLog, "utf8")).toBe(`exec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--ask-for-approval\nnever\n-\n`);
+      expect(normalizeNewlines(fs.readFileSync(argsLog, "utf8"))).toBe(`exec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--ask-for-approval\nnever\n-\n`);
       const stdin = fs.readFileSync(stdinLog, "utf8");
       expect(stdin).toContain("GraphCode Codex CLI account-plan invocation.");
       expect(stdin).toContain("GraphCode skill instructions:\nTest prompt");
@@ -340,12 +373,7 @@ describe("GraphCode agent runtime", () => {
   });
 
     it("rejects coding diffs that leave the selected source scope", async () => {
-      const command = path.join(os.tmpdir(), `graphcode-agent-bad-${crypto.randomUUID()}.sh`);
-      fs.writeFileSync(
-        command,
-        ["#!/bin/sh", "cat <<'EOF'", "diff --git a/src/other.ts b/src/other.ts", "--- a/src/other.ts", "+++ b/src/other.ts", "@@", "+bad", "EOF"].join("\n"),
-        { mode: 0o755 }
-      );
+      const command = writeFakeCli(["diff --git a/src/other.ts b/src/other.ts", "--- a/src/other.ts", "+++ b/src/other.ts", "@@", "+bad"]);
       await expect(
         runCodingAgent(
         {

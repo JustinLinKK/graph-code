@@ -6,7 +6,13 @@ The launch name is still open. The research notes in [docs/research/graphcode-as
 
 ## Installation
 
-GraphCode is a local pnpm workspace. The root `package.json` pins `pnpm@10.33.0`; use Node.js with Corepack available so the pinned package manager can be activated consistently.
+GraphCode is a local pnpm workspace. The root `package.json` pins `pnpm@10.33.0`; use Node.js with Corepack available so the pinned package manager can be activated consistently. The core workspace is intended to run natively on Linux, macOS, and Windows.
+
+Prerequisites:
+
+- Node.js 24 or newer with Corepack.
+- Git on `PATH`; GraphCode uses Git for the best source inventory and falls back to filesystem walking when Git is unavailable.
+- Native build tools only if `better-sqlite3` has to compile during install. On macOS, install Xcode Command Line Tools with `xcode-select --install`. On Windows, install Visual Studio Build Tools with the Desktop development with C++ workload and a current Python.
 
 1. Clone the repository:
 
@@ -71,6 +77,34 @@ pnpm test
 pnpm build
 ```
 
+## OS Notes
+
+Use the same pnpm commands on Linux, macOS, and Windows. The main differences are shell syntax, local paths, and optional native build tools.
+
+- Linux paths look like `/home/alex/project`.
+- macOS paths look like `/Users/alex/project`.
+- Windows paths look like `C:\Users\Alex\project`.
+- Workspace source paths inside GraphCode are stored with forward slashes, even on Windows.
+- If you use WSL, run Node, pnpm, Git, and GraphCode inside the same WSL distro and open WSL paths such as `/home/alex/project`, not `C:\...` paths.
+
+To change ports on Linux or macOS:
+
+```bash
+GRAPHCODE_SERVER_PORT=4010 GRAPHCODE_WEB_PORT=5174 pnpm dev
+```
+
+To change ports in Windows PowerShell:
+
+```powershell
+$env:GRAPHCODE_SERVER_PORT = "4010"
+$env:GRAPHCODE_WEB_PORT = "5174"
+pnpm dev
+```
+
+The Vite proxy reads `GRAPHCODE_SERVER_HOST`, `GRAPHCODE_SERVER_PORT`, and `GRAPHCODE_API_PROXY_TARGET`. The local API defaults to `127.0.0.1:3010`; the web app defaults to `127.0.0.1:5173`.
+
+Account-based CLI providers also work cross-platform. On Windows, npm-installed CLI shims such as `codex.cmd` or `claude.cmd` are supported; if the command is not on `PATH`, enter the full path to the `.cmd` or `.exe` in settings.
+
 Optional Docker smoke path:
 
 ```bash
@@ -78,7 +112,7 @@ docker build -t graphcode .
 docker run --rm -p 3010:3010 -p 5173:5173 graphcode
 ```
 
-The repository also includes a GitHub Actions workflow at `.github/workflows/ci.yml` that installs with the pinned pnpm version, runs typecheck, tests, build, and verifies the Docker image builds.
+The repository also includes a GitHub Actions workflow at `.github/workflows/ci.yml` that installs with the pinned pnpm version and runs typecheck, tests, and build on Ubuntu, macOS, and Windows. The Docker image build is verified on Ubuntu.
 
 ## Status
 

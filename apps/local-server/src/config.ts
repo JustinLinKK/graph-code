@@ -9,13 +9,13 @@ export function resolveDbPath(input = process.env.GRAPHCODE_DB_PATH): string {
   return path.isAbsolute(dbPath) ? dbPath : path.resolve(process.cwd(), dbPath);
 }
 
-export function resolveServerPort(input = process.env.PORT): number {
+export function resolveServerPort(input = process.env.GRAPHCODE_SERVER_PORT ?? process.env.PORT): number {
   if (!input) {
     return DEFAULT_SERVER_PORT;
   }
 
   const port = Number.parseInt(input, 10);
-  return Number.isFinite(port) ? port : DEFAULT_SERVER_PORT;
+  return Number.isFinite(port) && port > 0 ? port : DEFAULT_SERVER_PORT;
 }
 
 export function resolveServerHost(input = process.env.GRAPHCODE_SERVER_HOST): string {

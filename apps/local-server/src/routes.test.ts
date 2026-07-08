@@ -10,6 +10,30 @@ import { buildServer } from "./server";
 let app: Awaited<ReturnType<typeof buildServer>>;
 const selfRootPath = path.join(os.tmpdir(), "graphcode-self-routes");
 
+function writeFakeCodexValidationCommand(options: { authSucceeds: boolean }): string {
+  const command = path.join(os.tmpdir(), `graphcode-codex-cli-${crypto.randomUUID()}${process.platform === "win32" ? ".cmd" : ".sh"}`);
+  const script =
+    process.platform === "win32"
+      ? [
+          "@echo off",
+          "if \"%~1\"==\"--version\" (echo codex-test& exit /b 0)",
+          options.authSucceeds ? "if \"%~1\"==\"login\" if \"%~2\"==\"status\" (echo logged-in& exit /b 0)" : "",
+          options.authSucceeds ? "exit /b 0" : "exit /b 1"
+        ]
+          .filter(Boolean)
+          .join("\r\n")
+      : [
+          "#!/bin/sh",
+          "if [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi",
+          options.authSucceeds ? "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then echo logged-in; exit 0; fi" : "",
+          options.authSucceeds ? "exit 0" : "exit 1"
+        ]
+          .filter(Boolean)
+          .join("\n");
+  fs.writeFileSync(command, script, { mode: 0o755 });
+  return command;
+}
+
 beforeEach(async () => {
   await fs.promises.rm(selfRootPath, { recursive: true, force: true });
   await fs.promises.mkdir(path.join(selfRootPath, "src"), { recursive: true });
@@ -195,17 +219,7 @@ describe("graph API routes", () => {
   });
 
   it("validates Codex CLI account commands for settings", async () => {
-    const command = path.join(os.tmpdir(), `graphcode-codex-cli-${crypto.randomUUID()}.sh`);
-    fs.writeFileSync(
-      command,
-      [
-        "#!/bin/sh",
-        "if [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi",
-        "if [ \"$1\" = \"login\" ] && [ \"$2\" = \"status\" ]; then echo logged-in; exit 0; fi",
-        "exit 0"
-      ].join("\n"),
-      { mode: 0o755 }
-    );
+    const command = writeFakeCodexValidationCommand({ authSucceeds: true });
 
     const saveResponse = await app.inject({
       method: "PUT",
@@ -234,12 +248,7 @@ describe("graph API routes", () => {
   });
 
   it("reports Codex CLI auth failures after command validation", async () => {
-    const command = path.join(os.tmpdir(), `graphcode-codex-cli-auth-${crypto.randomUUID()}.sh`);
-    fs.writeFileSync(
-      command,
-      ["#!/bin/sh", "if [ \"$1\" = \"--version\" ]; then echo codex-test; exit 0; fi", "exit 1"].join("\n"),
-      { mode: 0o755 }
-    );
+    const command = writeFakeCodexValidationCommand({ authSucceeds: false });
 
     const saveResponse = await app.inject({
       method: "PUT",

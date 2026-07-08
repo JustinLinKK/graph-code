@@ -1148,6 +1148,10 @@ function buildCliPrompt(messages: PromptMessage[], options: { providerName: stri
     .join("\n\n");
 }
 
+function usesWindowsCliShell(platform: NodeJS.Platform = process.platform): boolean {
+  return platform === "win32";
+}
+
 function runCliCommand(
   command: string,
   args: string[],
@@ -1156,7 +1160,9 @@ function runCliCommand(
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options.cwd,
-      stdio: ["pipe", "pipe", "pipe"]
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: usesWindowsCliShell(),
+      windowsHide: true
     });
     let stdout = "";
     let stderr = "";

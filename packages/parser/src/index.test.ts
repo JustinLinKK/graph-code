@@ -133,4 +133,12 @@ describe("TypeScript code graph scanner", () => {
     expect(snapshot.symbols.find((symbol) => symbol.name === "total")?.calls).toContain("add");
     expect(snapshot.symbols.find((symbol) => symbol.name === "Greeter.greet")?.workflow?.nodes[0].kind).toBe("entry");
   });
+
+  it("normalizes explicit Windows-style relative paths before scanning", () => {
+    const fixtureRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../tests/fixtures/common-languages");
+    const snapshot = scanRepositoryCodeGraph(fixtureRoot, { files: ["python\\app.py"] });
+
+    expect(snapshot.files.map((file) => file.path)).toEqual(["python/app.py"]);
+    expect(snapshot.symbols.map((symbol) => symbol.name)).toEqual(expect.arrayContaining(["Greeter", "Greeter.greet", "run"]));
+  });
 });

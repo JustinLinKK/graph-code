@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { execFile } from "node:child_process";
+import { execFile, type ExecFileOptions } from "node:child_process";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
 import path from "node:path";
@@ -1119,17 +1119,25 @@ function cliProviderLabel(provider: "codex" | "claudecode"): string {
 async function validateCliProvider(provider: "codex" | "claudecode", command: string): Promise<string | null> {
   const label = cliProviderLabel(provider);
   try {
-    await execFileAsync(command, ["--version"], { timeout: 5000 });
+    await execFileAsync(command, ["--version"], cliExecOptions(5000));
   } catch {
     return `${label} command not found or not executable: ${command}`;
   }
   const authArgs = provider === "codex" ? ["login", "status"] : ["auth", "status"];
   try {
-    await execFileAsync(command, authArgs, { timeout: 10000 });
+    await execFileAsync(command, authArgs, cliExecOptions(10000));
   } catch {
     return `${label} account login is not available. Run ${command} ${authArgs.join(" ")} or sign in with the CLI before saving.`;
   }
   return null;
+}
+
+function cliExecOptions(timeout: number): ExecFileOptions {
+  return {
+    timeout,
+    shell: process.platform === "win32",
+    windowsHide: true
+  };
 }
 
 function isScannablePath(value: string): boolean {

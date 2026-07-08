@@ -19,7 +19,7 @@ describe("WorkspaceRuntime source containment", () => {
     fs.mkdirSync(siblingPath, { recursive: true });
     fs.writeFileSync(path.join(rootPath, "src", "module.ts"), "export const value = 1;\n", "utf8");
     fs.writeFileSync(path.join(siblingPath, "token.txt"), "secret-token\n", "utf8");
-    fs.symlinkSync(siblingPath, path.join(rootPath, "linked-secrets"), "dir");
+    fs.symlinkSync(siblingPath, path.join(rootPath, "linked-secrets"), process.platform === "win32" ? "junction" : "dir");
 
     const runtime = new WorkspaceRuntime(dbPath, rootPath) as unknown as SourceReader;
     const project = (runtime as unknown as WorkspaceRuntime).repo().createProject({ id: "project", name: "Project", rootPath });
