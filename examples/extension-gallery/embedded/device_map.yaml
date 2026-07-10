@@ -1,0 +1,15 @@
+device:
+  name: demo-sensor-hub
+  voltage: 3.3
+
+i2c:
+  bus: i2c0
+  sensors:
+    - address: "0x48"
+      name: temperature-adc
+    - address: "0x49"
+      name: battery-adc
+
+interrupts:
+  alarm_pin: gpio17
+  threshold_mv: 1800

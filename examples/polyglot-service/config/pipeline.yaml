@@ -1,0 +1,12 @@
+service:
+  name: polyglot-risk-service
+  owner: demo-team
+
+scoring:
+  default_source: api
+  high_risk_threshold: 80
+  notify_on_high_risk: true
+
+storage:
+  table: score_events
+  retention_days: 30

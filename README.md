@@ -1,85 +1,221 @@
 # GraphCode
 
-GraphCode is a working title for a graph-native, human-in-the-loop architecture IDE for large multi-file software systems. The goal is to make a repository's structure visible, editable, and reviewable through graph nodes that stay linked to real source code.
+GraphCode is a local, graph-native IDE prototype for transparent AI-assisted coding: it turns a repository into an interactive code graph so developers can inspect structure, scope AI work, and review proposed changes before anything is accepted.
 
-The launch name is still open. The research notes in [docs/research/graphcode-assessment.md](docs/research/graphcode-assessment.md) identify existing public uses of Graph-Code or GraphCode, so naming should be revisited before any public release.
+Modern AI coding tools can touch many files quickly, but it is often hard to see what changed, why it changed, and what else might be affected. GraphCode explores a human-in-the-loop alternative: make the repository structure visible first, let users operate on source-linked graph nodes, and keep AI output as reviewable proposals rather than silent edits.
 
-## Installation
+> Current status: GraphCode is a research and demo prototype. It is a local desktop-style web app, not a hosted service, and the voice/VR interface is future work rather than current functionality.
 
-GraphCode is a local pnpm workspace. The root `package.json` pins `pnpm@10.33.0`; use Node.js with Corepack available so the pinned package manager can be activated consistently. The core workspace is intended to run natively on Linux, macOS, and Windows.
+<p align="center">
+  <a href="docs/demo/screenshots/00-demo.png">
+    <img src="docs/demo/screenshots/00-demo.png" alt="GraphCode workspace overview" width="860">
+  </a>
+</p>
 
-Prerequisites:
+## Demo Gallery
 
-- Node.js 24 or newer with Corepack.
-- Git on `PATH`; GraphCode uses Git for the best source inventory and falls back to filesystem walking when Git is unavailable.
-- Native build tools only if `better-sqlite3` has to compile during install. On macOS, install Xcode Command Line Tools with `xcode-select --install`. On Windows, install Visual Studio Build Tools with the Desktop development with C++ workload and a current Python.
+Screenshots live in `docs/demo/screenshots/`. Click any preview to open the full-size image; refresh the gallery by replacing the PNGs with the same filenames.
 
-1. Clone the repository:
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/demo/screenshots/01-workspace-overview.png">
+        <img src="docs/demo/screenshots/01-workspace-overview.png" alt="Workspace overview" width="420">
+      </a>
+      <br>
+      <strong>Workspace overview</strong>
+      <br>
+      <sub>Repository-scale graph canvas with hierarchy, source-linked blocks, and inspector panels.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/demo/screenshots/02-source-linked-inspector.png">
+        <img src="docs/demo/screenshots/02-source-linked-inspector.png" alt="Source-linked inspector" width="260">
+      </a>
+      <br>
+      <strong>Source-linked inspector</strong>
+      <br>
+      <sub>Exact source path, line range, dependencies, tags, and coding controls for a selected node.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/demo/screenshots/03-planning-tickets.png">
+        <img src="docs/demo/screenshots/03-planning-tickets.png" alt="Planning tickets" width="300">
+      </a>
+      <br>
+      <strong>Planning tickets</strong>
+      <br>
+      <sub>Planning tickets that turn intent into graph-scoped, reviewable work items.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/demo/screenshots/04-coding-review-loop.png">
+        <img src="docs/demo/screenshots/04-coding-review-loop.png" alt="Coding review loop" width="420">
+      </a>
+      <br>
+      <strong>Coding review loop</strong>
+      <br>
+      <sub>Coding and review agents returning proposals, diffs, and review state instead of mutating files directly.</sub>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="docs/demo/screenshots/05-agent-settings.png">
+        <img src="docs/demo/screenshots/05-agent-settings.png" alt="Agent settings" width="360">
+      </a>
+      <br>
+      <strong>Agent settings</strong>
+      <br>
+      <sub>Mode-specific agent settings for planning, coding, review, scanning, and local CLI providers.</sub>
+    </td>
+    <td width="50%" valign="top">
+      <a href="docs/demo/screenshots/06-example-gallery-scan.png">
+        <img src="docs/demo/screenshots/06-example-gallery-scan.png" alt="Example gallery scan" width="360">
+      </a>
+      <br>
+      <strong>Example gallery scan</strong>
+      <br>
+      <sub>Example repositories scanned into a graph to demonstrate mixed-language and workflow coverage.</sub>
+    </td>
+  </tr>
+</table>
 
-   ```bash
-   git clone <repository-url>
-   ```
+## What GraphCode Does
 
-2. Enter the repository:
+- Builds an interactive graph of files, modules, classes, functions, workflow blocks, dependencies, and impact relationships.
+- Links graph nodes and edges back to exact source paths and line ranges.
+- Provides a three-pane workspace with hierarchy search, React Flow canvas navigation, node inspection, and graph editing.
+- Supports planning, scanning, coding, and review agents while keeping outputs as proposals, graph patches, diffs, or review verdicts.
+- Stores local workspace state in `.graphcode/graphcode.sqlite`, ignored by git and owned by the opened repository.
+- Runs locally through a React/Vite web app and Fastify/SQLite server.
 
-   ```bash
-   cd graph-code
-   ```
+## Why This Matters
 
-3. Enable Corepack:
+GraphCode sits between manual file-by-file navigation and opaque autonomous agents. The research question is whether a graph-first interaction model can help developers understand, localize, edit, and review repository-scale changes with more confidence.
 
-   ```bash
-   corepack enable
-   ```
+The current prototype emphasizes three ideas:
 
-4. Activate the pinned pnpm version:
+1. The graph is a working surface, not a decorative diagram.
+2. AI actions should be scoped to visible nodes or subgraphs.
+3. Review should remain explicit, with diffs, tests, dependencies, and blast-radius hints visible before acceptance.
 
-   ```bash
-   corepack prepare pnpm@10.33.0 --activate
-   pnpm --version
-   ```
+## Quick Start
 
-5. Install dependencies:
-
-   ```bash
-   pnpm install
-   ```
-
-6. Create the local self-repo workspace fixture the first time, or when you intentionally want to reset it:
-
-   ```bash
-   pnpm seed
-   ```
-
-   This creates `.graphcode/graphcode.sqlite`, which is intentionally ignored by git. Running this command again rebuilds the fixture and erases local graph edits, saved placements, agent runs, and settings in that database.
-
-7. Start the local server and web app:
-
-   ```bash
-   pnpm dev
-   ```
-
-8. Open the workspace in a browser:
-
-   ```text
-   http://127.0.0.1:5173
-   ```
-
-The web app runs through Vite on port `5173`. The local Fastify API runs on `127.0.0.1:3010`, and the Vite dev server proxies `/api` requests to it.
-
-For daily development after the fixture exists, run `pnpm dev` directly. Do not rerun `pnpm seed` unless you want a destructive reset back to the curated self-repo graph.
-
-Optional verification commands:
+GraphCode is a local pnpm workspace. Use Node.js 24 or newer with Corepack available.
 
 ```bash
-pnpm typecheck
-pnpm test
-pnpm build
+git clone <repository-url>
+cd graph-code
+corepack enable
+corepack prepare pnpm@10.33.0 --activate
+pnpm install
+pnpm seed
+pnpm dev
 ```
+
+Open:
+
+```text
+http://127.0.0.1:5173
+```
+
+The web app runs through Vite on port `5173`. The local Fastify API runs on `127.0.0.1:3010`, and Vite proxies `/api` requests to the server.
+
+For daily development after the database exists, run `pnpm dev` directly. Normal startup and code graph refreshes preserve saved placements for stable nodes.
+
+Use `pnpm seed` only for first-time setup or an intentional reset. It rebuilds the local self-repo fixture at `.graphcode/graphcode.sqlite` and erases local graph edits, saved placements, agent runs, and settings in that database.
+
+## Feature Tour
+
+### Repository Graph Workspace
+
+GraphCode opens a repository workspace and renders a graph of source-backed entities. The current self-repo fixture includes frontend, backend, shared model, parser, agent runtime, docs, tooling, boundaries, tags, reusable placements, and saved layouts.
+
+### Source-Linked Inspection
+
+Selecting a node opens an inspector with its source path, source range, summary, code context, incoming and outgoing relationships, input/output boundary data, tags, and agent status. This is the core transparency layer for explaining what part of the repository an action refers to.
+
+### Planning Tickets
+
+The planning panel converts intent into graph-scoped tickets. Planning results can carry graph patches and conflict state, and applying a ticket is an explicit later action.
+
+### Proposal-First Coding
+
+Coding agents run in small, medium, or large modes. The mode controls how much graph and workflow context is included, but it does not grant unlimited edit scope. Provider outputs are stored as proposals and diffs so the user can inspect them before applying anything.
+
+### Review Agents
+
+Review agents mirror the coding modes and evaluate proposals for correctness, scope leaks, and missing verification. A review can mark the work as reviewed or bugged.
+
+### Scanning Pipeline
+
+Scanning is split into local, medium, and global passes. Local scans analyze source files, medium scans consolidate directory or package structure, and global scans synthesize cross-directory architecture. Generated scan rows are rebuildable, while manual graph edits are preserved.
+
+### Local and Account-Based Providers
+
+GraphCode supports deterministic fake providers for tests and demos, hosted providers such as OpenAI/Gemini/OpenRouter through API-key settings, and account-based Codex or Claude Code CLI providers. CLI providers are invoked so they return proposals to GraphCode rather than editing files directly.
+
+## Examples
+
+The `examples/` directory contains lightweight repositories designed for screenshots, demos, and scanner walkthroughs. They are intentionally outside the pnpm workspace, so they do not affect the normal build.
+
+| Example | What to Show | Feature Coverage |
+| --- | --- | --- |
+| [polyglot-service](examples/polyglot-service) | Scan a mixed Python, Go, C++, SQL, and config service. | Mixed-language extraction, source ranges, import/call edges, workflow blocks. |
+| [review-proposal-lab](examples/review-proposal-lab) | Ask for a node-scoped bug fix, then run review. | Proposal-first coding, review verdicts, missing-test discussion. |
+| [architecture-ripple](examples/architecture-ripple) | Trace a contract change across billing, email, audit, and order-flow modules. | Impact relationships, dependency tracing, architecture reasoning. |
+| [ui-api-workflow](examples/ui-api-workflow) | Inspect a UI action flowing into backend route handling. | Frontend/backend boundary, source-linked workflow navigation. |
+| [extension-gallery](examples/extension-gallery) | Enable extension-oriented graph blocks and scan embedded/ML snippets. | Extension packages, domain-specific block kinds, settings screenshots. |
+
+See [examples/README.md](examples/README.md) for the guided walkthrough prompts and screenshot suggestions.
+
+## Architecture
+
+```text
+apps/
+  web/              React and React Flow graph workspace.
+  local-server/     Fastify API, SQLite persistence, workspace opening, scans, diffs.
+
+packages/
+  graph-model/      Shared TypeScript and Zod graph contracts.
+  parser/           Deterministic TS/JS extraction plus common-language parsing.
+  agent-runtime/    Planning, scanning, coding, and review agent orchestration.
+
+docs/
+  architecture/     Runtime and prompt design notes.
+  research/         Prior-art assessment and research framing.
+
+examples/           Demo repositories and screenshot walkthroughs.
+```
+
+Key implementation pieces:
+
+- [apps/web](apps/web/README.md): web workspace, hierarchy, canvas, inspector, settings, and agent panels.
+- [apps/local-server](apps/local-server/README.md): local API boundary, workspace persistence, routes, scanning, and graph updates.
+- [packages/graph-model](packages/graph-model/README.md): shared graph DTOs, settings schemas, run schemas, and extension manifests.
+- [packages/parser](packages/parser/README.md): repository parser that emits stable graph snapshot entities.
+- [packages/agent-runtime](packages/agent-runtime/README.md): provider orchestration and proposal-only agent workflow.
+- [docs/architecture](docs/architecture/README.md): design notes for prompts, scanning, and function workflow graphs.
+- [docs/research](docs/research/README.md): research positioning and prior-art assessment.
+
+## Current Scope and Limitations
+
+- The current app is a local prototype intended for research demos and iteration.
+- GraphCode is not yet a released cloud product, browser extension, or full replacement for a text IDE.
+- Voice and VR operation are part of the long-term research direction and are not implemented in this checkout.
+- The launch name is still open. The research notes identify other public uses of "GraphCode" or "Graph-Code," so naming should be revisited before a public launch.
+- Generated workspace state is intentionally ignored by git. Examples and the screenshot directory are checked in, but `.graphcode/` databases are local runtime artifacts.
+
+## Roadmap
+
+1. Improve the graph workspace for large repositories with better filtering, grouping, and progressive disclosure.
+2. Strengthen source-linked scanning and incremental graph refresh.
+3. Make the proposal and review loop easier to evaluate with repeatable demo tasks.
+4. Add formal user-study workflows for understanding, trust, review quality, and time-to-localize-change.
+5. Explore voice control and VR presentation once the desktop graph workflow is stable.
 
 ## OS Notes
 
-Use the same pnpm commands on Linux, macOS, and Windows. The main differences are shell syntax, local paths, and optional native build tools.
+The same pnpm commands are intended to work on Linux, macOS, and Windows. The main differences are shell syntax, local paths, and optional native build tools for `better-sqlite3`.
 
 - Linux paths look like `/home/alex/project`.
 - macOS paths look like `/Users/alex/project`.
@@ -87,13 +223,13 @@ Use the same pnpm commands on Linux, macOS, and Windows. The main differences ar
 - Workspace source paths inside GraphCode are stored with forward slashes, even on Windows.
 - If you use WSL, run Node, pnpm, Git, and GraphCode inside the same WSL distro and open WSL paths such as `/home/alex/project`, not `C:\...` paths.
 
-To change ports on Linux or macOS:
+Change ports on Linux or macOS:
 
 ```bash
 GRAPHCODE_SERVER_PORT=4010 GRAPHCODE_WEB_PORT=5174 pnpm dev
 ```
 
-To change ports in Windows PowerShell:
+Change ports in Windows PowerShell:
 
 ```powershell
 $env:GRAPHCODE_SERVER_PORT = "4010"
@@ -112,136 +248,15 @@ docker build -t graphcode .
 docker run --rm -p 3010:3010 -p 5173:5173 graphcode
 ```
 
-The repository also includes a GitHub Actions workflow at `.github/workflows/ci.yml` that installs with the pinned pnpm version and runs typecheck, tests, and build on Ubuntu, macOS, and Windows. The Docker image build is verified on Ubuntu.
+## Verification
 
-## Status
-
-This repository now contains a narrow local prototype: a Fastify local server, a React/React Flow web workspace, shared graph-model DTOs, and a deterministic self-repo seed. The generated workspace lives in `.graphcode/graphcode.sqlite` and is intentionally ignored by git.
-
-The current development fixture is this repository itself. Follow the [installation steps](#installation) to install dependencies, create the curated self-repo graph once, and run the local workspace. Normal server startup, browser refresh, and reopening an existing `.graphcode` workspace preserve existing graph data and saved placements. Use the confirmed toolbar reset action or `pnpm seed` only when you want to destructively rebuild the fixture from source.
-
-The first development milestone is a narrow prototype that can:
-
-1. Parse a target repository into stable software entities.
-2. Build a graph of files, modules, classes, functions, dependencies, and impact relationships.
-3. Render that graph as an interactive workspace.
-4. Bind graph nodes back to exact source locations.
-5. Let a user request scoped AI edit proposals from a selected node or subgraph.
-6. Show generated diffs, tests, and blast-radius hints for human review before acceptance.
-
-## Product Thesis
-
-Modern repository-scale engineering sits between two uncomfortable extremes: manual file-by-file navigation and opaque autonomous agents. GraphCode aims for a middle ground where the graph is not just a diagram, but the working surface for understanding, planning, editing, and reviewing a system change.
-
-The core design principles are:
-
-- The graph must represent real code entities, not decorative boxes.
-- Every node should have stable identity, source links, summaries, dependencies, review state, and change history.
-- AI edits should be scoped, inspectable, and reviewable.
-- Global reasoning should help explain architecture and ripple effects, not silently rewrite the whole repository.
-- Dense graphs should use filtering, grouping, and task-specific views instead of trying to show everything at once.
-
-## Core Workflow
-
-1. **Index the repository:** a local server scans a target repo and extracts code entities with the deterministic parser and scanner pipeline.
-2. **Build the graph:** extracted entities become graph nodes and relationships become graph edges.
-3. **Explore the architecture:** the web app renders architecture and symbol views with search, filters, expansion, and collapse.
-4. **Inspect a node:** selecting a node opens its summary, exact source range, dependencies, tests, prompts, and review state.
-5. **Request a local proposal:** the user asks a local agent to modify only the selected node or subgraph.
-6. **Review the result:** GraphCode presents the proposed diff, test output, dependency impact, and accept/reject controls.
-7. **Refresh the graph:** accepted changes trigger graph refresh and architecture summary updates.
-
-## Initial MVP Scope
-
-The first prototype keeps TypeScript and JavaScript as the deepest parser path, including call and control-flow extraction through the TypeScript compiler API. It also includes structural extraction for common repository languages such as Python, Java, Go, Rust, C, C++, C#, Kotlin, Swift, Ruby, PHP, SQL, and shell scripts so mixed-language repositories can still produce file, import, class/object, function/method, and call graph nodes.
-
-The initial graph model should include:
-
-- **Nodes:** repository, package or module, file, class, function, dependency, test, and review proposal.
-- **Edges:** contains, imports, calls, owns, tests, impacts, proposes-change-to, and depends-on.
-- **Local agent actions:** node-scoped or subgraph-scoped edit proposals that return review cards and diffs.
-- **Global agent actions:** architecture summaries, ripple-effect detection, suspicious dependency changes, and suggested follow-up work.
-
-No public code API is defined yet. The first implementation should keep schemas internal until the parser, graph model, and UI contracts settle.
-
-## Planned Architecture
-
-```text
-apps/
-  web/              Interactive graph workspace.
-  local-server/     Local indexing, graph refresh, file access, tests, and diff APIs.
-
-packages/
-  graph-model/      Shared graph concepts, snapshots, schemas, and validation.
-  parser/           Deterministic TS/JS extraction plus common-language structural parsing.
-  agent-runtime/    Local and global agent orchestration.
-
-docs/
-  architecture/     Technical design notes.
-  research/         Prior-art, positioning, and research material.
-
-examples/           Demo repositories and scripted walkthroughs.
-scripts/            Developer automation.
-tests/fixtures/     Tiny repositories for parser and indexer tests.
+```bash
+pnpm typecheck
+pnpm test
+pnpm build
 ```
 
-## Directory Guide
-
-- [apps/web](apps/web/README.md): React Flow graph workspace with ELK-based layout, search, filtering, node inspectors, and review controls.
-- [apps/local-server](apps/local-server/README.md): local service boundary for repository indexing, graph snapshots, source access, test execution, and diff proposal APIs.
-- [packages/graph-model](packages/graph-model/README.md): stable node and edge concepts shared by the parser, server, UI, and agent runtime.
-- [packages/parser](packages/parser/README.md): deterministic code extraction, entity identity, and common-language structural graph coverage.
-- [packages/agent-runtime](packages/agent-runtime/README.md): local and global agent workflows that produce transparent proposals instead of silent edits.
-- [docs/architecture](docs/architecture/README.md): system design notes and interface decisions.
-- [docs/research](docs/research/README.md): research assessment, prior art, and prototype rationale.
-- [examples](examples/README.md): small demo repositories and scripted workflows.
-- [scripts](scripts/README.md): future developer automation.
-- [tests/fixtures](tests/fixtures/README.md): tiny codebases for parser, graph, and indexing tests.
-
-## Roadmap
-
-### Milestone 1: Repository Graph Foundation
-
-- Define the internal graph snapshot format.
-- Implement deep parser extraction for TS/JS plus structural extraction for common repository languages.
-- Preserve stable entity identity across edits.
-- Add tiny fixture repositories and parser/indexer tests.
-
-### Milestone 2: Interactive Graph Workspace
-
-- Build the React Flow workspace.
-- Add ELK layout for architecture and symbol views.
-- Support search, filters, grouping, expansion, and collapse.
-- Bind nodes to source file ranges and dependency details.
-
-### Milestone 3: Local Agent Proposal Loop
-
-- Scope prompts to selected nodes or subgraphs.
-- Generate proposed diffs without silent mutation.
-- Run available tests or linters through the local server.
-- Present a review card with diff, test output, and impact hints.
-
-### Milestone 4: Global Architecture Reasoning
-
-- Summarize architecture at repository, module, and subsystem levels.
-- Detect cycles, suspicious dependency changes, and ripple effects.
-- Suggest follow-up local-agent tasks.
-- Refresh graph summaries after accepted changes.
-
-### Milestone 5: Demo Workflows
-
-- Trace a cross-file dependency chain.
-- Make a node-scoped feature change.
-- Detect a system-level ripple effect.
-- Record a short demo showing the review-first workflow.
-
-## Development Constraints
-
-- Start with a narrow, polished loop before expanding language or framework coverage.
-- Keep generated and runtime artifacts out of version control.
-- Prefer local, inspectable state before introducing hosted infrastructure.
-- Treat AI output as a proposal that must be reviewed by the user.
-- Avoid graph-everything views as the default; use task-specific views and progressive disclosure.
+The repository includes a GitHub Actions workflow that runs typecheck, tests, and build on Ubuntu, macOS, and Windows. The Docker image build is also verified on Ubuntu.
 
 ## License
 

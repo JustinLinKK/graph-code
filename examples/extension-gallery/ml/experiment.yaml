@@ -1,0 +1,17 @@
+experiment:
+  name: demo-sensor-classifier
+  owner: ml-platform
+
+dataset:
+  path: data/sensor-demo.csv
+  split: 0.8
+
+training:
+  epochs: 12
+  learning_rate: 0.03
+
+outputs:
+  checkpoint_dir: artifacts/checkpoints
+  metrics:
+    - accuracy
+    - loss

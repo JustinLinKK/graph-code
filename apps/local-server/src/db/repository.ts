@@ -483,6 +483,11 @@ type LayoutRow = {
   ui_height: number;
 };
 
+type ProjectLayoutRow = LayoutRow & {
+  project_id: string;
+  scope_node_id: string;
+};
+
 export type NewGraphNode = {
   id: string;
   projectId: string;
@@ -3010,6 +3015,7 @@ export class GraphRepository {
   replaceScannedCodeGraph(projectId: string, snapshot: CodeGraphSnapshot): CodeGraphRefreshResult {
     const project = this.getProject(projectId);
     const save = this.db.transaction(() => {
+      const preservedLayouts = this.snapshotProjectLayouts(projectId);
       const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
       this.deleteGeneratedCodeGraph(projectId);
       const frameworkId = this.findOrCreateScanFramework(projectId);
@@ -3114,6 +3120,7 @@ export class GraphRepository {
           agentStatus: "implemented"
         });
       }
+      this.restoreExistingProjectLayouts(projectId, preservedLayouts);
 
       this.db
         .prepare("INSERT OR REPLACE INTO graph_revisions (id, project_id, revision, note) VALUES (?, ?, ?, ?)")
@@ -3144,6 +3151,7 @@ export class GraphRepository {
   applyScanPipelineResult(projectId: string, result: ScanPipelineResult, runId?: string | null): CodeGraphRefreshResult {
     this.getProject(projectId);
     const save = this.db.transaction(() => {
+      const preservedLayouts = this.snapshotProjectLayouts(projectId);
       const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
       if (result.initial) {
         this.deleteGeneratedCodeGraph(projectId);
@@ -3202,6 +3210,7 @@ export class GraphRepository {
       for (const file of result.inventory) {
         stateInsert.run(projectId, file.path, file.contentHash, runId ?? null);
       }
+      this.restoreExistingProjectLayouts(projectId, preservedLayouts);
 
       this.bumpGraphEntities(
         projectId,
@@ -3218,6 +3227,57 @@ export class GraphRepository {
   private deleteGeneratedCodeGraph(projectId: string): void {
     this.db.prepare("DELETE FROM graph_nodes WHERE project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')").run(projectId);
     this.db.prepare("DELETE FROM graph_revisions WHERE project_id = ? AND id LIKE 'code-graph-revision-%'").run(projectId);
+  }
+
+  private snapshotProjectLayouts(projectId: string): ProjectLayoutRow[] {
+    return this.db
+      .prepare(
+        `
+        SELECT project_id, scope_node_id, node_id, ui_x, ui_y, ui_width, ui_height
+        FROM graph_node_layouts
+        WHERE project_id = ?
+      `
+      )
+      .all(projectId) as ProjectLayoutRow[];
+  }
+
+  private restoreExistingProjectLayouts(projectId: string, layouts: ProjectLayoutRow[]): void {
+    if (layouts.length === 0) {
+      return;
+    }
+
+    const nodeExists = this.db.prepare("SELECT 1 FROM graph_nodes WHERE project_id = ? AND id = ?");
+    const restore = this.db.prepare(
+      `
+      INSERT INTO graph_node_layouts (project_id, scope_node_id, node_id, ui_x, ui_y, ui_width, ui_height, updated_at)
+      VALUES (@projectId, @scopeNodeId, @nodeId, @uiX, @uiY, @uiWidth, @uiHeight, datetime('now'))
+      ON CONFLICT(project_id, scope_node_id, node_id)
+      DO UPDATE SET
+        ui_x = excluded.ui_x,
+        ui_y = excluded.ui_y,
+        ui_width = excluded.ui_width,
+        ui_height = excluded.ui_height,
+        updated_at = datetime('now')
+    `
+    );
+
+    for (const layout of layouts) {
+      if (layout.project_id !== projectId) {
+        continue;
+      }
+      if (!nodeExists.get(projectId, layout.scope_node_id) || !nodeExists.get(projectId, layout.node_id)) {
+        continue;
+      }
+      restore.run({
+        projectId,
+        scopeNodeId: layout.scope_node_id,
+        nodeId: layout.node_id,
+        uiX: layout.ui_x,
+        uiY: layout.ui_y,
+        uiWidth: layout.ui_width,
+        uiHeight: layout.ui_height
+      });
+    }
   }
 
   private deleteGeneratedCodeGraphForFiles(projectId: string, filePaths: string[]): void {
@@ -3863,8 +3923,15 @@ export class GraphRepository {
     const scopeNode = this.resolveScopeNode(project, allNodes, input.rootNodeId ?? null);
     let canvas = this.buildCanvasGraph(project, allNodes, scopeNode?.id ?? null, input.includeAttachments ?? true, true);
 
-    if (scopeNode && canvas.nodes.length > 0 && this.countSavedLayouts(project.id, scopeNode.id, canvas.nodes.map((node) => node.id)) === 0) {
-      canvas = await this.autoLayoutScope({ projectId: project.id, scopeNodeId: scopeNode.id, includeAttachments: input.includeAttachments ?? true });
+    if (scopeNode && canvas.nodes.length > 0) {
+      const nodeIds = canvas.nodes.map((node) => node.id);
+      const savedLayouts = this.getSavedLayouts(project.id, scopeNode.id, nodeIds);
+      if (savedLayouts.size === 0) {
+        canvas = await this.autoLayoutScope({ projectId: project.id, scopeNodeId: scopeNode.id, includeAttachments: input.includeAttachments ?? true });
+      } else if (savedLayouts.size < nodeIds.length) {
+        this.backfillMissingScopeLayouts(project.id, scopeNode.id, canvas.nodes, savedLayouts);
+        canvas = this.buildCanvasGraph(project, this.listNodes(project.id), scopeNode.id, input.includeAttachments ?? true, true);
+      }
     }
 
     return canvas;
@@ -5780,6 +5847,36 @@ export class GraphRepository {
     });
   }
 
+  private backfillMissingScopeLayouts(projectId: string, scopeNodeId: string, nodes: GraphNode[], savedLayouts: Map<string, LayoutRow>): void {
+    const missingNodes = nodes.filter((node) => !savedLayouts.has(node.id));
+    if (missingNodes.length === 0) {
+      return;
+    }
+
+    const savedNodes = nodes.filter((node) => savedLayouts.has(node.id));
+    const maxSavedRight = savedNodes.reduce((maxRight, node) => Math.max(maxRight, node.position.x + node.size.width), 0);
+    const minSavedTop = savedNodes.reduce((minTop, node) => Math.min(minTop, node.position.y), Number.POSITIVE_INFINITY);
+    const startX = maxSavedRight + 120;
+    const startY = Number.isFinite(minSavedTop) ? minSavedTop : 80;
+    const columnWidth = missingNodes.reduce((maxWidth, node) => Math.max(maxWidth, node.size.width + 80), 320);
+    const rowHeight = missingNodes.reduce((maxHeight, node) => Math.max(maxHeight, node.size.height + 70), 180);
+    const rowsPerColumn = Math.max(1, Math.ceil(Math.sqrt(missingNodes.length)));
+
+    const save = this.db.transaction(() => {
+      for (const [index, node] of missingNodes.entries()) {
+        this.upsertNodeLayout(node.id, {
+          scopeNodeId,
+          position: {
+            x: startX + Math.floor(index / rowsPerColumn) * columnWidth,
+            y: startY + (index % rowsPerColumn) * rowHeight
+          },
+          size: node.size
+        });
+      }
+    });
+    save();
+  }
+
   private getSavedLayouts(projectId: string, scopeNodeId: string, nodeIds: string[]): Map<string, LayoutRow> {
     if (nodeIds.length === 0) {
       return new Map();
@@ -5798,26 +5895,6 @@ export class GraphRepository {
       )
       .all(projectId, scopeNodeId, ...nodeIds) as LayoutRow[];
     return new Map(rows.map((row) => [row.node_id, row]));
-  }
-
-  private countSavedLayouts(projectId: string, scopeNodeId: string, nodeIds: string[]): number {
-    if (nodeIds.length === 0) {
-      return 0;
-    }
-
-    const placeholders = nodeIds.map(() => "?").join(", ");
-    const row = this.db
-      .prepare(
-        `
-        SELECT COUNT(*) AS count
-        FROM graph_node_layouts
-        WHERE project_id = ?
-          AND scope_node_id = ?
-          AND node_id IN (${placeholders})
-      `
-      )
-      .get(projectId, scopeNodeId, ...nodeIds) as { count: number } | undefined;
-    return row?.count ?? 0;
   }
 
   private upsertNodeLayout(nodeId: string, patch: LayoutPatch): void {

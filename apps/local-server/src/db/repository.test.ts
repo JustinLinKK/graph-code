@@ -1093,6 +1093,63 @@ describe("SQLite graph repository", () => {
     expect(innerCanvas.edges.map((edge) => edge.label)).toEqual(expect.arrayContaining(["if value > 0", "else"]));
   });
 
+  it("preserves stable generated layouts across code graph refreshes and drops disappeared layout rows", async () => {
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-layout-refresh-"));
+    fs.mkdirSync(path.join(rootPath, "src"), { recursive: true });
+    const sourcePath = path.join(rootPath, "src", "layout.ts");
+    fs.writeFileSync(
+      sourcePath,
+      [
+        "export function keep(value: number): number {",
+        "  return value + 1;",
+        "}",
+        "",
+        "export function drop(value: number): number {",
+        "  return value - 1;",
+        "}"
+      ].join("\n")
+    );
+
+    const project = repo.seedSelfGraph(rootPath);
+    repo.replaceScannedCodeGraph(project.id, scanRepositoryCodeGraph(rootPath));
+    const hierarchy = flattenHierarchy(repo.getHierarchy(project.id));
+    const layoutFile = hierarchy.find((node) => node.name === "layout.ts");
+    const keepNode = hierarchy.find((node) => node.name === "keep");
+    const dropNode = hierarchy.find((node) => node.name === "drop");
+    expect(layoutFile).toBeDefined();
+    expect(keepNode).toBeDefined();
+    expect(dropNode).toBeDefined();
+
+    repo.updateNodeLayout(keepNode!.id, {
+      scopeNodeId: layoutFile!.id,
+      position: { x: 456, y: 321 },
+      size: { width: 280, height: 150 }
+    });
+    repo.updateNodeLayout(dropNode!.id, {
+      scopeNodeId: layoutFile!.id,
+      position: { x: 840, y: 321 },
+      size: { width: 280, height: 150 }
+    });
+    fs.writeFileSync(
+      sourcePath,
+      ["export function keep(value: number): number {", "  return value + 1;", "}"].join("\n")
+    );
+
+    repo.replaceScannedCodeGraph(project.id, scanRepositoryCodeGraph(rootPath));
+    const refreshedCanvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: layoutFile!.id,
+      includeAttachments: true
+    });
+    const refreshedKeep = refreshedCanvas.nodes.find((node) => node.id === keepNode!.id);
+    const staleDropLayouts = db.prepare("SELECT COUNT(*) AS count FROM graph_node_layouts WHERE node_id = ?").get(dropNode!.id) as { count: number };
+
+    expect(refreshedKeep?.position).toEqual({ x: 456, y: 321 });
+    expect(refreshedKeep?.size).toEqual({ width: 280, height: 150 });
+    expect(refreshedCanvas.nodes.map((node) => node.id)).not.toContain(dropNode!.id);
+    expect(staleDropLayouts.count).toBe(0);
+  });
+
   it("keeps large file canvases bounded while function canvases show workflow", async () => {
     const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-large-file-"));
     fs.mkdirSync(path.join(rootPath, "src"), { recursive: true });
@@ -1323,6 +1380,73 @@ describe("SQLite graph repository", () => {
 
     expect(webNode?.position).toEqual({ x: 777, y: 222 });
     expect(webNode?.size).toEqual({ width: 310, height: 160 });
+  });
+
+  it("persists layout overrides after reopening the SQLite database", async () => {
+    const dbPath = path.join(os.tmpdir(), `graphcode-reopen-${crypto.randomUUID()}.sqlite`);
+    let firstDb: GraphDatabase | null = null;
+    let reopenedDb: GraphDatabase | null = null;
+    try {
+      firstDb = openDatabase(dbPath);
+      migrate(firstDb);
+      const firstRepo = new GraphRepository(firstDb);
+      const project = firstRepo.seedSelfGraph(selfRootPath);
+      firstRepo.updateNodeLayout("module-web", {
+        scopeNodeId: "framework-graphcode-self",
+        position: { x: 901, y: 404 },
+        size: { width: 300, height: 155 }
+      });
+      firstDb.close();
+      firstDb = null;
+
+      reopenedDb = openDatabase(dbPath);
+      migrate(reopenedDb);
+      const reopenedRepo = new GraphRepository(reopenedDb);
+      const canvas = await reopenedRepo.getCanvasGraph({
+        projectId: project.id,
+        rootNodeId: "framework-graphcode-self",
+        includeAttachments: true
+      });
+      const webNode = canvas.nodes.find((node) => node.id === "module-web");
+
+      expect(webNode?.position).toEqual({ x: 901, y: 404 });
+      expect(webNode?.size).toEqual({ width: 300, height: 155 });
+    } finally {
+      firstDb?.close();
+      reopenedDb?.close();
+      fs.rmSync(dbPath, { force: true });
+    }
+  });
+
+  it("backfills missing per-scope layout rows without moving saved nodes", async () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const beforeRows = db
+      .prepare("SELECT COUNT(*) AS count FROM graph_node_layouts WHERE project_id = ? AND scope_node_id = ?")
+      .get(project.id, "framework-graphcode-self") as { count: number };
+
+    const canvas = await repo.getCanvasGraph({
+      projectId: project.id,
+      rootNodeId: "framework-graphcode-self",
+      includeAttachments: true
+    });
+    const afterRows = db
+      .prepare("SELECT COUNT(*) AS count FROM graph_node_layouts WHERE project_id = ? AND scope_node_id = ?")
+      .get(project.id, "framework-graphcode-self") as { count: number };
+    const devToolingLayout = db
+      .prepare("SELECT ui_x, ui_y FROM graph_node_layouts WHERE project_id = ? AND scope_node_id = ? AND node_id = ?")
+      .get(project.id, "framework-graphcode-self", "module-dev-tooling") as { ui_x: number; ui_y: number } | undefined;
+    const webNode = canvas.nodes.find((node) => node.id === "module-web");
+    const localServerNode = canvas.nodes.find((node) => node.id === "module-local-server");
+    const modelNode = canvas.nodes.find((node) => node.id === "module-model");
+
+    expect(beforeRows.count).toBeGreaterThan(0);
+    expect(afterRows.count).toBe(canvas.nodes.length);
+    expect(afterRows.count).toBeGreaterThan(beforeRows.count);
+    expect(webNode?.position).toEqual({ x: 40, y: 60 });
+    expect(localServerNode?.position).toEqual({ x: 360, y: 60 });
+    expect(modelNode?.position).toEqual({ x: 680, y: 60 });
+    expect(devToolingLayout?.ui_x).toBeGreaterThan(940);
+    expect(new Set(canvas.nodes.map((node) => `${node.position.x}:${node.position.y}`)).size).toBe(canvas.nodes.length);
   });
 
   it("auto-layout persists per-scope layout rows", async () => {
