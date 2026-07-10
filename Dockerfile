@@ -7,6 +7,10 @@ ENV PATH=$PNPM_HOME:$PATH
 ENV GRAPHCODE_SERVER_HOST=0.0.0.0
 ENV GRAPHCODE_WEB_HOST=0.0.0.0
 
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
+
 RUN corepack enable && corepack prepare pnpm@10.33.0 --activate
 
 COPY . .
