@@ -129,6 +129,7 @@ export default function App() {
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const undoStackRef = useRef<UndoEntry[]>([]);
   const undoingRef = useRef(false);
+  const scanningRunStatusRef = useRef<string | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -553,7 +554,30 @@ export default function App() {
   );
 
   const handleAutoLayout = useCallback(async () => {
-    if (!selectedProjectId || !canvas?.scopeNodeId) {
+    if (!selectedProjectId) {
+      return;
+    }
+    // When canvas scope is missing (e.g. background scan has not finished),
+    // try reloading the project first so fresh scan data is available.
+    if (!canvas?.scopeNodeId) {
+      setLoading(true);
+      setError(null);
+      try {
+        const refreshed = await loadProject(selectedProjectId);
+        if (!refreshed?.scopeNodeId) {
+          setError("Nothing to auto-layout yet. Run a Scan first to populate the graph, or create nodes manually with the Add button.");
+          return;
+        }
+        const laidOut = await autoLayoutCanvas(selectedProjectId, {
+          scopeNodeId: refreshed.scopeNodeId,
+          includeAttachments: true
+        });
+        setCanvas(laidOut);
+      } catch (loadError) {
+        setError(loadError instanceof Error ? loadError.message : "Failed to auto-layout canvas.");
+      } finally {
+        setLoading(false);
+      }
       return;
     }
     setLoading(true);
@@ -570,7 +594,7 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [canvas?.scopeNodeId, selectedProjectId]);
+  }, [canvas?.scopeNodeId, selectedProjectId, loadProject]);
 
   const handlePersistLayout = useCallback(
     (nodeId: string, position: { x: number; y: number }, size: { width: number; height: number }) => {
@@ -1184,6 +1208,26 @@ export default function App() {
     const [nextRuns, nextGitStatus] = await Promise.all([listAgentRuns(selectedProjectId), getGitStatus(selectedProjectId).catch(() => ({ status: "" }))]);
     setAgentRuns(nextRuns);
     setGitStatus(nextGitStatus.status);
+
+    // Auto-refresh canvas when a background scanning agent completes,
+    // so newly scanned nodes appear without a manual refresh.
+    const scanningRun = nextRuns.find((run) => run.agentKind === "scanning");
+    const previousStatus = scanningRunStatusRef.current;
+    scanningRunStatusRef.current = scanningRun?.status ?? null;
+    if (
+      previousStatus === "running" &&
+      scanningRun?.status === "succeeded" &&
+      selectedProjectId
+    ) {
+      try {
+        const nextCanvas = await getCanvasGraph(selectedProjectId, {
+          includeAttachments: true
+        });
+        setCanvas(nextCanvas);
+      } catch {
+        // Silently skip — the user can still manually refresh.
+      }
+    }
   }, [selectedProjectId]);
 
   const handleSaveSettings = useCallback(
