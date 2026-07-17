@@ -85,6 +85,22 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
     service: "graphcode-local-server"
   }));
 
+  app.get("/api/codex/status", async () => runtime.getCodexStatus());
+
+  app.get("/api/codex/models", async () => runtime.listCodexModels());
+
+  app.post("/api/codex/install", async () => runtime.installCodexCli());
+
+  app.post("/api/codex/auth/start", async () => runtime.startCodexAuth());
+
+  app.get("/api/claude/status", async () => runtime.getClaudeStatus());
+
+  app.get("/api/claude/models", async () => runtime.listClaudeModels());
+
+  app.post("/api/claude/install", async () => runtime.installClaudeCli());
+
+  app.post("/api/claude/auth/start", async () => runtime.startClaudeAuth());
+
   app.get("/api/projects", async () => runtime.repo().listProjects());
 
   app.post("/api/workspaces/open", async (request, reply) => {

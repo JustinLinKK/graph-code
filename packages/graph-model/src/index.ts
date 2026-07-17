@@ -101,6 +101,12 @@ export const GIT_CHANGE_STATUSES = ["new", "modified", "deleted"] as const;
 export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const;
 export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "conflicted"] as const;
 export const AGENT_PROVIDERS = ["fake", "codex", "claudecode", "openai", "gemini", "openrouter"] as const;
+export const CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export const CODEX_SPEED_TIERS = ["standard", "fast"] as const;
+export const CODEX_PERMISSION_MODES = ["ask_for_permission", "approve_for_me", "full_access"] as const;
+export const CODEX_SYSTEM_PROMPT_MODES = ["default", "custom"] as const;
+export const CLAUDE_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const CLAUDE_SYSTEM_PROMPT_MODES = ["default", "custom"] as const;
 export const CODING_AGENT_MODES = ["small", "medium", "large"] as const;
 export const REVIEW_AGENT_MODES = ["small", "medium", "large"] as const;
 export const SCANNING_AGENT_MODES = ["local", "medium", "global"] as const;
@@ -130,6 +136,12 @@ export const gitChangeStatusSchema = z.enum(GIT_CHANGE_STATUSES);
 export const agentKindSchema = z.enum(AGENT_KINDS);
 export const agentRunStatusSchema = z.enum(AGENT_RUN_STATUSES);
 export const agentProviderSchema = z.enum(AGENT_PROVIDERS);
+export const codexReasoningEffortSchema = z.enum(CODEX_REASONING_EFFORTS);
+export const codexSpeedTierSchema = z.enum(CODEX_SPEED_TIERS);
+export const codexPermissionModeSchema = z.enum(CODEX_PERMISSION_MODES);
+export const codexSystemPromptModeSchema = z.enum(CODEX_SYSTEM_PROMPT_MODES);
+export const claudeReasoningEffortSchema = z.enum(CLAUDE_REASONING_EFFORTS);
+export const claudeSystemPromptModeSchema = z.enum(CLAUDE_SYSTEM_PROMPT_MODES);
 export const codingAgentModeSchema = z.enum(CODING_AGENT_MODES);
 export const reviewAgentModeSchema = z.enum(REVIEW_AGENT_MODES);
 export const scanningAgentModeSchema = z.enum(SCANNING_AGENT_MODES);
@@ -161,6 +173,12 @@ export type GitChangeStatus = z.infer<typeof gitChangeStatusSchema>;
 export type AgentKind = z.infer<typeof agentKindSchema>;
 export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
 export type AgentProvider = z.infer<typeof agentProviderSchema>;
+export type CodexReasoningEffort = z.infer<typeof codexReasoningEffortSchema>;
+export type CodexSpeedTier = z.infer<typeof codexSpeedTierSchema>;
+export type CodexPermissionMode = z.infer<typeof codexPermissionModeSchema>;
+export type CodexSystemPromptMode = z.infer<typeof codexSystemPromptModeSchema>;
+export type ClaudeReasoningEffort = z.infer<typeof claudeReasoningEffortSchema>;
+export type ClaudeSystemPromptMode = z.infer<typeof claudeSystemPromptModeSchema>;
 export type CodingAgentMode = z.infer<typeof codingAgentModeSchema>;
 export type ReviewAgentMode = z.infer<typeof reviewAgentModeSchema>;
 export type ScanningAgentMode = z.infer<typeof scanningAgentModeSchema>;
@@ -543,6 +561,12 @@ export const promptSourceSchema = z.object({
 const agentConfigBaseSchema = z.object({
   provider: agentProviderSchema,
   model: z.string(),
+  cliCommand: z.string().optional().default(""),
+  reasoningEffort: codexReasoningEffortSchema.optional().default("medium"),
+  speedTier: codexSpeedTierSchema.optional().default("standard"),
+  permissionMode: codexPermissionModeSchema.optional().default("ask_for_permission"),
+  codexSystemPromptMode: codexSystemPromptModeSchema.optional().default("custom"),
+  claudeSystemPromptMode: claudeSystemPromptModeSchema.optional().default("custom"),
   parallelLimit: z.number().int().min(1).max(64),
   apiKeySource: secretSourceSchema,
   systemPromptSource: promptSourceSchema
@@ -665,6 +689,86 @@ export const settingsValidationResultSchema = z.object({
   fieldErrors: z.record(z.string())
 });
 
+export const codexCliStatusSchema = z.object({
+  installed: z.boolean(),
+  command: z.string(),
+  resolvedPath: z.string().nullable(),
+  version: z.string().nullable(),
+  authenticated: z.boolean(),
+  authStatus: z.string().nullable(),
+  modelsAvailable: z.boolean(),
+  error: z.string().nullable(),
+  checkedAt: z.string()
+});
+
+export const codexInstallResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: codexCliStatusSchema.optional()
+});
+
+export const codexAuthStartResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: codexCliStatusSchema.optional()
+});
+
+export const codexReasoningLevelSchema = z.object({
+  effort: codexReasoningEffortSchema,
+  description: z.string().default("")
+});
+
+export const codexModelInfoSchema = z.object({
+  slug: z.string(),
+  displayName: z.string(),
+  description: z.string().default(""),
+  defaultReasoningLevel: codexReasoningEffortSchema.default("medium"),
+  supportedReasoningLevels: z.array(codexReasoningLevelSchema).default([]),
+  speedTiers: z.array(codexSpeedTierSchema).default(["standard"])
+});
+
+export const claudeCliStatusSchema = z.object({
+  installed: z.boolean(),
+  command: z.string(),
+  resolvedPath: z.string().nullable(),
+  version: z.string().nullable(),
+  authenticated: z.boolean(),
+  authStatus: z.string().nullable(),
+  modelsAvailable: z.boolean(),
+  error: z.string().nullable(),
+  checkedAt: z.string()
+});
+
+export const claudeInstallResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: claudeCliStatusSchema.optional()
+});
+
+export const claudeAuthStartResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: claudeCliStatusSchema.optional()
+});
+
+export const claudeReasoningLevelSchema = z.object({
+  effort: claudeReasoningEffortSchema,
+  description: z.string().default("")
+});
+
+export const claudeModelInfoSchema = z.object({
+  slug: z.string(),
+  displayName: z.string(),
+  description: z.string().default(""),
+  defaultReasoningLevel: claudeReasoningEffortSchema.default("medium"),
+  supportedReasoningLevels: z.array(claudeReasoningLevelSchema).default([]),
+  speedTiers: z.array(codexSpeedTierSchema).default(["standard"])
+});
+
 export const planningChatRequestSchema = z.object({
   projectId: z.string().min(1),
   prompt: z.string().min(1),
@@ -757,7 +861,8 @@ export const reviewAgentRequestSchema = z.object({
 export const workspaceInitializationSchema = z.object({
   projectName: z.string().trim().min(1),
   projectDescription: z.string().trim().min(1),
-  scanningInstructions: z.string().trim().min(1)
+  scanningInstructions: z.string().trim().min(1),
+  skipCodexDefaultSystemPrompt: z.boolean().optional().default(false)
 });
 
 export const blankWorkspaceInitializationSchema = z.object({
@@ -770,6 +875,7 @@ export const scanningAgentRequestSchema = z.object({
   rootPath: z.string().optional(),
   projectDescription: z.string().optional(),
   scanningInstructions: z.string().optional(),
+  skipCodexDefaultSystemPrompt: z.boolean().optional().default(false),
   enabledExtensionPackageIds: z.array(extensionPackageIdSchema).optional().default([]),
   background: z.boolean().optional().default(false)
 });
@@ -916,8 +1022,18 @@ export type GithubIntegrationSettingsMutation = z.infer<typeof githubIntegration
 export type GithubIntegrationSettings = z.infer<typeof githubIntegrationSettingsSchema>;
 export type AgentAutomationSettings = z.infer<typeof agentAutomationSettingsSchema>;
 export type WorkspaceSettings = z.infer<typeof workspaceSettingsSchema>;
-export type WorkspaceSettingsMutation = z.input<typeof workspaceSettingsMutationSchema>;
+export type WorkspaceSettingsMutation = z.infer<typeof workspaceSettingsMutationSchema>;
 export type SettingsValidationResult = z.infer<typeof settingsValidationResultSchema>;
+export type CodexCliStatus = z.infer<typeof codexCliStatusSchema>;
+export type CodexInstallResult = z.infer<typeof codexInstallResultSchema>;
+export type CodexAuthStartResult = z.infer<typeof codexAuthStartResultSchema>;
+export type CodexReasoningLevel = z.infer<typeof codexReasoningLevelSchema>;
+export type CodexModelInfo = z.infer<typeof codexModelInfoSchema>;
+export type ClaudeCliStatus = z.infer<typeof claudeCliStatusSchema>;
+export type ClaudeInstallResult = z.infer<typeof claudeInstallResultSchema>;
+export type ClaudeAuthStartResult = z.infer<typeof claudeAuthStartResultSchema>;
+export type ClaudeReasoningLevel = z.infer<typeof claudeReasoningLevelSchema>;
+export type ClaudeModelInfo = z.infer<typeof claudeModelInfoSchema>;
 export type PlanningChatRequest = z.input<typeof planningChatRequestSchema>;
 export type CodingAgentRequest = z.input<typeof codingAgentRequestSchema>;
 export type CodeProposalTestScript = z.infer<typeof codeProposalTestScriptSchema>;

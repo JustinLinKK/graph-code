@@ -174,6 +174,12 @@ const CODING_AGENT_SETTINGS_SQL = `
     coding_mode TEXT NOT NULL CHECK (coding_mode IN ('small', 'medium', 'large')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -191,6 +197,12 @@ const REVIEW_AGENT_SETTINGS_SQL = `
     review_mode TEXT NOT NULL CHECK (review_mode IN ('small', 'medium', 'large')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -208,6 +220,12 @@ const SCANNING_AGENT_SETTINGS_SQL = `
     scanning_mode TEXT NOT NULL CHECK (scanning_mode IN ('local', 'medium', 'global')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -225,6 +243,12 @@ const AGENT_SETTINGS_SQL = `
     agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -636,7 +660,14 @@ function ensureProviderSettingsTable(db: GraphDatabase, tableName: string, creat
     db.exec(createSql);
     return;
   }
-  if (!sql.includes("'codex'")) {
+  const hasCodexSettingsColumns =
+    tableHasColumn(db, tableName, "cli_command") &&
+    tableHasColumn(db, tableName, "reasoning_effort") &&
+    tableHasColumn(db, tableName, "speed_tier") &&
+    tableHasColumn(db, tableName, "permission_mode") &&
+    tableHasColumn(db, tableName, "codex_system_prompt_mode") &&
+    tableHasColumn(db, tableName, "claude_system_prompt_mode");
+  if (!sql.includes("'codex'") || !hasCodexSettingsColumns) {
     rebuildProviderSettingsTable(db, tableName, createSql);
   }
 }
@@ -1011,19 +1042,69 @@ function rebuildProviderSettingsTable(db: GraphDatabase, tableName: string, crea
   if (!keyColumn) {
     return;
   }
+  const hasCliCommand = tableHasColumn(db, tableName, "cli_command");
+  const hasReasoningEffort = tableHasColumn(db, tableName, "reasoning_effort");
+  const hasSpeedTier = tableHasColumn(db, tableName, "speed_tier");
+  const hasPermissionMode = tableHasColumn(db, tableName, "permission_mode");
+  const hasCodexSystemPromptMode = tableHasColumn(db, tableName, "codex_system_prompt_mode");
+  const hasClaudeSystemPromptMode = tableHasColumn(db, tableName, "claude_system_prompt_mode");
+  const codexLegacyCommandPredicate = [
+    "provider = 'codex' AND",
+    "(",
+    "trim(model) IN ('codex', 'codex.cmd', 'codex.exe')",
+    "OR trim(model) LIKE 'codex %'",
+    "OR trim(model) LIKE '%/codex'",
+    "OR trim(model) LIKE '%/codex.exe'",
+    "OR trim(model) LIKE '%\\\\codex'",
+    "OR trim(model) LIKE '%\\\\codex.exe'",
+    "OR trim(model) LIKE 'npx %codex%'",
+    "OR trim(model) LIKE 'pnpm %codex%'",
+    "OR trim(model) LIKE 'bunx %codex%'",
+    "OR trim(model) LIKE 'npm exec %codex%'",
+    "OR trim(model) LIKE 'node %codex%'",
+    ")"
+  ].join(" ");
+  const claudeLegacyCommandPredicate = [
+    "provider = 'claudecode' AND",
+    "(",
+    "trim(model) IN ('claude', 'claude.cmd', 'claude.exe')",
+    "OR trim(model) LIKE 'claude %'",
+    "OR trim(model) LIKE '%/claude'",
+    "OR trim(model) LIKE '%/claude.exe'",
+    "OR trim(model) LIKE '%\\\\claude'",
+    "OR trim(model) LIKE '%\\\\claude.exe'",
+    "OR trim(model) LIKE 'npx %claude%'",
+    "OR trim(model) LIKE 'pnpm %claude%'",
+    "OR trim(model) LIKE 'bunx %claude%'",
+    "OR trim(model) LIKE 'npm exec %claude%'",
+    "OR trim(model) LIKE 'node %claude%'",
+    ")"
+  ].join(" ");
+  const modelExpression = `CASE WHEN ${codexLegacyCommandPredicate} OR ${claudeLegacyCommandPredicate} THEN '' ELSE model END`;
+  const cliCommandExpression = hasCliCommand
+    ? `CASE WHEN trim(cli_command) <> '' THEN cli_command WHEN ${codexLegacyCommandPredicate} OR ${claudeLegacyCommandPredicate} THEN model ELSE '' END`
+    : `CASE WHEN ${codexLegacyCommandPredicate} OR ${claudeLegacyCommandPredicate} THEN model ELSE '' END`;
   const oldTableName = `${tableName}_old`;
   db.pragma("foreign_keys = OFF");
   db.exec(`
     ALTER TABLE ${tableName} RENAME TO ${oldTableName};
     ${createSql}
     INSERT INTO ${tableName} (
-      project_id, ${keyColumn}, provider, model, parallel_limit,
+      project_id, ${keyColumn}, provider, model, cli_command,
+      reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+      parallel_limit,
       api_key_source_type, api_key_source_value,
       system_prompt_source_type, system_prompt_source_value,
       created_at, updated_at
     )
     SELECT
-      project_id, ${keyColumn}, provider, model, parallel_limit,
+      project_id, ${keyColumn}, provider, ${modelExpression}, ${cliCommandExpression},
+      ${hasReasoningEffort ? "reasoning_effort" : "'medium'"},
+      ${hasSpeedTier ? "speed_tier" : "'standard'"},
+      ${hasPermissionMode ? "permission_mode" : "'ask_for_permission'"},
+      ${hasCodexSystemPromptMode ? "codex_system_prompt_mode" : "'custom'"},
+      ${hasClaudeSystemPromptMode ? "claude_system_prompt_mode" : "'custom'"},
+      parallel_limit,
       api_key_source_type, api_key_source_value,
       system_prompt_source_type, system_prompt_source_value,
       created_at, updated_at

@@ -135,6 +135,14 @@ export default function App() {
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId]
   );
+  const scanUsesCodexProvider = useMemo(
+    () =>
+      Boolean(
+        settings?.agents.some((agent) => agent.agentKind === "scanning" && agent.provider === "codex") ||
+          settings?.scanningAgents?.some((agent) => agent.provider === "codex")
+      ),
+    [settings]
+  );
   const selectedEdge = useMemo(() => canvas?.edges.find((edge) => edge.id === selectedEdgeId) ?? null, [canvas?.edges, selectedEdgeId]);
   const selectedBoundary = useMemo(
     () => canvas?.boundaries.find((boundary) => boundary.id === selectedBoundaryId) ?? null,
@@ -1573,6 +1581,7 @@ export default function App() {
         initializationStatus={workspaceInitializationStatus}
         onCreateBlank={(rootPath, initialization) => void handleOpenWorkspaceRequest(rootPath, true, initialization, "blank")}
         onCreateAndScan={(rootPath, initialization) => void handleOpenWorkspaceRequest(rootPath, true, initialization, "scan")}
+        showCodexScanPromptOption={scanUsesCodexProvider}
       />
       <BlockEditorDialog
         open={blockDialogOpen}

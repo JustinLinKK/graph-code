@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { execFile, type ExecFileOptions } from "node:child_process";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
@@ -9,10 +10,21 @@ import {
   type AgentProvider,
   type AgentRun,
   type CanvasGraph,
+  CLAUDE_REASONING_EFFORTS,
+  CODEX_REASONING_EFFORTS,
+  type ClaudeAuthStartResult,
+  type ClaudeCliStatus,
+  type ClaudeInstallResult,
+  type ClaudeModelInfo,
   type CodingAgentRequest,
   type CodingWorkflow,
   type CodingWorkflowApplyLayerRequest,
   type CodingWorkflowStartRequest,
+  type CodexAuthStartResult,
+  type CodexCliStatus,
+  type CodexInstallResult,
+  type CodexModelInfo,
+  type CodexReasoningEffort,
   type GithubDevicePollRequest,
   type GithubDevicePollResponse,
   type GithubDeviceStartRequest,
@@ -55,6 +67,59 @@ const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_API_URL = "https://api.github.com";
 const GITHUB_DEVICE_SCOPE = "repo read:user";
+const DEFAULT_CODEX_COMMAND = process.env.GRAPHCODE_CODEX_COMMAND?.trim() || "codex";
+const DEFAULT_CLAUDE_COMMAND = process.env.GRAPHCODE_CLAUDE_COMMAND?.trim() || "claude";
+const CODEX_MODEL_CATALOG_TIMEOUT_MS = 20000;
+const CLAUDE_MODEL_CATALOG: ClaudeModelInfo[] = [
+  {
+    slug: "default",
+    displayName: "Default",
+    description: "Claude Code's default model selection for this account and workspace.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "best",
+    displayName: "Best",
+    description: "Claude Code chooses the best available model alias for the task.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "fable",
+    displayName: "Fable",
+    description: "Claude Code's documented Fable alias.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "sonnet",
+    displayName: "Sonnet",
+    description: "Claude Code's documented Sonnet alias.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "opus",
+    displayName: "Opus",
+    description: "Claude Code's documented Opus alias. Fast mode is available for supported Opus sessions.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard", "fast"]
+  },
+  {
+    slug: "haiku",
+    displayName: "Haiku",
+    description: "Claude Code's documented Haiku alias.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  }
+];
 
 export class WorkspaceRuntime {
   private db: GraphDatabase;
@@ -98,10 +163,26 @@ export class WorkspaceRuntime {
       const validation = this.repository.validateWorkspaceSettings(projectId, input);
       const fieldErrors = { ...validation.fieldErrors };
       const cliChecks = [
-        ...input.agents.map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `agents.${index}.model` })),
-        ...(input.codingAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `codingAgents.${index}.model` })),
-        ...(input.reviewAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `reviewAgents.${index}.model` })),
-        ...(input.scanningAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `scanningAgents.${index}.model` }))
+        ...input.agents.map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `agents.${index}.cliCommand` : `agents.${index}.model`
+        })),
+        ...(input.codingAgents ?? []).map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `codingAgents.${index}.cliCommand` : `codingAgents.${index}.model`
+        })),
+        ...(input.reviewAgents ?? []).map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `reviewAgents.${index}.cliCommand` : `reviewAgents.${index}.model`
+        })),
+        ...(input.scanningAgents ?? []).map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `scanningAgents.${index}.cliCommand` : `scanningAgents.${index}.model`
+        }))
       ];
       await Promise.all(
         cliChecks.map(async (check) => {
@@ -119,6 +200,244 @@ export class WorkspaceRuntime {
       ok: Object.keys(fieldErrors).length === 0,
       testedAt: new Date().toISOString(),
       fieldErrors
+    };
+  }
+
+  async getCodexStatus(command = DEFAULT_CODEX_COMMAND): Promise<CodexCliStatus> {
+    const checkedAt = new Date().toISOString();
+    const resolvedPath = await resolveCliPath(command);
+    let version: string | null = null;
+    let authStatus: string | null = null;
+    let authenticated = false;
+    let modelsAvailable = false;
+    const errors: string[] = [];
+
+    try {
+      const result = await execFileAsync(command, ["--version"], cliExecOptions(5000));
+      version = (outputText(result.stdout) || outputText(result.stderr)).trim() || null;
+    } catch (error) {
+      return {
+        installed: false,
+        command,
+        resolvedPath,
+        version: null,
+        authenticated: false,
+        authStatus: null,
+        modelsAvailable: false,
+        error: cliErrorMessage(error, `Codex CLI command not found or not executable: ${command}`),
+        checkedAt
+      };
+    }
+
+    try {
+      const result = await execFileAsync(command, ["login", "status"], cliExecOptions(10000));
+      authStatus = (outputText(result.stdout) || outputText(result.stderr)).trim() || "Authenticated";
+      authenticated = true;
+    } catch (error) {
+      authStatus = cliErrorMessage(error, "Codex CLI is not authenticated.");
+      errors.push(authStatus);
+    }
+
+    if (authenticated) {
+      try {
+        const result = await execFileAsync(command, ["debug", "models"], {
+          ...cliExecOptions(CODEX_MODEL_CATALOG_TIMEOUT_MS),
+          maxBuffer: 1024 * 1024 * 12
+        });
+        modelsAvailable = parseCodexModels(outputText(result.stdout)).length > 0;
+        if (!modelsAvailable) {
+          errors.push("Codex CLI returned an empty model catalog.");
+        }
+      } catch (error) {
+        errors.push(cliErrorMessage(error, "Codex model catalog is not available."));
+      }
+    }
+
+    return {
+      installed: true,
+      command,
+      resolvedPath,
+      version,
+      authenticated,
+      authStatus,
+      modelsAvailable,
+      error: errors.length > 0 ? errors.join(" ") : null,
+      checkedAt
+    };
+  }
+
+  async listCodexModels(command = DEFAULT_CODEX_COMMAND): Promise<CodexModelInfo[]> {
+    const status = await this.getCodexStatus(command);
+    if (!status.installed) {
+      throw validationError(status.error ?? "Codex CLI is not installed.");
+    }
+    if (!status.authenticated) {
+      throw validationError(status.error ?? "Codex CLI is not authenticated.");
+    }
+    const result = await execFileAsync(command, ["debug", "models"], {
+      ...cliExecOptions(CODEX_MODEL_CATALOG_TIMEOUT_MS),
+      maxBuffer: 1024 * 1024 * 12
+    });
+    return parseCodexModels(outputText(result.stdout));
+  }
+
+  async installCodexCli(): Promise<CodexInstallResult> {
+    const prefix = process.platform === "win32" ? null : path.join(os.homedir(), ".local");
+    const args = ["install", "--global"];
+    if (prefix) {
+      await fsp.mkdir(prefix, { recursive: true });
+      args.push("--prefix", prefix);
+    }
+    args.push("@openai/codex");
+    try {
+      await execFileAsync(process.platform === "win32" ? "npm.cmd" : "npm", args, {
+        ...cliExecOptions(120000),
+        maxBuffer: 1024 * 1024 * 8
+      });
+      const status = await this.getCodexStatus(DEFAULT_CODEX_COMMAND);
+      return {
+        ok: status.installed,
+        command: prefix ? `npm ${args.join(" ")}; ensure ${path.join(prefix, "bin")} is on PATH` : `npm ${args.join(" ")}`,
+        message: status.installed ? "Codex CLI installed." : "Codex package installed, but the codex command is not on PATH yet.",
+        status
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        command: prefix ? `npm ${args.join(" ")}` : `npm ${args.join(" ")}`,
+        message: cliErrorMessage(error, "Codex CLI install failed.")
+      };
+    }
+  }
+
+  async startCodexAuth(command = DEFAULT_CODEX_COMMAND): Promise<CodexAuthStartResult> {
+    const status = await this.getCodexStatus(command);
+    if (!status.installed) {
+      return {
+        ok: false,
+        command,
+        message: status.error ?? "Install the Codex CLI before signing in.",
+        status
+      };
+    }
+    if (status.authenticated) {
+      return {
+        ok: true,
+        command,
+        message: "Codex CLI is already authenticated.",
+        status
+      };
+    }
+    const authCommand = `${command} login --device-auth`;
+    return {
+      ok: true,
+      command: authCommand,
+      message: `Run ${authCommand} in a terminal, complete the browser device flow, then refresh Codex status.`,
+      status
+    };
+  }
+
+  async getClaudeStatus(command = DEFAULT_CLAUDE_COMMAND): Promise<ClaudeCliStatus> {
+    const checkedAt = new Date().toISOString();
+    const resolvedPath = await resolveCliPath(command);
+    let version: string | null = null;
+    let authStatus: string | null = null;
+    let authenticated = false;
+    const errors: string[] = [];
+
+    try {
+      const result = await execFileAsync(command, ["--version"], cliExecOptions(5000));
+      version = (outputText(result.stdout) || outputText(result.stderr)).trim() || null;
+    } catch (error) {
+      return {
+        installed: false,
+        command,
+        resolvedPath,
+        version: null,
+        authenticated: false,
+        authStatus: null,
+        modelsAvailable: false,
+        error: cliErrorMessage(error, `Claude Code command not found or not executable: ${command}`),
+        checkedAt
+      };
+    }
+
+    try {
+      const result = await execFileAsync(command, ["auth", "status", "--text"], cliExecOptions(10000));
+      authStatus = (outputText(result.stdout) || outputText(result.stderr)).trim() || "Authenticated";
+      authenticated = true;
+    } catch (error) {
+      authStatus = cliErrorMessage(error, "Claude Code is not authenticated.");
+      errors.push(authStatus);
+    }
+
+    return {
+      installed: true,
+      command,
+      resolvedPath,
+      version,
+      authenticated,
+      authStatus,
+      modelsAvailable: authenticated,
+      error: errors.length > 0 ? errors.join(" ") : null,
+      checkedAt
+    };
+  }
+
+  async listClaudeModels(command = DEFAULT_CLAUDE_COMMAND): Promise<ClaudeModelInfo[]> {
+    const status = await this.getClaudeStatus(command);
+    if (!status.installed) {
+      throw validationError(status.error ?? "Claude Code is not installed.");
+    }
+    if (!status.authenticated) {
+      throw validationError(status.error ?? "Claude Code is not authenticated.");
+    }
+    return CLAUDE_MODEL_CATALOG;
+  }
+
+  async installClaudeCli(): Promise<ClaudeInstallResult> {
+    const status = await this.getClaudeStatus(DEFAULT_CLAUDE_COMMAND);
+    if (status.installed) {
+      return {
+        ok: true,
+        command: DEFAULT_CLAUDE_COMMAND,
+        message: "Claude Code is already installed.",
+        status
+      };
+    }
+    const command = process.platform === "win32" ? "irm https://claude.ai/install.ps1 | iex" : "curl -fsSL https://claude.ai/install.sh | bash";
+    return {
+      ok: false,
+      command,
+      message: `Run ${command} in a terminal to install Claude Code, then refresh Claude status.`,
+      status
+    };
+  }
+
+  async startClaudeAuth(command = DEFAULT_CLAUDE_COMMAND): Promise<ClaudeAuthStartResult> {
+    const status = await this.getClaudeStatus(command);
+    if (!status.installed) {
+      return {
+        ok: false,
+        command,
+        message: status.error ?? "Install Claude Code before signing in.",
+        status
+      };
+    }
+    if (status.authenticated) {
+      return {
+        ok: true,
+        command,
+        message: "Claude Code is already authenticated.",
+        status
+      };
+    }
+    const authCommand = `${command} auth login`;
+    return {
+      ok: true,
+      command: authCommand,
+      message: `Run ${authCommand} in a terminal, complete the browser sign-in, then refresh Claude status.`,
+      status
     };
   }
 
@@ -343,7 +662,17 @@ export class WorkspaceRuntime {
     const execute = () =>
       runScanningAgent(enrichedInput, {
         config: this.repository.getAgentConfig(input.projectId, "scanning"),
-        scanningConfigs: Object.fromEntries(SCANNING_AGENT_MODES.map((mode) => [mode, this.repository.getScanningAgentConfig(input.projectId, mode)])),
+        scanningConfigs: Object.fromEntries(
+          SCANNING_AGENT_MODES.map((mode) => {
+            const config = this.repository.getScanningAgentConfig(input.projectId, mode);
+            return [
+              mode,
+              input.skipCodexDefaultSystemPrompt && config.provider === "codex"
+                ? { ...config, skipCodexDefaultSystemPrompt: true }
+                : config
+            ];
+          })
+        ),
         runId: run.id,
         workspaceRoot: project.rootPath,
         toolbox: this.createToolbox(input.projectId)
@@ -413,6 +742,7 @@ export class WorkspaceRuntime {
         rootPath,
         projectDescription: project.description,
         scanningInstructions: project.scanningInstructions,
+        skipCodexDefaultSystemPrompt: initialization.skipCodexDefaultSystemPrompt,
         background: true
       });
     }
@@ -455,6 +785,19 @@ export class WorkspaceRuntime {
         maxBuffer: 1024 * 512
       });
       return stdout.trim();
+    } catch {
+      return "";
+    }
+  }
+
+  async readGitDiff(projectId: string): Promise<string> {
+    const project = this.repository.getProject(projectId);
+    try {
+      const { stdout } = await execFileAsync("git", ["-C", project.rootPath, "diff", "--no-ext-diff", "--"], {
+        timeout: 10000,
+        maxBuffer: 1024 * 1024 * 8
+      });
+      return stdout.trimEnd();
     } catch {
       return "";
     }
@@ -569,6 +912,7 @@ export class WorkspaceRuntime {
         this.repository.storeCodeProposal({ projectId: inputProjectId, agentRunId: runId, targetNodeId, diff, artifactManifest });
       },
       readGitStatus: async (inputProjectId) => this.readGitStatus(inputProjectId),
+      readGitDiff: async (inputProjectId) => this.readGitDiff(inputProjectId),
       refreshCodeGraph: async (inputProjectId, rootPath) => this.refreshCodeGraph(inputProjectId, rootPath)
     };
   }
@@ -979,7 +1323,7 @@ function workspaceProjectId(rootPath: string): string {
 function normalizeCreationInitialization(
   initialization: OpenWorkspaceRequest["initialization"],
   creationMode: NonNullable<OpenWorkspaceRequest["creationMode"]>
-): { projectName: string; projectDescription: string; scanningInstructions: string } {
+): { projectName: string; projectDescription: string; scanningInstructions: string; skipCodexDefaultSystemPrompt: boolean } {
   if (!initialization?.projectName?.trim()) {
     throw validationError("Project name is required to create a GraphCode workspace.");
   }
@@ -990,14 +1334,16 @@ function normalizeCreationInitialization(
     return {
       projectName: initialization.projectName.trim(),
       projectDescription: initialization.projectDescription.trim(),
-      scanningInstructions: initialization.scanningInstructions.trim()
+      scanningInstructions: initialization.scanningInstructions.trim(),
+      skipCodexDefaultSystemPrompt: initialization.skipCodexDefaultSystemPrompt ?? false
     };
   }
 
   return {
     projectName: initialization.projectName.trim(),
     projectDescription: initialization.projectDescription?.trim() ?? "",
-    scanningInstructions: ""
+    scanningInstructions: "",
+    skipCodexDefaultSystemPrompt: false
   };
 }
 
@@ -1138,6 +1484,116 @@ function cliExecOptions(timeout: number): ExecFileOptions {
     shell: process.platform === "win32",
     windowsHide: true
   };
+}
+
+async function resolveCliPath(command: string): Promise<string | null> {
+  const lookupCommand = process.platform === "win32" ? "where" : "which";
+  try {
+    const { stdout } = await execFileAsync(lookupCommand, [command], cliExecOptions(3000));
+    return outputText(stdout)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function cliErrorMessage(error: unknown, fallback: string): string {
+  const details = error as { stdout?: unknown; stderr?: unknown; message?: string };
+  return (outputText(details.stderr).trim() || outputText(details.stdout).trim() || details.message?.trim() || fallback).split(/\r?\n/)[0] ?? fallback;
+}
+
+function outputText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  return "";
+}
+
+function parseCodexModels(raw: string): CodexModelInfo[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const root = asRecord(parsed);
+  const rawModels = Array.isArray(parsed) ? parsed : Array.isArray(root?.models) ? root.models : [];
+  return rawModels
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .filter((item) => typeof item.slug === "string" && item.slug.trim().length > 0)
+    .filter((item) => typeof item.visibility !== "string" || item.visibility === "list")
+    .map((item) => {
+      const supportedReasoningLevels = parseCodexReasoningLevels(item.supported_reasoning_levels);
+      const defaultReasoningLevel = isCodexReasoningEffort(item.default_reasoning_level)
+        ? item.default_reasoning_level
+        : supportedReasoningLevels[0]?.effort ?? "medium";
+      const speedTiers = new Set<CodexModelInfo["speedTiers"][number]>(["standard"]);
+      const additionalSpeedTiers = Array.isArray(item.additional_speed_tiers) ? item.additional_speed_tiers : [];
+      const serviceTiers = Array.isArray(item.service_tiers) ? item.service_tiers : [];
+      if (
+        additionalSpeedTiers.some((tier) => tier === "fast") ||
+        serviceTiers.some((tier) => {
+          const record = asRecord(tier);
+          return record?.id === "fast" || record?.name === "Fast" || record?.id === "priority";
+        })
+      ) {
+        speedTiers.add("fast");
+      }
+      return {
+        slug: String(item.slug),
+        displayName: typeof item.display_name === "string" && item.display_name.trim() ? item.display_name : String(item.slug),
+        description: typeof item.description === "string" ? item.description : "",
+        defaultReasoningLevel,
+        supportedReasoningLevels,
+        speedTiers: [...speedTiers]
+      };
+    });
+}
+
+function parseCodexReasoningLevels(value: unknown): CodexModelInfo["supportedReasoningLevels"] {
+  if (!Array.isArray(value)) {
+    return [{ effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" }];
+  }
+  const levels = value
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .filter((item): item is { effort: CodexReasoningEffort; description?: unknown } => isCodexReasoningEffort(item.effort))
+    .map((item) => ({
+      effort: item.effort,
+      description: typeof item.description === "string" ? item.description : ""
+    }));
+  return levels.length > 0 ? levels : [{ effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" }];
+}
+
+function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return typeof value === "string" && (CODEX_REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+function claudeReasoningLevels(): ClaudeModelInfo["supportedReasoningLevels"] {
+  const descriptions: Record<(typeof CLAUDE_REASONING_EFFORTS)[number], string> = {
+    low: "Minimizes reasoning latency for straightforward tasks.",
+    medium: "Balances reasoning depth and speed for everyday coding tasks.",
+    high: "Applies deeper reasoning for harder implementation and review work.",
+    xhigh: "Uses extra reasoning depth for complex multi-step tasks.",
+    max: "Uses Claude Code's maximum session reasoning effort when available."
+  };
+  return CLAUDE_REASONING_EFFORTS.map((effort) => ({
+    effort,
+    description: descriptions[effort]
+  }));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
 }
 
 function isScannablePath(value: string): boolean {

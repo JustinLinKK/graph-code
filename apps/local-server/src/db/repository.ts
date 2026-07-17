@@ -201,6 +201,12 @@ type AgentSettingsRow = {
   agent_kind: AgentKind;
   provider: AgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: AgentConfig["reasoningEffort"];
+  speed_tier: AgentConfig["speedTier"];
+  permission_mode: AgentConfig["permissionMode"];
+  codex_system_prompt_mode: AgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: AgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: AgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -213,6 +219,12 @@ type CodingAgentSettingsRow = {
   coding_mode: CodingAgentMode;
   provider: CodingAgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: CodingAgentConfig["reasoningEffort"];
+  speed_tier: CodingAgentConfig["speedTier"];
+  permission_mode: CodingAgentConfig["permissionMode"];
+  codex_system_prompt_mode: CodingAgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: CodingAgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: CodingAgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -225,6 +237,12 @@ type ReviewAgentSettingsRow = {
   review_mode: ReviewAgentMode;
   provider: ReviewAgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: ReviewAgentConfig["reasoningEffort"];
+  speed_tier: ReviewAgentConfig["speedTier"];
+  permission_mode: ReviewAgentConfig["permissionMode"];
+  codex_system_prompt_mode: ReviewAgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: ReviewAgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: ReviewAgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -237,6 +255,12 @@ type ScanningAgentSettingsRow = {
   scanning_mode: ScanningAgentMode;
   provider: ScanningAgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: ScanningAgentConfig["reasoningEffort"];
+  speed_tier: ScanningAgentConfig["speedTier"];
+  permission_mode: ScanningAgentConfig["permissionMode"];
+  codex_system_prompt_mode: ScanningAgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: ScanningAgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: ScanningAgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -889,8 +913,14 @@ export class GraphRepository {
           this.upsertCodingAgentSettings(projectId, {
             mode,
             provider: legacyCodingAgent.provider,
-            model: legacyCodingAgent.model,
-            parallelLimit: legacyCodingAgent.parallelLimit,
+          model: legacyCodingAgent.model,
+          cliCommand: legacyCodingAgent.cliCommand,
+          reasoningEffort: legacyCodingAgent.reasoningEffort,
+          speedTier: legacyCodingAgent.speedTier,
+          permissionMode: legacyCodingAgent.permissionMode,
+          codexSystemPromptMode: legacyCodingAgent.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyCodingAgent.claudeSystemPromptMode,
+          parallelLimit: legacyCodingAgent.parallelLimit,
             apiKeySource: legacyCodingAgent.apiKeySource,
             systemPromptSource: legacyCodingAgent.systemPromptSource
           });
@@ -931,8 +961,14 @@ export class GraphRepository {
           this.upsertReviewAgentSettings(projectId, {
             mode,
             provider: legacyReviewAgent.provider,
-            model: legacyReviewAgent.model,
-            parallelLimit: legacyReviewAgent.parallelLimit,
+          model: legacyReviewAgent.model,
+          cliCommand: legacyReviewAgent.cliCommand,
+          reasoningEffort: legacyReviewAgent.reasoningEffort,
+          speedTier: legacyReviewAgent.speedTier,
+          permissionMode: legacyReviewAgent.permissionMode,
+          codexSystemPromptMode: legacyReviewAgent.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyReviewAgent.claudeSystemPromptMode,
+          parallelLimit: legacyReviewAgent.parallelLimit,
             apiKeySource: legacyReviewAgent.apiKeySource,
             systemPromptSource: legacyReviewAgent.systemPromptSource
           });
@@ -1062,7 +1098,7 @@ export class GraphRepository {
         fieldErrors[`agents.${index}.agentKind`] = "Each agent can only be configured once.";
       }
       seen.add(agent.agentKind);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`agents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -1104,7 +1140,7 @@ export class GraphRepository {
         fieldErrors[`codingAgents.${index}.mode`] = "Each coding mode can only be configured once.";
       }
       seenCodingModes.add(agent.mode);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`codingAgents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -1130,7 +1166,7 @@ export class GraphRepository {
         fieldErrors[`reviewAgents.${index}.mode`] = "Each review mode can only be configured once.";
       }
       seenReviewModes.add(agent.mode);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`reviewAgents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -1156,7 +1192,7 @@ export class GraphRepository {
         fieldErrors[`scanningAgents.${index}.mode`] = "Each scanning mode can only be configured once.";
       }
       seenScanningModes.add(agent.mode);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`scanningAgents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -5417,6 +5453,12 @@ export class GraphRepository {
           mode,
           provider: legacyCodingConfig.provider,
           model: legacyCodingConfig.model,
+          cliCommand: legacyCodingConfig.cliCommand,
+          reasoningEffort: legacyCodingConfig.reasoningEffort,
+          speedTier: legacyCodingConfig.speedTier,
+          permissionMode: legacyCodingConfig.permissionMode,
+          codexSystemPromptMode: legacyCodingConfig.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyCodingConfig.claudeSystemPromptMode,
           parallelLimit: legacyCodingConfig.parallelLimit,
           apiKeySource: legacyCodingConfig.apiKeySource,
           systemPromptSource: legacyCodingConfig.systemPromptSource
@@ -5433,6 +5475,12 @@ export class GraphRepository {
           mode,
           provider: legacyReviewConfig.provider,
           model: legacyReviewConfig.model,
+          cliCommand: legacyReviewConfig.cliCommand,
+          reasoningEffort: legacyReviewConfig.reasoningEffort,
+          speedTier: legacyReviewConfig.speedTier,
+          permissionMode: legacyReviewConfig.permissionMode,
+          codexSystemPromptMode: legacyReviewConfig.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyReviewConfig.claudeSystemPromptMode,
           parallelLimit: legacyReviewConfig.parallelLimit,
           apiKeySource: legacyReviewConfig.apiKeySource,
           systemPromptSource: legacyReviewConfig.systemPromptSource
@@ -5478,13 +5526,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO agent_settings (
-          project_id, agent_kind, provider, model, parallel_limit,
+          project_id, agent_kind, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @agentKind, @provider, @model, @parallelLimit,
+          @projectId, @agentKind, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5493,6 +5545,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5506,6 +5564,12 @@ export class GraphRepository {
         agentKind: agent.agentKind,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -5527,13 +5591,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO coding_agent_settings (
-          project_id, coding_mode, provider, model, parallel_limit,
+          project_id, coding_mode, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @codingMode, @provider, @model, @parallelLimit,
+          @projectId, @codingMode, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5542,6 +5610,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5555,6 +5629,12 @@ export class GraphRepository {
         codingMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -5576,13 +5656,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO review_agent_settings (
-          project_id, review_mode, provider, model, parallel_limit,
+          project_id, review_mode, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @reviewMode, @provider, @model, @parallelLimit,
+          @projectId, @reviewMode, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5591,6 +5675,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5604,6 +5694,12 @@ export class GraphRepository {
         reviewMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -5625,13 +5721,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO scanning_agent_settings (
-          project_id, scanning_mode, provider, model, parallel_limit,
+          project_id, scanning_mode, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @scanningMode, @provider, @model, @parallelLimit,
+          @projectId, @scanningMode, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5640,6 +5740,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5653,6 +5759,12 @@ export class GraphRepository {
         scanningMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -6322,6 +6434,12 @@ function defaultAgentConfig(agentKind: AgentKind): AgentConfig {
     agentKind,
     provider: "fake",
     model: agentKind === "scanning" ? "graphcode-scanner-v1" : "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: agentKind === "scanning" ? 8 : 4,
     apiKeySource: {
       type: "env",
@@ -6339,6 +6457,12 @@ function defaultCodingAgentConfig(mode: CodingAgentMode): CodingAgentConfig {
     mode,
     provider: "fake",
     model: "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
     apiKeySource: {
       type: "env",
@@ -6356,6 +6480,12 @@ function defaultReviewAgentConfig(mode: ReviewAgentMode): ReviewAgentConfig {
     mode,
     provider: "fake",
     model: "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
     apiKeySource: {
       type: "env",
@@ -6373,6 +6503,12 @@ function defaultScanningAgentConfig(mode: ScanningAgentMode): ScanningAgentConfi
     mode,
     provider: "fake",
     model: `graphcode-scanner-${mode}-v1`,
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "local" ? 8 : mode === "medium" ? 4 : 1,
     apiKeySource: {
       type: "env",
@@ -6504,6 +6640,12 @@ function mapAgentSettingsView(row: AgentSettingsRow): AgentConfigView {
     agentKind: row.agent_kind,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6523,6 +6665,12 @@ function mapAgentSettings(row: AgentSettingsRow): AgentConfig {
     agentKind: row.agent_kind,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6542,6 +6690,12 @@ function mapCodingAgentSettingsView(row: CodingAgentSettingsRow): CodingAgentCon
     mode: row.coding_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6563,6 +6717,12 @@ function mapReviewAgentSettingsView(row: ReviewAgentSettingsRow): ReviewAgentCon
     mode: row.review_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6584,6 +6744,12 @@ function mapScanningAgentSettingsView(row: ScanningAgentSettingsRow): ScanningAg
     mode: row.scanning_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6603,6 +6769,12 @@ function mapCodingAgentSettings(row: CodingAgentSettingsRow): CodingAgentConfig 
     mode: row.coding_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6620,6 +6792,12 @@ function mapReviewAgentSettings(row: ReviewAgentSettingsRow): ReviewAgentConfig 
     mode: row.review_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6637,6 +6815,12 @@ function mapScanningAgentSettings(row: ScanningAgentSettingsRow): ScanningAgentC
     mode: row.scanning_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -7503,6 +7687,10 @@ function hashId(value: string): string {
 
 function isCliAgentProvider(provider: string): boolean {
   return provider === "codex" || provider === "claudecode";
+}
+
+function requiresModelSelection(provider: string): boolean {
+  return provider !== "fake" && provider !== "claudecode";
 }
 
 export function notFound(message: string): Error & { statusCode: number } {

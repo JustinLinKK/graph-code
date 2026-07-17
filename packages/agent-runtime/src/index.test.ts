@@ -9,6 +9,12 @@ const baseConfig: AgentConfig = {
   agentKind: "planning",
   provider: "fake",
   model: "fake",
+  cliCommand: "",
+  reasoningEffort: "medium",
+  speedTier: "standard",
+  permissionMode: "ask_for_permission",
+  codexSystemPromptMode: "custom",
+  claudeSystemPromptMode: "custom",
   parallelLimit: 2,
   apiKeySource: { type: "env", value: "" },
   systemPromptSource: { type: "manual", value: "Test prompt" }
@@ -258,7 +264,7 @@ describe("GraphCode agent runtime", () => {
           mode: "small",
           prompt: "Update value and test it"
         },
-        { config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command }, runId: "run-artifact", toolbox: tools }
+        { config: { ...baseConfig, agentKind: "coding", provider: "claudecode", cliCommand: command, model: "sonnet" }, runId: "run-artifact", toolbox: tools }
       );
 
       expect(tools.writeCodeProposal).toHaveBeenCalledWith(
@@ -273,8 +279,53 @@ describe("GraphCode agent runtime", () => {
       const args = normalizeNewlines(fs.readFileSync(argsLog, "utf8"));
       expect(args).toContain("--append-system-prompt\nTest prompt");
       expect(args).toContain("--permission-mode\nplan");
-      expect(args).toContain("--disallowedTools\nEdit\nMultiEdit\nWrite\nNotebookEdit");
+      expect(args).toContain("--disallowedTools\nEdit\n--disallowedTools\nMultiEdit\n--disallowedTools\nWrite\n--disallowedTools\nNotebookEdit");
+      expect(args).toContain("--model\nsonnet");
+      expect(args).toContain("--effort\nmedium");
       expect(args).toContain("GraphCode Claude Code CLI account-plan invocation.");
+    });
+
+    it("runs Claude Code direct-edit modes with model, effort, fast settings, and git diff capture", async () => {
+      const argsLog = path.join(os.tmpdir(), `graphcode-claude-${crypto.randomUUID()}.args`);
+      const command = writeFakeCli(["Claude edited files directly"], { argsLog });
+      const directDiff = ["diff --git a/src/module.ts b/src/module.ts", "--- a/src/module.ts", "+++ b/src/module.ts", "@@", "+export const value = 4;"].join("\n");
+      const tools = toolbox({
+        readGitDiff: vi.fn(async () => directDiff)
+      });
+
+      const result = await runCodingAgent(
+        {
+          projectId: "project",
+          nodeId: "node-1",
+          mode: "small",
+          prompt: "Edit directly with Claude"
+        },
+        {
+          config: {
+            ...baseConfig,
+            agentKind: "coding",
+            provider: "claudecode",
+            cliCommand: command,
+            model: "opus",
+            reasoningEffort: "high",
+            speedTier: "fast",
+            permissionMode: "full_access",
+            claudeSystemPromptMode: "default"
+          },
+          runId: "run-claude-direct",
+          toolbox: tools
+        }
+      );
+
+      const args = normalizeNewlines(fs.readFileSync(argsLog, "utf8"));
+      expect(args).toContain("--permission-mode\nbypassPermissions");
+      expect(args).toContain("--model\nopus");
+      expect(args).toContain("--effort\nhigh");
+      expect(args).toContain("--settings\n{\"fastMode\":true}");
+      expect(args).not.toContain("--append-system-prompt");
+      expect(result.diff).toContain("export const value = 4");
+      expect(tools.writeCodeProposal).toHaveBeenCalledWith("project", "run-claude-direct", "node-1", directDiff, null);
+      expect(tools.refreshCodeGraph).toHaveBeenCalledWith("project");
     });
 
     it("runs Codex CLI providers with workspace root and prompt skills on stdin", async () => {
@@ -294,14 +345,21 @@ describe("GraphCode agent runtime", () => {
           mode: "small",
           prompt: "Update value through codex"
         },
-        { config: { ...baseConfig, agentKind: "coding", provider: "codex", model: command }, runId: "run-codex", workspaceRoot, toolbox: tools }
+        {
+          config: { ...baseConfig, agentKind: "coding", provider: "codex", cliCommand: command, model: "gpt-5.4" },
+          runId: "run-codex",
+          workspaceRoot,
+          toolbox: tools
+        }
       );
 
       expect(result.diff).toContain("src/module.ts");
-      expect(normalizeNewlines(fs.readFileSync(argsLog, "utf8"))).toBe(`exec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--ask-for-approval\nnever\n-\n`);
+      expect(normalizeNewlines(fs.readFileSync(argsLog, "utf8"))).toBe(
+        `--ask-for-approval\nnever\n-c\nmodel_reasoning_effort="medium"\n-c\ndeveloper_instructions="Test prompt"\nexec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--model\ngpt-5.4\n-\n`
+      );
       const stdin = fs.readFileSync(stdinLog, "utf8");
       expect(stdin).toContain("GraphCode Codex CLI account-plan invocation.");
-      expect(stdin).toContain("GraphCode skill instructions:\nTest prompt");
+      expect(stdin).not.toContain("GraphCode skill instructions:\nTest prompt");
       expect(stdin).toContain("Update value through codex");
     });
 
@@ -382,7 +440,7 @@ describe("GraphCode agent runtime", () => {
           mode: "medium"
         },
           {
-            config: { ...baseConfig, agentKind: "coding", provider: "claudecode", model: command },
+            config: { ...baseConfig, agentKind: "coding", provider: "claudecode", cliCommand: command, model: "sonnet" },
             runId: "run-3",
             toolbox: toolbox()
           }

@@ -5,12 +5,13 @@ import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
 import {
   AVAILABLE_EXTENSION_PACKAGES,
-    type AgentConfig,
-    type AgentKind,
-    type AgentRun,
-    type AgentStatus,
+  type AgentConfig,
+  type AgentKind,
+  type AgentRun,
+  type AgentStatus,
   type BlockExecutionMetadata,
   type CanvasGraph,
+  CLAUDE_REASONING_EFFORTS,
   type CodingAgentRequest,
   type CodeProposalArtifactManifest,
   type GraphEdge,
@@ -54,6 +55,7 @@ export type GraphCodeToolbox = {
   readSourceFile: (relativePath: string) => Promise<string>;
   writeCodeProposal: (projectId: string, runId: string | null, targetNodeId: string | null, diff: string, artifactManifest?: CodeProposalArtifactManifest | null) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
+  readGitDiff?: (projectId: string) => Promise<string>;
   refreshCodeGraph: (
     projectId: string,
     rootPath?: string
@@ -70,7 +72,7 @@ type PlanningGraph = Awaited<ReturnType<GraphCodeToolbox["readGraph"]>>;
 
 export type AgentRuntimeOptions = {
   config: AgentConfig;
-  scanningConfigs?: Partial<Record<ScanningAgentMode, ScanningAgentConfig>>;
+  scanningConfigs?: Partial<Record<ScanningAgentMode, ScanningAgentConfig & { skipCodexDefaultSystemPrompt?: boolean }>>;
   runId?: string;
   workspaceRoot?: string;
   toolbox: GraphCodeToolbox;
@@ -321,15 +323,22 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
           { role: "user", content: context }
         ]);
         const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(response);
-        const diff = normalizeDiff(responseWithoutArtifacts, allowedPath);
-        assertDiffInScope(diff, allowedPath);
+        const directEditMode = usesCliDirectEditMode(options.config);
+        const directDiff = directEditMode ? await (options.toolbox.readGitDiff?.(input.projectId) ?? Promise.resolve("")) : "";
+        if (directEditMode && directDiff.trim()) {
+          await options.toolbox.refreshCodeGraph(input.projectId).catch(() => undefined);
+        }
+        const diff = directDiff.trim() ? directDiff : normalizeDiff(responseWithoutArtifacts, allowedPath);
+        if (!directEditMode) {
+          assertDiffInScope(diff, allowedPath);
+        }
         await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
       const touched: GraphStatusPatch[] = [
         {
           entityType: "node",
           entityId: input.nodeId,
           status: "coded",
-          note: "Coding agent produced a patch proposal.",
+          note: usesCliDirectEditMode(options.config) ? "Coding agent applied or captured direct workspace edits." : "Coding agent produced a patch proposal.",
           agentRunId: options.runId ?? null
         }
       ];
@@ -491,6 +500,12 @@ function resolveScanningConfigs(options: AgentRuntimeOptions): Record<ScanningAg
           mode,
           provider: options.config.provider,
           model: options.config.model,
+          cliCommand: options.config.cliCommand,
+          reasoningEffort: options.config.reasoningEffort,
+          speedTier: options.config.speedTier,
+          permissionMode: options.config.permissionMode,
+          codexSystemPromptMode: options.config.codexSystemPromptMode,
+          claudeSystemPromptMode: options.config.claudeSystemPromptMode,
           parallelLimit: options.config.parallelLimit,
           apiKeySource: options.config.apiKeySource,
           systemPromptSource: options.config.systemPromptSource
@@ -1020,7 +1035,11 @@ async function runLangGraphTask(task: AgentTask): Promise<AgentResult> {
   return result.result ?? { response: "" };
 }
 
-type ProviderConfig = Omit<AgentConfig, "agentKind"> & { agentKind?: AgentKind; mode?: string };
+type ProviderConfig = Omit<AgentConfig, "agentKind"> & {
+  agentKind?: AgentKind;
+  mode?: string;
+  skipCodexDefaultSystemPrompt?: boolean;
+};
 
 function createProvider(config: ProviderConfig, workspaceRoot?: string): { invoke: (messages: PromptMessage[]) => Promise<string> } {
       if (config.provider === "fake") {
@@ -1068,14 +1087,76 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
   throw new Error(`Unsupported agent provider: ${config.provider}`);
 }
 
+function usesCliDirectEditMode(config: ProviderConfig): boolean {
+  return (config.provider === "codex" || config.provider === "claudecode") && (config.permissionMode === "approve_for_me" || config.permissionMode === "full_access");
+}
+
+function codexPermissionProfile(permissionMode: ProviderConfig["permissionMode"]): {
+  approvalPolicy: string;
+  sandboxMode: string;
+  directEdits: boolean;
+  configOverrides: string[];
+} {
+  if (permissionMode === "full_access") {
+    return {
+      approvalPolicy: "never",
+      sandboxMode: "danger-full-access",
+      directEdits: true,
+      configOverrides: []
+    };
+  }
+  if (permissionMode === "approve_for_me") {
+    return {
+      approvalPolicy: "on-request",
+      sandboxMode: "workspace-write",
+      directEdits: true,
+      configOverrides: ['approvals_reviewer="auto_review"']
+    };
+  }
+  return {
+    approvalPolicy: "never",
+    sandboxMode: "read-only",
+    directEdits: false,
+    configOverrides: []
+  };
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
 async function invokeCodexCli(config: ProviderConfig, messages: PromptMessage[], workspaceRoot?: string): Promise<string> {
   const command = resolveCliCommand(config, "codex");
   const cwd = workspaceRoot ?? process.cwd();
+  const permission = codexPermissionProfile(config.permissionMode);
+  const configOverrides = [
+    config.reasoningEffort ? `model_reasoning_effort=${tomlString(config.reasoningEffort)}` : "",
+    config.speedTier === "fast" ? `service_tier=${tomlString("fast")}` : "",
+    config.speedTier === "fast" ? "features.fast_mode=true" : "",
+    config.codexSystemPromptMode === "custom" && config.systemPromptSource.value?.trim()
+      ? `developer_instructions=${tomlString(config.systemPromptSource.value.trim())}`
+      : "",
+    config.skipCodexDefaultSystemPrompt ? `base_instructions=${tomlString("")}` : "",
+    ...permission.configOverrides
+  ].filter(Boolean);
   const prompt = buildCliPrompt(messages, {
     providerName: "Codex CLI",
-    systemInPrompt: true
+    systemInPrompt: false,
+    allowDirectEdits: permission.directEdits
   });
-  const { stdout } = await runCliCommand(command, ["exec", "--cd", cwd, "--sandbox", "read-only", "--ask-for-approval", "never", "-"], {
+  const args = [
+    "--ask-for-approval",
+    permission.approvalPolicy,
+    ...configOverrides.flatMap((override) => ["-c", override]),
+    "exec",
+    "--cd",
+    cwd,
+    "--sandbox",
+    permission.sandboxMode,
+    ...(config.model.trim() ? ["--model", config.model.trim()] : []),
+    "-"
+  ];
+  const { stdout } = await runCliCommand(command, args, {
     cwd,
     input: prompt,
     timeout: 120000,
@@ -1088,27 +1169,28 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
   const command = resolveCliCommand(config, "claude");
   const cwd = workspaceRoot ?? process.cwd();
   const systemPrompt = systemPromptFromMessages(messages);
+  const permission = claudePermissionProfile(config.permissionMode);
   const prompt = buildCliPrompt(messages, {
     providerName: "Claude Code CLI",
-    systemInPrompt: false
+    systemInPrompt: false,
+    allowDirectEdits: permission.directEdits
   });
+  const args = [
+    "-p",
+    ...(config.claudeSystemPromptMode === "custom" && systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
+    "--permission-mode",
+    permission.permissionMode,
+    ...permission.disallowedTools.flatMap((tool) => ["--disallowedTools", tool]),
+    "--output-format",
+    "text",
+    ...(config.model.trim() ? ["--model", config.model.trim()] : []),
+    ...(isClaudeReasoningEffort(config.reasoningEffort) ? ["--effort", config.reasoningEffort] : []),
+    ...(config.speedTier === "fast" ? ["--settings", JSON.stringify({ fastMode: true })] : []),
+    prompt
+  ];
   const { stdout } = await runCliCommand(
     command,
-    [
-      "-p",
-      "--append-system-prompt",
-      systemPrompt,
-      "--permission-mode",
-      "plan",
-      "--disallowedTools",
-      "Edit",
-      "MultiEdit",
-      "Write",
-      "NotebookEdit",
-      "--output-format",
-      "text",
-      prompt
-    ],
+    args,
     {
       cwd,
       timeout: 120000,
@@ -1119,7 +1201,37 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
 }
 
 function resolveCliCommand(config: ProviderConfig, fallback: string): string {
-  return config.model.trim() || fallback;
+  return config.cliCommand?.trim() || fallback;
+}
+
+function claudePermissionProfile(permissionMode: ProviderConfig["permissionMode"]): {
+  permissionMode: string;
+  directEdits: boolean;
+  disallowedTools: string[];
+} {
+  if (permissionMode === "full_access") {
+    return {
+      permissionMode: "bypassPermissions",
+      directEdits: true,
+      disallowedTools: []
+    };
+  }
+  if (permissionMode === "approve_for_me") {
+    return {
+      permissionMode: "acceptEdits",
+      directEdits: true,
+      disallowedTools: []
+    };
+  }
+  return {
+    permissionMode: "plan",
+    directEdits: false,
+    disallowedTools: ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+  };
+}
+
+function isClaudeReasoningEffort(value: string): value is (typeof CLAUDE_REASONING_EFFORTS)[number] {
+  return (CLAUDE_REASONING_EFFORTS as readonly string[]).includes(value);
 }
 
 function systemPromptFromMessages(messages: PromptMessage[]): string {
@@ -1130,7 +1242,7 @@ function systemPromptFromMessages(messages: PromptMessage[]): string {
     .trim();
 }
 
-function buildCliPrompt(messages: PromptMessage[], options: { providerName: string; systemInPrompt: boolean }): string {
+function buildCliPrompt(messages: PromptMessage[], options: { providerName: string; systemInPrompt: boolean; allowDirectEdits?: boolean }): string {
   const system = systemPromptFromMessages(messages);
   const conversation = messages
     .filter((message) => options.systemInPrompt || message.role !== "system")
@@ -1140,7 +1252,9 @@ function buildCliPrompt(messages: PromptMessage[], options: { providerName: stri
     `GraphCode ${options.providerName} account-plan invocation.`,
     "Use the GraphCode role/mode instructions as the active skill for this run.",
     options.systemInPrompt && system ? `GraphCode skill instructions:\n${system}` : "",
-    "Do not edit, write, or apply files directly. Return the requested GraphCode response only so the app can store, review, and apply proposals.",
+    options.allowDirectEdits
+      ? "You may edit workspace files directly when needed. Return a concise final message; GraphCode will capture the resulting git diff."
+      : "Do not edit, write, or apply files directly. Return the requested GraphCode response only so the app can store, review, and apply proposals.",
     "For coding runs, return a clean unified diff and append GRAPHCODE_TEST_ARTIFACTS_JSON only when test artifacts are proposed. For scanning runs, return strict JSON only.",
     conversation
   ]

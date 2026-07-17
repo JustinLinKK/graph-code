@@ -13,19 +13,22 @@ type WorkspaceDialogProps = {
   onOpen: (rootPath: string) => void;
   onCreateBlank: (rootPath: string, initialization: BlankWorkspaceInitialization) => void;
   onCreateAndScan: (rootPath: string, initialization: WorkspaceInitialization) => void;
+  showCodexScanPromptOption: boolean;
 };
 
-export function WorkspaceDialog({ open, loading, missingPath, initializationStatus, error, onClose, onOpen, onCreateBlank, onCreateAndScan }: WorkspaceDialogProps) {
+export function WorkspaceDialog({ open, loading, missingPath, initializationStatus, error, onClose, onOpen, onCreateBlank, onCreateAndScan, showCodexScanPromptOption }: WorkspaceDialogProps) {
   const [rootPath, setRootPath] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
   const [scanningInstructions, setScanningInstructions] = useState("");
+  const [skipCodexDefaultSystemPrompt, setSkipCodexDefaultSystemPrompt] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
   useEffect(() => {
     if (missingPath) {
       setRootPath(missingPath);
       setProjectName(folderName(missingPath));
+      setSkipCodexDefaultSystemPrompt(false);
       setFormError(null);
     }
   }, [missingPath]);
@@ -48,7 +51,8 @@ export function WorkspaceDialog({ open, loading, missingPath, initializationStat
     const initialization = {
       projectName: projectName.trim(),
       projectDescription: projectDescription.trim(),
-      scanningInstructions: scanningInstructions.trim()
+      scanningInstructions: scanningInstructions.trim(),
+      skipCodexDefaultSystemPrompt: showCodexScanPromptOption ? skipCodexDefaultSystemPrompt : false
     };
     if (!initialization.projectName || !initialization.projectDescription || !initialization.scanningInstructions) {
       setFormError("Project name, description, and scanning instructions are required to scan.");
@@ -123,6 +127,12 @@ export function WorkspaceDialog({ open, loading, missingPath, initializationStat
               <span>Scanning instructions</span>
               <textarea rows={7} value={scanningInstructions} placeholder="Desired graph grouping, naming, relationships, and areas to emphasize." onChange={(event) => setScanningInstructions(event.target.value)} />
             </label>
+            {showCodexScanPromptOption ? (
+              <label className="inline-control">
+                <input type="checkbox" checked={skipCodexDefaultSystemPrompt} onChange={(event) => setSkipCodexDefaultSystemPrompt(event.target.checked)} />
+                <span>Skip Codex default system prompt</span>
+              </label>
+            ) : null}
           </>
         ) : null}
         {formError ? <div className="error-strip">{formError}</div> : null}

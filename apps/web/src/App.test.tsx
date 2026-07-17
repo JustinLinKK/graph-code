@@ -607,6 +607,12 @@ const defaultSettings = {
     agentKind,
     provider: "fake",
     model: "fake",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: agentKind === "scanning" ? 8 : 4,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${agentKind} prompt` },
@@ -617,6 +623,12 @@ const defaultSettings = {
       mode,
     provider: "fake",
     model: `fake-${mode}`,
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${mode} coding prompt` },
@@ -627,6 +639,12 @@ const defaultSettings = {
       mode,
       provider: "fake",
       model: `fake-review-${mode}`,
+      cliCommand: "",
+      reasoningEffort: "medium",
+      speedTier: "standard",
+      permissionMode: "ask_for_permission",
+      codexSystemPromptMode: "custom",
+      claudeSystemPromptMode: "custom",
       parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
       apiKeySource: { type: "env", value: "" },
       systemPromptSource: { type: "manual", value: `${mode} review prompt` },
@@ -637,6 +655,12 @@ const defaultSettings = {
     mode,
     provider: "fake",
     model: `fake-${mode}`,
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "local" ? 8 : 1,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${mode} scanning prompt` },
@@ -762,6 +786,64 @@ describe("GraphCode app shell", () => {
             });
           }
           return json(defaultSettings);
+        }
+        if (url === "/api/codex/status") {
+          return json({
+            installed: true,
+            command: "codex",
+            resolvedPath: "/usr/local/bin/codex",
+            version: "codex-test",
+            authenticated: true,
+            authStatus: "Authenticated",
+            modelsAvailable: true,
+            error: null,
+            checkedAt: "now"
+          });
+        }
+        if (url === "/api/codex/models") {
+          return json([
+            {
+              slug: "gpt-test",
+              displayName: "GPT Test",
+              description: "Test Codex model",
+              defaultReasoningLevel: "medium",
+              supportedReasoningLevels: [{ effort: "medium", description: "Balanced" }],
+              speedTiers: ["standard", "fast"]
+            }
+          ]);
+        }
+        if (url === "/api/claude/status") {
+          return json({
+            installed: true,
+            command: "claude",
+            resolvedPath: "/usr/local/bin/claude",
+            version: "claude-test",
+            authenticated: true,
+            authStatus: "Authenticated",
+            modelsAvailable: true,
+            error: null,
+            checkedAt: "now"
+          });
+        }
+        if (url === "/api/claude/models") {
+          return json([
+            {
+              slug: "sonnet",
+              displayName: "Sonnet",
+              description: "Claude Sonnet alias",
+              defaultReasoningLevel: "medium",
+              supportedReasoningLevels: [{ effort: "medium", description: "Balanced" }],
+              speedTiers: ["standard"]
+            },
+            {
+              slug: "opus",
+              displayName: "Opus",
+              description: "Claude Opus alias",
+              defaultReasoningLevel: "high",
+              supportedReasoningLevels: [{ effort: "high", description: "Deep" }],
+              speedTiers: ["standard", "fast"]
+            }
+          ]);
         }
         if (url === "/api/projects/graphcode-self/agent-runs") {
           return json(agentRuns);
@@ -1323,7 +1405,8 @@ describe("GraphCode app shell", () => {
             initialization: {
               projectName: "new-graphcode-project",
               projectDescription: "A local project with a CLI, API server, and web UI.",
-              scanningInstructions: "Group by runtime boundary and emphasize request/data flow."
+              scanningInstructions: "Group by runtime boundary and emphasize request/data flow.",
+              skipCodexDefaultSystemPrompt: false
             },
             creationMode: "scan"
           })
@@ -1779,9 +1862,26 @@ describe("GraphCode app shell", () => {
 
     fireEvent.change(providerSelect, { target: { value: "codex" } });
 
-    expect(within(planningCard).getByLabelText("CLI Command")).toHaveValue("codex");
-    expect(within(planningCard).getByLabelText("API Key Source")).toBeDisabled();
-    expect(within(planningCard).getByText(/logged-in Codex CLI account/i)).toBeInTheDocument();
+    await waitFor(() => expect(within(planningCard).getByText("Codex Model")).toBeInTheDocument());
+    const codexModelSelect = within(within(planningCard).getByText("Codex Model").closest("label") as HTMLElement).getByRole("combobox");
+    expect(codexModelSelect).toHaveValue("gpt-test");
+    expect(within(planningCard).getByLabelText("Reasoning Effort")).toBeInTheDocument();
+    expect(within(planningCard).getByLabelText("Speed")).toBeInTheDocument();
+    expect(within(planningCard).getByLabelText("Permission Mode")).toHaveValue("ask_for_permission");
+    expect(within(planningCard).getByLabelText("System Prompt")).toHaveValue("default");
+    expect(within(planningCard).queryByLabelText("API Key Source")).not.toBeInTheDocument();
+
+    fireEvent.change(providerSelect, { target: { value: "claudecode" } });
+
+    await waitFor(() => expect(within(planningCard).getByText("Claude Model")).toBeInTheDocument());
+    const claudeModelSelect = within(within(planningCard).getByText("Claude Model").closest("label") as HTMLElement).getByRole("combobox");
+    expect(claudeModelSelect).toHaveValue("sonnet");
+    expect(within(within(planningCard).getByText("CLI Command").closest("label") as HTMLElement).getByRole("textbox")).toHaveValue("claude");
+    expect(within(planningCard).getByLabelText("Reasoning Effort")).toHaveValue("medium");
+    expect(within(planningCard).getByLabelText("Speed")).toHaveValue("standard");
+    expect(within(planningCard).getByLabelText("Permission Mode")).toHaveValue("ask_for_permission");
+    expect(within(planningCard).getByLabelText("System Prompt")).toHaveValue("default");
+    expect(within(planningCard).queryByLabelText("API Key Source")).not.toBeInTheDocument();
   });
 
   it("shows scanning runs in the activity feed", async () => {

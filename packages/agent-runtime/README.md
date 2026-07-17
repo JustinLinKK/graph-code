@@ -18,7 +18,7 @@ CLI providers use the user's local CLI login instead of GraphCode storing API ke
 Codex runs non-interactively with:
 
 ```sh
-codex exec --cd <workspaceRoot> --sandbox read-only --ask-for-approval never -
+codex --ask-for-approval never exec --cd <workspaceRoot> --sandbox read-only -
 ```
 
 Claude Code runs in print mode with editing tools disallowed:

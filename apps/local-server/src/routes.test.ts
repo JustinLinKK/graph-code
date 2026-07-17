@@ -233,7 +233,8 @@ describe("graph API routes", () => {
           {
             agentKind: "planning",
             provider: "codex",
-            model: command,
+            model: "gpt-5.4",
+            cliCommand: command,
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Plan with Codex." }
@@ -262,7 +263,8 @@ describe("graph API routes", () => {
           {
             agentKind: "planning",
             provider: "codex",
-            model: command,
+            model: "gpt-5.4",
+            cliCommand: command,
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Plan with Codex." }

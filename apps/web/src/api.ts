@@ -8,6 +8,14 @@ import type {
   CodingAgentRequest,
   CodingWorkflowPreviewRequest,
   CodingWorkflowStartRequest,
+  ClaudeAuthStartResult,
+  ClaudeCliStatus,
+  ClaudeInstallResult,
+  ClaudeModelInfo,
+  CodexAuthStartResult,
+  CodexCliStatus,
+  CodexInstallResult,
+  CodexModelInfo,
   CreateCustomBlockType,
   CustomBlockType,
   CustomBlockTypeUpdate,
@@ -119,6 +127,50 @@ export async function saveWorkspaceSettings(
   return request<{ settings: WorkspaceSettings; validation: SettingsValidationResult }>(`/api/projects/${projectId}/settings`, {
     method: "PUT",
     body: JSON.stringify(settings)
+  });
+}
+
+export async function getCodexStatus(): Promise<CodexCliStatus> {
+  return request<CodexCliStatus>("/api/codex/status");
+}
+
+export async function getCodexModels(): Promise<CodexModelInfo[]> {
+  return request<CodexModelInfo[]>("/api/codex/models");
+}
+
+export async function installCodexCli(): Promise<CodexInstallResult> {
+  return request<CodexInstallResult>("/api/codex/install", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function startCodexAuth(): Promise<CodexAuthStartResult> {
+  return request<CodexAuthStartResult>("/api/codex/auth/start", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function getClaudeStatus(): Promise<ClaudeCliStatus> {
+  return request<ClaudeCliStatus>("/api/claude/status");
+}
+
+export async function getClaudeModels(): Promise<ClaudeModelInfo[]> {
+  return request<ClaudeModelInfo[]>("/api/claude/models");
+}
+
+export async function installClaudeCli(): Promise<ClaudeInstallResult> {
+  return request<ClaudeInstallResult>("/api/claude/install", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
+}
+
+export async function startClaudeAuth(): Promise<ClaudeAuthStartResult> {
+  return request<ClaudeAuthStartResult>("/api/claude/auth/start", {
+    method: "POST",
+    body: JSON.stringify({})
   });
 }
 
