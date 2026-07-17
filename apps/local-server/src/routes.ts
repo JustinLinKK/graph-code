@@ -85,6 +85,8 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
     service: "graphcode-local-server"
   }));
 
+  app.post("/api/system/pick-folder", async () => runtime.pickWorkspaceFolder());
+
   app.get("/api/codex/status", async () => runtime.getCodexStatus());
 
   app.get("/api/codex/models", async () => runtime.listCodexModels());

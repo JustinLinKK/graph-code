@@ -30,6 +30,7 @@ import type {
   GraphNode,
   GraphNodeReuse,
   HierarchyNode,
+  FolderPickerResult,
   LayoutPatch,
   NodeDetail,
   NodeReuseMutation,
@@ -53,17 +54,42 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
+function withJsonRequestHeaders(options: RequestInit = {}): RequestInit {
+  const headers = new Headers(options.headers);
+  const isFormData = typeof FormData !== "undefined" && options.body instanceof FormData;
+  if (options.body !== undefined && !isFormData && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+  return {
+    ...options,
+    headers
+  };
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  const text = await response.text();
+  if (!text) {
+    return `Request failed: ${response.status}`;
+  }
+  try {
+    const parsed = JSON.parse(text) as { message?: unknown; error?: unknown };
+    if (typeof parsed.message === "string") {
+      return parsed.message;
+    }
+    if (typeof parsed.error === "string") {
+      return parsed.error;
+    }
+  } catch {
+    // Fall back to the raw response text below.
+  }
+  return text;
+}
+
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      "Content-Type": "application/json"
-    },
-    ...options
-  });
+  const response = await fetch(`${API_BASE}${path}`, withJsonRequestHeaders(options));
 
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed: ${response.status}`);
+    throw new Error(await readErrorMessage(response));
   }
 
   return response.json() as Promise<T>;
@@ -79,21 +105,24 @@ export async function openWorkspace(
   initialization?: WorkspaceInitialization | BlankWorkspaceInitialization,
   creationMode?: WorkspaceCreationMode
 ): Promise<OpenWorkspaceResult> {
-  const response = await fetch(`${API_BASE}/api/workspaces/open`, {
-    headers: {
-      "Content-Type": "application/json"
-    },
+  const response = await fetch(`${API_BASE}/api/workspaces/open`, withJsonRequestHeaders({
     method: "POST",
     body: JSON.stringify({ rootPath, createIfMissing, initialization, creationMode })
-  });
+  }));
   if (response.status === 409) {
     return response.json() as Promise<OpenWorkspaceResult>;
   }
   if (!response.ok) {
-    const message = await response.text();
-    throw new Error(message || `Request failed: ${response.status}`);
+    throw new Error(await readErrorMessage(response));
   }
   return response.json() as Promise<OpenWorkspaceResult>;
+}
+
+export async function pickWorkspaceFolder(): Promise<FolderPickerResult> {
+  return request<FolderPickerResult>("/api/system/pick-folder", {
+    method: "POST",
+    body: JSON.stringify({})
+  });
 }
 
 export async function getHierarchy(projectId: string): Promise<HierarchyNode[]> {

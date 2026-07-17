@@ -33,7 +33,6 @@ import { Inspector } from "./Inspector";
 import { WorkspaceCanvas, type MemberLayout } from "./WorkspaceCanvas";
 
 type AppShellProps = {
-  projects: Project[];
   selectedProject: Project | null;
   hierarchy: HierarchyNode[];
   canvas: CanvasGraph | null;
@@ -106,7 +105,6 @@ type AppShellProps = {
 };
 
 export function AppShell({
-  projects,
   selectedProject,
   hierarchy,
   canvas,
@@ -267,7 +265,7 @@ export function AppShell({
           </div>
           <div>
             <h1>{title}</h1>
-            <p>{projects.length > 0 ? `${nodeCount} blocks · ${edgeCount} links` : "No project loaded"}</p>
+            <p>{selectedProject ? `${nodeCount} blocks · ${edgeCount} links` : "No project loaded"}</p>
           </div>
         </div>
 

@@ -1643,6 +1643,18 @@ select {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
+.directory-picker-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.directory-picker-row button {
+  min-height: 36px;
+  white-space: nowrap;
+}
+
 .file-picker-button {
   display: inline-flex;
   align-items: center;

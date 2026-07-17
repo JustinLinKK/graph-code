@@ -769,6 +769,13 @@ export const claudeModelInfoSchema = z.object({
   speedTiers: z.array(codexSpeedTierSchema).default(["standard"])
 });
 
+export const folderPickerResultSchema = z.object({
+  supported: z.boolean(),
+  selected: z.boolean(),
+  path: z.string().nullable(),
+  message: z.string().nullable().default(null)
+});
+
 export const planningChatRequestSchema = z.object({
   projectId: z.string().min(1),
   prompt: z.string().min(1),
@@ -1034,6 +1041,7 @@ export type ClaudeInstallResult = z.infer<typeof claudeInstallResultSchema>;
 export type ClaudeAuthStartResult = z.infer<typeof claudeAuthStartResultSchema>;
 export type ClaudeReasoningLevel = z.infer<typeof claudeReasoningLevelSchema>;
 export type ClaudeModelInfo = z.infer<typeof claudeModelInfoSchema>;
+export type FolderPickerResult = z.infer<typeof folderPickerResultSchema>;
 export type PlanningChatRequest = z.input<typeof planningChatRequestSchema>;
 export type CodingAgentRequest = z.input<typeof codingAgentRequestSchema>;
 export type CodeProposalTestScript = z.infer<typeof codeProposalTestScriptSchema>;

@@ -32,6 +32,7 @@ import {
   type GraphPatch,
   type GraphStatusPatch,
   type GitStatusInfo,
+  type FolderPickerResult,
   type LanguageType,
   type OpenWorkspaceResult,
   type OpenWorkspaceRequest,
@@ -334,6 +335,29 @@ export class WorkspaceRuntime {
       command: authCommand,
       message: `Run ${authCommand} in a terminal, complete the browser device flow, then refresh Codex status.`,
       status
+    };
+  }
+
+  async pickWorkspaceFolder(): Promise<FolderPickerResult> {
+    if (process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER === "1") {
+      return {
+        supported: false,
+        selected: false,
+        path: null,
+        message: "Native folder picker is disabled. Paste the workspace path manually."
+      };
+    }
+    if (process.platform === "win32") {
+      return pickWindowsFolder();
+    }
+    if (process.platform === "darwin") {
+      return pickMacFolder();
+    }
+    return {
+      supported: false,
+      selected: false,
+      path: null,
+      message: "Native folder picker is available on Windows and macOS. Paste the workspace path manually on this OS."
     };
   }
 
@@ -1512,6 +1536,92 @@ function outputText(value: unknown): string {
     return value.toString("utf8");
   }
   return "";
+}
+
+async function pickWindowsFolder(): Promise<FolderPickerResult> {
+  const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
+    "$dialog.Description = 'Choose a GraphCode workspace folder'",
+    "$dialog.ShowNewFolderButton = $false",
+    "$result = $dialog.ShowDialog()",
+    "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath; exit 0 }",
+    "exit 2"
+  ].join("\n");
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      timeout: 10 * 60 * 1000,
+      windowsHide: false,
+      maxBuffer: 1024 * 32
+    });
+    const selectedPath = firstOutputLine(stdout);
+    return {
+      supported: true,
+      selected: Boolean(selectedPath),
+      path: selectedPath,
+      message: selectedPath ? null : "No folder was selected."
+    };
+  } catch (error) {
+    if (exitCode(error) === 2) {
+      return {
+        supported: true,
+        selected: false,
+        path: null,
+        message: "Folder selection was canceled."
+      };
+    }
+    return {
+      supported: false,
+      selected: false,
+      path: null,
+      message: cliErrorMessage(error, "Windows folder picker failed. Paste the workspace path manually.")
+    };
+  }
+}
+
+async function pickMacFolder(): Promise<FolderPickerResult> {
+  try {
+    const { stdout } = await execFileAsync("osascript", ["-e", 'POSIX path of (choose folder with prompt "Choose a GraphCode workspace folder")'], {
+      timeout: 10 * 60 * 1000,
+      windowsHide: false,
+      maxBuffer: 1024 * 32
+    });
+    const selectedPath = firstOutputLine(stdout);
+    return {
+      supported: true,
+      selected: Boolean(selectedPath),
+      path: selectedPath,
+      message: selectedPath ? null : "No folder was selected."
+    };
+  } catch (error) {
+    if (exitCode(error) === 1) {
+      return {
+        supported: true,
+        selected: false,
+        path: null,
+        message: "Folder selection was canceled."
+      };
+    }
+    return {
+      supported: false,
+      selected: false,
+      path: null,
+      message: cliErrorMessage(error, "macOS folder picker failed. Paste the workspace path manually.")
+    };
+  }
+}
+
+function firstOutputLine(value: unknown): string | null {
+  return outputText(value)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? null;
+}
+
+function exitCode(error: unknown): number | null {
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "number" ? code : null;
 }
 
 function parseCodexModels(raw: string): CodexModelInfo[] {

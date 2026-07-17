@@ -100,7 +100,9 @@ The current prototype emphasizes three ideas:
 
 ## Quick Start
 
-GraphCode is a local pnpm workspace. Use Node.js 24 or newer with Corepack available.
+GraphCode is a local pnpm workspace. Use Node.js 22 LTS or newer with Corepack available, and run Node, pnpm, Git, and GraphCode from the same OS shell. A normal first launch starts blank; click **Open workspace** in the app and choose the repository folder you want GraphCode to manage.
+
+### macOS
 
 ```bash
 git clone <repository-url>
@@ -108,21 +110,60 @@ cd graph-code
 corepack enable
 corepack prepare pnpm@10.33.0 --activate
 pnpm install
-pnpm seed
 pnpm dev
 ```
 
-Open:
+Open `http://127.0.0.1:5173`, click **Open workspace**, and choose a repository folder. The web app runs through Vite on port `5173`; the local Fastify API runs on `127.0.0.1:3010`, and Vite proxies `/api` requests to the server.
 
-```text
-http://127.0.0.1:5173
+### Linux
+
+```bash
+git clone <repository-url>
+cd graph-code
+corepack enable
+corepack prepare pnpm@10.33.0 --activate
+pnpm install
+pnpm dev
 ```
 
-The web app runs through Vite on port `5173`. The local Fastify API runs on `127.0.0.1:3010`, and Vite proxies `/api` requests to the server.
+Open `http://127.0.0.1:5173`, click **Open workspace**, and enter the repository folder path.
 
-For daily development after the database exists, run `pnpm dev` directly. Normal startup and code graph refreshes preserve saved placements for stable nodes.
+### Windows PowerShell
 
-Use `pnpm seed` only for first-time setup or an intentional reset. It rebuilds the local self-repo fixture at `.graphcode/graphcode.sqlite` and erases local graph edits, saved placements, agent runs, and settings in that database.
+First-time setup:
+
+1. Install Git for Windows.
+2. Install Node.js 22 LTS for Windows.
+3. Open a new Windows PowerShell or Windows Terminal window so the Node.js PATH update is loaded.
+4. Clone the repository and start GraphCode:
+
+```powershell
+git clone <repository-url>
+cd graph-code
+node -v
+corepack --version
+corepack enable
+corepack prepare pnpm@10.33.0 --activate
+cmd /c pnpm install
+cmd /c pnpm dev
+```
+
+Open `http://127.0.0.1:5173`, click **Open workspace**, and choose the repository folder in the folder picker.
+
+The `cmd /c pnpm ...` form intentionally uses the Corepack `pnpm.cmd` shim. It avoids Windows PowerShell's script-execution policy blocking the generated `pnpm.ps1` shim.
+
+For later runs:
+
+```powershell
+cd graph-code
+cmd /c pnpm dev
+```
+
+On every OS, keep `pnpm dev` running while using the app.
+
+For daily development after dependencies are installed, run `pnpm dev` directly on macOS/Linux or `cmd /c pnpm dev` in Windows PowerShell. Normal startup opens to a blank state until you choose a workspace; code graph refreshes preserve saved placements for stable nodes after a workspace is loaded.
+
+Use `pnpm seed` only when you intentionally want the optional self-repo demo/reset fixture. It rebuilds the local self-repo fixture at `.graphcode/graphcode.sqlite` and erases local graph edits, saved placements, agent runs, and settings in that database.
 
 ## Feature Tour
 
@@ -221,7 +262,6 @@ The same pnpm commands are intended to work on Linux, macOS, and Windows. The ma
 - macOS paths look like `/Users/alex/project`.
 - Windows paths look like `C:\Users\Alex\project`.
 - Workspace source paths inside GraphCode are stored with forward slashes, even on Windows.
-- If you use WSL, run Node, pnpm, Git, and GraphCode inside the same WSL distro and open WSL paths such as `/home/alex/project`, not `C:\...` paths.
 
 Change ports on Linux or macOS:
 
@@ -234,7 +274,7 @@ Change ports in Windows PowerShell:
 ```powershell
 $env:GRAPHCODE_SERVER_PORT = "4010"
 $env:GRAPHCODE_WEB_PORT = "5174"
-pnpm dev
+cmd /c pnpm dev
 ```
 
 The Vite proxy reads `GRAPHCODE_SERVER_HOST`, `GRAPHCODE_SERVER_PORT`, and `GRAPHCODE_API_PROXY_TARGET`. The local API defaults to `127.0.0.1:3010`; the web app defaults to `127.0.0.1:5173`.

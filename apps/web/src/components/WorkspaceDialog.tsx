@@ -6,17 +6,32 @@ import { FormEvent, useEffect, useState } from "react";
 type WorkspaceDialogProps = {
   open: boolean;
   loading: boolean;
+  picking: boolean;
   missingPath: string | null;
   initializationStatus: "missing_graphcode" | "empty_graphcode" | null;
   error: string | null;
   onClose: () => void;
+  onPickFolder: () => Promise<string | null>;
   onOpen: (rootPath: string) => void;
   onCreateBlank: (rootPath: string, initialization: BlankWorkspaceInitialization) => void;
   onCreateAndScan: (rootPath: string, initialization: WorkspaceInitialization) => void;
   showCodexScanPromptOption: boolean;
 };
 
-export function WorkspaceDialog({ open, loading, missingPath, initializationStatus, error, onClose, onOpen, onCreateBlank, onCreateAndScan, showCodexScanPromptOption }: WorkspaceDialogProps) {
+export function WorkspaceDialog({
+  open,
+  loading,
+  picking,
+  missingPath,
+  initializationStatus,
+  error,
+  onClose,
+  onPickFolder,
+  onOpen,
+  onCreateBlank,
+  onCreateAndScan,
+  showCodexScanPromptOption
+}: WorkspaceDialogProps) {
   const [rootPath, setRootPath] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
@@ -79,6 +94,18 @@ export function WorkspaceDialog({ open, loading, missingPath, initializationStat
     onCreateBlank(trimmedRootPath, initialization);
   };
 
+  const pickFolder = async () => {
+    const selectedPath = await onPickFolder();
+    if (!selectedPath) {
+      return;
+    }
+    setRootPath(selectedPath);
+    if (!projectName.trim()) {
+      setProjectName(folderName(selectedPath));
+    }
+    setFormError(null);
+  };
+
   const isInitializing = Boolean(missingPath);
   const statusCopy =
     initializationStatus === "empty_graphcode"
@@ -106,7 +133,13 @@ export function WorkspaceDialog({ open, loading, missingPath, initializationStat
 
         <label className="form-field">
           <span>Directory</span>
-          <input autoFocus value={rootPath} placeholder="/path/to/repo" onChange={(event) => setRootPath(event.target.value)} />
+          <div className="directory-picker-row">
+            <input autoFocus value={rootPath} placeholder="/path/to/repo" onChange={(event) => setRootPath(event.target.value)} />
+            <Button type="button" variant="secondary" isDisabled={loading || picking} onPress={() => void pickFolder()}>
+              <FolderOpen size={16} />
+              {picking ? "Choosing..." : "Browse"}
+            </Button>
+          </div>
         </label>
 
         {isInitializing ? (

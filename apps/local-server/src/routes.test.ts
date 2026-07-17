@@ -655,6 +655,28 @@ describe("graph API routes", () => {
     expect(response.json().id).toBe("graphcode-self");
   });
 
+  it("reports a manual fallback when the native folder picker is disabled", async () => {
+    const previous = process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER;
+    process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER = "1";
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/system/pick-folder" });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(
+        expect.objectContaining({
+          supported: false,
+          selected: false,
+          path: null
+        })
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER;
+      } else {
+        process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER = previous;
+      }
+    }
+  });
+
   it("opens a workspace only after .graphcode exists or first-run scanning context is accepted", async () => {
     const rootPath = path.join(os.tmpdir(), `graphcode-workspace-${crypto.randomUUID()}`);
     await fs.promises.mkdir(path.join(rootPath, "src"), { recursive: true });

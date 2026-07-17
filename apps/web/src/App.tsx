@@ -47,6 +47,7 @@ import {
   listAgentRuns,
   listProjects,
   openWorkspace,
+  pickWorkspaceFolder,
   previewCodingWorkflow,
   disconnectGithub,
   pollGithubDeviceFlow,
@@ -100,6 +101,7 @@ export default function App() {
   const [workspaceMissingPath, setWorkspaceMissingPath] = useState<string | null>(null);
   const [workspaceInitializationStatus, setWorkspaceInitializationStatus] = useState<"missing_graphcode" | "empty_graphcode" | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [workspacePicking, setWorkspacePicking] = useState(false);
   const [blockDialogOpen, setBlockDialogOpen] = useState(false);
   const [blockDialogMode, setBlockDialogMode] = useState<"create" | "edit">("create");
   const [editingDetail, setEditingDetail] = useState<NodeDetail | null>(null);
@@ -201,6 +203,22 @@ export default function App() {
     }
   }, []);
 
+  const clearLoadedProject = useCallback(() => {
+    setSelectedProjectId(null);
+    setHierarchy([]);
+    setCanvas(null);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setSelectedBoundaryId(null);
+    setSelectedDetail(null);
+    setSettings(null);
+    setAgentRuns([]);
+    setGitStatus("");
+    setRestoreViewport(null);
+    undoStackRef.current = [];
+    setUndoStack([]);
+  }, []);
+
   const bootstrap = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -208,34 +226,25 @@ export default function App() {
       let nextProjects = await listProjects();
       setProjects(nextProjects);
       const storedProjectId = getStoredCanvasProjectId();
-      const firstProject = nextProjects.find((project) => project.id === storedProjectId) ?? nextProjects[0] ?? null;
-      setSelectedProjectId(firstProject?.id ?? null);
+      const firstProject = storedProjectId ? nextProjects.find((project) => project.id === storedProjectId) ?? null : null;
       undoStackRef.current = [];
       setUndoStack([]);
       if (firstProject) {
+        setSelectedProjectId(firstProject.id);
         const storedScopeNodeId = getStoredCanvasScope(firstProject.id);
         const loaded = await loadProject(firstProject.id, storedScopeNodeId ?? undefined);
         if (!loaded && storedScopeNodeId) {
           await loadProject(firstProject.id);
         }
       } else {
-        setHierarchy([]);
-        setCanvas(null);
-        setSelectedNodeId(null);
-        setSelectedEdgeId(null);
-        setSelectedBoundaryId(null);
-        setSelectedDetail(null);
-        setSettings(null);
-        setAgentRuns([]);
-        setGitStatus("");
-        setRestoreViewport(null);
+        clearLoadedProject();
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to connect to the local server.");
     } finally {
       setLoading(false);
     }
-  }, [loadProject]);
+  }, [clearLoadedProject, loadProject]);
 
   useEffect(() => {
     void bootstrap();
@@ -335,10 +344,14 @@ export default function App() {
         setWorkspaceDialogOpen(false);
         setProjects([result.project]);
         setSelectedProjectId(result.project.id);
-        rememberCanvasScope(result.project.id, null);
+        const storedScopeNodeId = getStoredCanvasScope(result.project.id);
+        rememberCanvasScope(result.project.id, storedScopeNodeId ?? null);
         undoStackRef.current = [];
         setUndoStack([]);
-        await loadProject(result.project.id);
+        const loaded = await loadProject(result.project.id, storedScopeNodeId ?? undefined);
+        if (!loaded && storedScopeNodeId) {
+          await loadProject(result.project.id);
+        }
       } catch (loadError) {
         setWorkspaceError(loadError instanceof Error ? loadError.message : "Failed to open workspace.");
       } finally {
@@ -347,6 +360,37 @@ export default function App() {
     },
     [loadProject]
   );
+
+  const handlePickWorkspaceFolder = useCallback(async (): Promise<string | null> => {
+    setWorkspacePicking(true);
+    setWorkspaceError(null);
+    try {
+      const result = await pickWorkspaceFolder();
+      if (result.selected && result.path) {
+        return result.path;
+      }
+      if (!result.supported && result.message) {
+        setWorkspaceError(result.message);
+      }
+      return null;
+    } catch (pickError) {
+      setWorkspaceError(pickError instanceof Error ? pickError.message : "Failed to open the folder picker.");
+      return null;
+    } finally {
+      setWorkspacePicking(false);
+    }
+  }, []);
+
+  const handleOpenWorkspacePicker = useCallback(async () => {
+    setWorkspaceDialogOpen(true);
+    setWorkspaceMissingPath(null);
+    setWorkspaceInitializationStatus(null);
+    setWorkspaceError(null);
+    const rootPath = await handlePickWorkspaceFolder();
+    if (rootPath) {
+      await handleOpenWorkspaceRequest(rootPath, false);
+    }
+  }, [handleOpenWorkspaceRequest, handlePickWorkspaceFolder]);
 
   const handleAddNode = useCallback(() => {
     setBlockDialogMode("create");
@@ -1484,7 +1528,6 @@ export default function App() {
   return (
     <>
       <AppShell
-        projects={projects}
         selectedProject={selectedProject}
         hierarchy={hierarchy}
         canvas={canvas}
@@ -1520,10 +1563,7 @@ export default function App() {
         onBoundaryDraft={handleBoundaryDraft}
         onEdgeDraft={handleEdgeDraft}
         onCancelDraw={handleCancelDraw}
-        onOpenWorkspace={() => {
-          setWorkspaceDialogOpen(true);
-          setWorkspaceError(null);
-        }}
+        onOpenWorkspace={() => void handleOpenWorkspacePicker()}
         onAddBlock={handleAddNode}
         onDrawEdge={handleAddEdge}
         onDrawBoundary={handleDrawBoundary}
@@ -1569,6 +1609,7 @@ export default function App() {
       <WorkspaceDialog
         open={workspaceDialogOpen}
         loading={loading}
+        picking={workspacePicking}
         missingPath={workspaceMissingPath}
         error={workspaceError}
         onClose={() => {
@@ -1577,6 +1618,7 @@ export default function App() {
           setWorkspaceInitializationStatus(null);
           setWorkspaceError(null);
         }}
+        onPickFolder={handlePickWorkspaceFolder}
         onOpen={(rootPath) => void handleOpenWorkspaceRequest(rootPath, false)}
         initializationStatus={workspaceInitializationStatus}
         onCreateBlank={(rootPath, initialization) => void handleOpenWorkspaceRequest(rootPath, true, initialization, "blank")}

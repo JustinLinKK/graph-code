@@ -211,6 +211,22 @@ const project: Project = {
   updatedAt: "now"
 };
 
+function rememberExplicitProjectSession(scopeNodeId: string | null = null, viewports: Record<string, { x: number; y: number; zoom: number }> = {}): void {
+  window.localStorage.setItem(
+    "graphcode.canvasSession.v1",
+    JSON.stringify({
+      lastProjectId: project.id,
+      lastOpenedProjectId: project.id,
+      projects: {
+        [project.id]: {
+          lastScopeNodeId: scopeNodeId,
+          viewports
+        }
+      }
+    })
+  );
+}
+
 const framework = node({ id: "framework", kind: "framework", name: "GraphCode Workspace", childCount: 1 });
 const moduleWeb = node({
   id: "module-web",
@@ -726,6 +742,7 @@ describe("GraphCode app shell", () => {
         reactFlowMock.setCenter.mockClear();
         reactFlowMock.setViewport.mockClear();
         window.localStorage.clear();
+        rememberExplicitProjectSession();
         document.documentElement.dataset.theme = "system";
       const agentRuns: AgentRun[] = [];
       let planningRunCount = 0;
@@ -767,6 +784,14 @@ describe("GraphCode app shell", () => {
         const url = String(input);
         if (url === "/api/projects") {
           return json([project]);
+        }
+        if (url === "/api/system/pick-folder") {
+          return json({
+            supported: false,
+            selected: false,
+            path: null,
+            message: "Native folder picker is unavailable in this test."
+          });
         }
         if (url === "/api/projects/graphcode-self/hierarchy") {
           return json(hierarchy);
@@ -1264,6 +1289,7 @@ describe("GraphCode app shell", () => {
       "graphcode.canvasSession.v1",
       JSON.stringify({
         lastProjectId: project.id,
+        lastOpenedProjectId: project.id,
         projects: {
           [project.id]: {
             lastScopeNodeId: "module-web",
@@ -1284,6 +1310,7 @@ describe("GraphCode app shell", () => {
       "graphcode.canvasSession.v1",
       JSON.stringify({
         lastProjectId: project.id,
+        lastOpenedProjectId: project.id,
         projects: {
           [project.id]: {
             lastScopeNodeId: "framework",
@@ -1370,6 +1397,16 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     expect(await screen.findByText("Open a workspace to begin")).toBeInTheDocument();
+  });
+
+  it("does not auto-open a persisted self project without an explicit browser open marker", async () => {
+    window.localStorage.clear();
+
+    render(<App />);
+
+    expect(await screen.findByText("Open a workspace to begin")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith("/api/projects", expect.any(Object));
+    expect(fetch).not.toHaveBeenCalledWith("/api/projects/graphcode-self/hierarchy", expect.any(Object));
   });
 
   it("collects first-run scanning context before creating a missing workspace", async () => {
