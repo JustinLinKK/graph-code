@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "same-file-functions",
+  "behavior": "same_file_functions",
+  "description": "Two disjoint functions share a file but receive distinct legacy conflict groups.",
+  "task": "Update both functions in the shared source file.",
+  "scopeNodeId": "shared-file-module",
+  "nodes": [
+    { "id": "shared-file-root", "name": "Shared file fixture", "kind": "framework", "summary": "Fixture architecture root.", "parentId": null, "attachedToId": null, "source": { "path": "package.json", "startLine": 1, "endLine": 40 }, "agentStatus": "implemented" },
+    { "id": "shared-file-module", "name": "Shared file module", "kind": "module", "summary": "Module containing two functions in one file.", "parentId": "shared-file-root", "attachedToId": null, "source": { "path": "src/shared.ts", "startLine": 1, "endLine": 120 }, "agentStatus": "planning" },
+    { "id": "shared-first", "name": "firstFunction", "kind": "function", "summary": "First same-file function.", "parentId": "shared-file-module", "attachedToId": null, "source": { "path": "src/shared.ts", "startLine": 10, "endLine": 35 }, "agentStatus": "planning" },
+    { "id": "shared-second", "name": "secondFunction", "kind": "function", "summary": "Second same-file function.", "parentId": "shared-file-module", "attachedToId": null, "source": { "path": "src/shared.ts", "startLine": 50, "endLine": 80 }, "agentStatus": "planning" }
+  ],
+  "edges": []
+}

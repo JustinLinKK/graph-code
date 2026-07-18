@@ -1,4 +1,14 @@
 import { z } from "zod";
+import {
+  codingWorkflowOrchestrationSchema,
+  codingWorkflowExecutionPolicySchema,
+  codingWorkflowPartitionConstraintsSchema,
+  contextBudgetSchema,
+  integrationCheckSchema,
+  sourceWriteScopeSchema
+} from "./work-units";
+
+export * from "./work-units";
 
 export const CORE_DOMAIN_NODE_KINDS = ["framework", "module", "website", "ui_component", "function", "object"] as const;
 export const EMBEDDED_SYSTEMS_DOMAIN_NODE_KINDS = ["embedded_system", "embedded_device", "ros_node", "firmware_task"] as const;
@@ -207,8 +217,8 @@ export const CLAUDE_SYSTEM_PROMPT_MODES = ["default", "custom"] as const;
 export const CODING_AGENT_MODES = ["small", "medium", "large"] as const;
 export const REVIEW_AGENT_MODES = ["small", "medium", "large"] as const;
 export const SCANNING_AGENT_MODES = ["local", "medium", "global"] as const;
-export const CODING_WORKFLOW_STATUSES = ["preview", "running", "blocked", "succeeded", "failed"] as const;
-export const CODING_WORKFLOW_ITEM_STATUSES = ["pending", "running", "proposed", "applied", "skipped", "failed", "blocked"] as const;
+export const CODING_WORKFLOW_STATUSES = ["preview", "running", "blocked", "succeeded", "failed", "cancelled"] as const;
+export const CODING_WORKFLOW_ITEM_STATUSES = ["pending", "running", "proposed", "applied", "skipped", "failed", "blocked", "cancelled"] as const;
 export const SETTINGS_THEME_MODES = ["light", "dark", "system"] as const;
 export const SECRET_SOURCE_TYPES = ["manual", "file", "env"] as const;
 export const PROMPT_SOURCE_TYPES = ["manual", "file"] as const;
@@ -908,7 +918,18 @@ export const codingWorkflowItemSchema = z.object({
   nodeId: z.string(),
   nodeName: z.string(),
   nodeKind: graphNodeKindSchema,
+  parentItemId: z.string().nullable().optional(),
   layerIndex: z.number().int().nonnegative(),
+  objective: z.string().optional(),
+  baseIndexRevision: z.string().nullable().optional(),
+  baseWorkspaceRevision: z.string().nullable().optional(),
+  baseGraphRevision: z.number().int().nonnegative().optional(),
+  routingDecisionId: z.string().nullable().optional(),
+  contextBudget: contextBudgetSchema.optional(),
+  plannedWriteScopes: z.array(sourceWriteScopeSchema).optional(),
+  actualWriteScopes: z.array(sourceWriteScopeSchema).optional(),
+  contextDiagnostics: z.record(z.unknown()).optional(),
+  proposalRevision: z.number().int().nonnegative().nullable().optional(),
   recommendedMode: codingAgentModeSchema,
   selectedMode: codingAgentModeSchema,
   modeReason: z.string(),
@@ -931,7 +952,9 @@ export const codingWorkflowSchema = z.object({
   summary: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
-  items: z.array(codingWorkflowItemSchema).default([])
+  items: z.array(codingWorkflowItemSchema).default([]),
+  integrationChecks: z.array(integrationCheckSchema).optional(),
+  orchestration: codingWorkflowOrchestrationSchema.optional()
 });
 
 export const codingWorkflowModeOverrideSchema = z.object({
@@ -941,13 +964,30 @@ export const codingWorkflowModeOverrideSchema = z.object({
 
 export const codingWorkflowPreviewRequestSchema = z.object({
   projectId: z.string().min(1),
-  scopeNodeId: z.string().min(1)
+  scopeNodeId: z.string().min(1),
+  modeOverrides: z.array(codingWorkflowModeOverrideSchema).optional().default([]),
+  partitionConstraints: codingWorkflowPartitionConstraintsSchema.optional().default({}),
+  executionPolicy: codingWorkflowExecutionPolicySchema.optional().default({})
 });
 
 export const codingWorkflowStartRequestSchema = z.object({
   projectId: z.string().min(1),
   scopeNodeId: z.string().min(1),
-  modeOverrides: z.array(codingWorkflowModeOverrideSchema).optional().default([])
+  modeOverrides: z.array(codingWorkflowModeOverrideSchema).optional().default([]),
+  partitionConstraints: codingWorkflowPartitionConstraintsSchema.optional().default({}),
+  executionPolicy: codingWorkflowExecutionPolicySchema.optional().default({}),
+  background: z.boolean().optional().default(false)
+});
+
+export const codingWorkflowControlRequestSchema = z.object({
+  projectId: z.string().min(1),
+  workflowId: z.string().min(1),
+  action: z.enum(["pause", "resume", "cancel", "retry", "escalate", "skip", "integrate"]),
+  itemId: z.string().min(1).optional()
+}).superRefine((input, context) => {
+  if (["retry", "escalate", "skip"].includes(input.action) && !input.itemId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["itemId"], message: `${input.action} requires an itemId.` });
+  }
 });
 
 export const codingWorkflowApplyLayerRequestSchema = z.object({
@@ -1149,6 +1189,7 @@ export type CodingWorkflowModeOverride = z.infer<typeof codingWorkflowModeOverri
 export type CodingWorkflowPreviewRequest = z.input<typeof codingWorkflowPreviewRequestSchema>;
 export type CodingWorkflowStartRequest = z.input<typeof codingWorkflowStartRequestSchema>;
 export type CodingWorkflowApplyLayerRequest = z.input<typeof codingWorkflowApplyLayerRequestSchema>;
+export type CodingWorkflowControlRequest = z.input<typeof codingWorkflowControlRequestSchema>;
 export type ReviewAgentRequest = z.input<typeof reviewAgentRequestSchema>;
 export type ScanningAgentRequest = z.input<typeof scanningAgentRequestSchema>;
 export type GraphPatchOperation = z.infer<typeof graphPatchOperationSchema>;

@@ -72,7 +72,13 @@ describe("SQLite graph repository", () => {
           "graph_status_history",
           "code_proposals",
           "coding_workflows",
-          "coding_workflow_items"
+          "coding_workflow_items",
+          "coding_work_unit_nodes",
+          "coding_work_unit_edges",
+          "coding_work_unit_dependencies",
+          "interface_contracts",
+          "model_routing_decisions",
+          "integration_checks"
         ])
       );
     });

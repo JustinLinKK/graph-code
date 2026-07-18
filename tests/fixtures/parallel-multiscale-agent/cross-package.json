@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "id": "cross-package",
+  "behavior": "cross_package",
+  "description": "A web package consumes a shared package API across architectural boundaries.",
+  "task": "Change a shared package API and update the web consumer.",
+  "scopeNodeId": "workspace-root",
+  "nodes": [
+    { "id": "workspace-root", "name": "Workspace", "kind": "framework", "summary": "Cross-package workspace scope.", "parentId": null, "attachedToId": null, "source": { "path": "package.json", "startLine": 1, "endLine": 80 }, "agentStatus": "planning" },
+    { "id": "shared-package", "name": "Shared package", "kind": "module", "summary": "Exports the shared API.", "parentId": "workspace-root", "attachedToId": null, "source": { "path": "packages/shared/src/index.ts", "startLine": 1, "endLine": 100 }, "agentStatus": "planning" },
+    { "id": "shared-api", "name": "sharedApi", "kind": "function", "summary": "Public shared function.", "parentId": "shared-package", "attachedToId": null, "source": { "path": "packages/shared/src/index.ts", "startLine": 10, "endLine": 35 }, "agentStatus": "planning" },
+    { "id": "web-package", "name": "Web package", "kind": "module", "summary": "Consumes the shared API.", "parentId": "workspace-root", "attachedToId": null, "source": { "path": "apps/web/src/App.tsx", "startLine": 1, "endLine": 160 }, "agentStatus": "planning" },
+    { "id": "web-consumer", "name": "renderSharedValue", "kind": "function", "summary": "Web-side consumer.", "parentId": "web-package", "attachedToId": null, "source": { "path": "apps/web/src/App.tsx", "startLine": 40, "endLine": 80 }, "agentStatus": "planning" }
+  ],
+  "edges": [
+    { "id": "web-imports-shared", "sourceNodeId": "web-package", "targetNodeId": "shared-package", "kind": "imports", "label": "web imports shared package" },
+    { "id": "consumer-calls-shared", "sourceNodeId": "web-consumer", "targetNodeId": "shared-api", "kind": "calls", "label": "consumer calls sharedApi" }
+  ]
+}

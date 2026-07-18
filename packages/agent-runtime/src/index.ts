@@ -1,8 +1,14 @@
-import { spawn } from "node:child_process";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
+import crossSpawn from "cross-spawn";
+import {
+  buildLegacyRoundRobinPlanningChunks,
+  estimateLegacyInputTokens,
+  inspectLegacyRoundRobinPlanningChunks,
+  type LegacyPlanningGraph
+} from "./orchestration/legacy-baseline";
 import {
   AVAILABLE_EXTENSION_PACKAGES,
   type AgentConfig,
@@ -13,13 +19,18 @@ import {
   type CanvasGraph,
   CLAUDE_REASONING_EFFORTS,
   type CodingAgentRequest,
+  type CodingWorkUnit,
   type CodeProposalArtifactManifest,
+  type ContractUpdate,
   type GraphEdge,
   type GraphNode,
   type GraphPatch,
   type GraphStatusPatch,
   type IndexState,
+  type InterfaceContract,
   type NodeDetail,
+  type WorkUnitProposal,
+  workUnitProposalSchema,
     type PlanningChatRequest,
     type ReviewAgentRequest,
     type ReviewAgentMode,
@@ -41,6 +52,37 @@ import {
   isDomainNodeKind
 } from "@graphcode/graph-model";
 import { z } from "zod";
+import {
+  renderedWorkUnitContextSchema,
+  workUnitContextSchema,
+  type RenderedWorkUnitContext,
+  type WorkUnitContext
+} from "./context/contracts";
+import { validateActualWriteScopes } from "./context/render";
+
+export * from "./context/compiler";
+export * from "./context/contracts";
+export * from "./context/render";
+export * from "./context/retrieval";
+
+export {
+  benchmarkLegacyConflictSchedule,
+  buildLegacyRoundRobinPlanningChunks,
+  createDelayedFakeProvider,
+  estimateLegacyInputTokens,
+  fixtureToLegacyPlanningGraph,
+  inspectLegacyRoundRobinPlanningChunks,
+  legacyWorkflowFixtureSchema
+} from "./orchestration/legacy-baseline";
+export type {
+  DelayedFakeProvider,
+  LegacyPlanningChunkDiagnostic,
+  LegacyPlanningChunkInspection,
+  LegacyPlanningGraph,
+  LegacyScheduleBenchmark,
+  LegacyScheduleItem,
+  LegacyWorkflowFixture
+} from "./orchestration/legacy-baseline";
 
 export type GraphCodeToolbox = {
   readGraph: (projectId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
@@ -55,7 +97,14 @@ export type GraphCodeToolbox = {
   buildFakeLocalScanOutput: (projectId: string, file: ScannableFile) => Promise<ScanLocalOutput>;
   applyScanResult: (projectId: string, result: ScanPipelineResult, runId?: string | null) => Promise<CodeGraphRefreshResult>;
   readSourceFile: (relativePath: string) => Promise<string>;
-  writeCodeProposal: (projectId: string, runId: string | null, targetNodeId: string | null, diff: string, artifactManifest?: CodeProposalArtifactManifest | null) => Promise<void>;
+  writeCodeProposal: (
+    projectId: string,
+    runId: string | null,
+    targetNodeId: string | null,
+    diff: string,
+    artifactManifest?: CodeProposalArtifactManifest | null,
+    workUnitProposal?: WorkUnitProposal | null
+  ) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
   readGitDiff?: (projectId: string) => Promise<string>;
   refreshCodeGraph: (
@@ -70,32 +119,30 @@ export type GraphCodeToolbox = {
   }>;
 };
 
-type PlanningGraph = Awaited<ReturnType<GraphCodeToolbox["readGraph"]>>;
+type PlanningGraph = LegacyPlanningGraph;
 
 export type AgentContextBenchmark = {
   durationMs: number;
   promptCharacters: number;
+  estimatedInputTokens: number;
   chunks: number;
   nodes: number;
   edges: number;
+  orphanEdges: number;
 };
 
 export function benchmarkAgentContext(graph: PlanningGraph, parallelLimit = 4): AgentContextBenchmark {
   const startedAt = performance.now();
-  const chunks = buildPlanningContextChunks(graph, parallelLimit);
-  const promptCharacters = chunks.reduce(
-    (total, chunk) =>
-      total +
-      chunk.nodes.reduce((count, node) => count + `${node.id}:${node.name}:${node.kind}:${node.summary}\n`.length, 0) +
-      chunk.edges.reduce((count, edge) => count + `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}\n`.length, 0),
-    0
-  );
+  const inspection = inspectLegacyRoundRobinPlanningChunks(graph, parallelLimit);
+  const promptCharacters = inspection.chunks.reduce((total, chunk) => total + chunk.promptCharacters, 0);
   return {
     durationMs: performance.now() - startedAt,
     promptCharacters,
-    chunks: chunks.length,
+    estimatedInputTokens: estimateLegacyInputTokens(promptCharacters),
+    chunks: inspection.chunks.length,
     nodes: graph.nodes.length,
-    edges: graph.edges.length
+    edges: graph.edges.length,
+    orphanEdges: inspection.orphanEdgeIds.length
   };
 }
 
@@ -113,6 +160,29 @@ export type AgentResult = {
   diff?: string;
   graphPatch?: GraphPatch | null;
   touched?: GraphStatusPatch[];
+};
+
+export type IntegrationAgentContext = {
+  schemaVersion: 1;
+  workflowId: string;
+  layerIndex: number;
+  parent: { workUnitId: string | null; objective: string };
+  children: Array<{
+    workUnitId: string;
+    objective: string;
+    outputSummary: string;
+    diff: string;
+    contractUpdates: ContractUpdate[];
+  }>;
+  contracts: InterfaceContract[];
+  failures: Array<{
+    kind: string;
+    status: "passed" | "failed" | "blocked";
+    itemId: string | null;
+    diagnostics: Record<string, unknown>;
+  }>;
+  relevantSource: Array<{ path: string; startLine: number | null; endLine: number | null; content: string }>;
+  authority: "propose_reconciliation_only";
 };
 
 type PromptMessage = {
@@ -239,26 +309,16 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
     prompt: input.prompt,
     execute: async () => {
       const provider = createProvider(options.config, options.workspaceRoot);
-      const [graph, indexState] = await Promise.all([options.toolbox.readGraph(input.projectId), options.toolbox.getIndexState(input.projectId)]);
+      const [fallbackGraph, scopedCanvas, indexState] = await Promise.all([
+        input.scopeNodeId ? Promise.resolve(null) : options.toolbox.readGraph(input.projectId),
+        input.scopeNodeId ? options.toolbox.getCanvasGraph(input.projectId, input.scopeNodeId, true).catch(() => null) : Promise.resolve(null),
+        options.toolbox.getIndexState(input.projectId)
+      ]);
+      const graph = scopedCanvas
+        ? { nodes: scopedCanvas.nodes, edges: scopedCanvas.edges }
+        : fallbackGraph ?? { nodes: [], edges: [] };
       const coverageNotice = formatIndexCoverageForPrompt(indexState);
       const scope = input.scopeNodeId ? graph.nodes.find((node) => node.id === input.scopeNodeId) ?? null : null;
-      const planningChunks = buildPlanningContextChunks(graph, options.config.parallelLimit);
-      const chunkNotes = await boundedMap(planningChunks, options.config.parallelLimit, async (chunk, index) =>
-        provider.invoke([
-          { role: "system", content: resolveSystemPrompt(options.config, "Analyze one GraphCode graph slice for a planning agent.") },
-          {
-            role: "user",
-            content: [
-              `Planning prompt: ${input.prompt}`,
-              coverageNotice,
-              scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
-              `Slice ${index + 1} of ${planningChunks.length}`,
-              `Nodes: ${chunk.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}`,
-              `Edges: ${chunk.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
-            ].join("\n")
-          }
-        ])
-      );
       const response = await provider.invoke([
         {
           role: "system",
@@ -286,7 +346,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
   }
 }`,
             "Emit at least one graphPatch operation when a scoped or root node can represent the plan. Prefer updating existing node summaries or codeContext over creating speculative new nodes.",
-            `Parallel graph slice notes:\n${chunkNotes.map((note, index) => `Slice ${index + 1}: ${note}`).join("\n\n")}`
+            `Topology-scoped planning evidence:\nNodes:\n${graph.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}\nEdges:\n${graph.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
           ].join("\n")
         }
       ]);
@@ -330,10 +390,14 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
       const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const detail = await options.toolbox.getNodeDetail(input.nodeId);
-      const [graph, indexState] = await Promise.all([options.toolbox.readGraph(input.projectId), options.toolbox.getIndexState(input.projectId)]);
+      const scopeRootNodeId = detail.node.parentId ?? detail.node.id;
+      const [boundedCanvas, indexState] = await Promise.all([
+        options.toolbox.getCanvasGraph(input.projectId, scopeRootNodeId, true),
+        options.toolbox.getIndexState(input.projectId)
+      ]);
+      const graph = { nodes: boundedCanvas.nodes, edges: boundedCanvas.edges };
       const organizationScope = resolveCodingOrganizationScope(detail.node, graph.nodes);
-      const scopeCanvas =
-        organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
+      const scopeCanvas = mode !== "small" ? boundedCanvas : null;
         const allowedPath = detail.node.source.path ?? detail.node.code.directory;
         const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
         const gitStatus = await options.toolbox.readGitStatus(input.projectId);
@@ -382,6 +446,138 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
   });
 }
 
+export type WorkUnitCodingRequest = {
+  projectId: string;
+  targetNodeId: string;
+  context: WorkUnitContext;
+  rendered: RenderedWorkUnitContext;
+  allowContractUpdates?: boolean;
+};
+
+export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, options: AgentRuntimeOptions): Promise<AgentResult> {
+  return runLangGraphTask({
+    kind: "coding",
+    prompt: input.context.task,
+    execute: async () => {
+      const context = workUnitContextSchema.parse(input.context);
+      const rendered = renderedWorkUnitContextSchema.parse(input.rendered);
+      if (rendered.purpose !== "coding") throw new Error("Work-unit coding execution requires a coding context render.");
+      if (context.projectId !== input.projectId || !context.workUnit.ownedNodeIds.includes(input.targetNodeId)) {
+        throw new Error("Work-unit coding request identity does not match its compiled context.");
+      }
+      if (usesCliDirectEditMode(options.config)) {
+        throw new Error("Parallel work-unit execution is proposal-only; direct-edit CLI permission modes are not allowed.");
+      }
+      throwIfAgentCancelled(options.signal);
+      const provider = createProvider(options.config, options.workspaceRoot);
+      const customSystemPrompt =
+        (options.config.systemPromptSource.type === "manual" || options.config.systemPromptSource.type === "file") &&
+        options.config.systemPromptSource.value?.trim()
+          ? `\n\nAdditional workspace policy:\n${options.config.systemPromptSource.value.trim()}`
+          : "";
+      const response = await provider.invoke([
+        {
+          role: "system",
+          content: `${rendered.systemPrompt}${customSystemPrompt}\n\nReturn a unified diff. Append GRAPHCODE_WORK_UNIT_METADATA_JSON followed by JSON containing ${
+            input.allowContractUpdates === false ? "discoveredDependencies, assumptions, unresolvedIssues, and confidence" : "contractUpdates, discoveredDependencies, assumptions, unresolvedIssues, and confidence"
+          }.`
+        },
+        { role: "user", content: rendered.userPrompt }
+      ]);
+      throwIfAgentCancelled(options.signal);
+      const { content: responseWithoutMetadata, metadata } = extractWorkUnitProposalMetadata(response);
+      const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMetadata);
+      const diff =
+        options.config.provider === "fake"
+          ? fakeWorkUnitDiff(context.workUnit, responseWithoutArtifacts)
+          : normalizeDiff(responseWithoutArtifacts, context.allowedWrites[0]?.path);
+      const actualWriteScopes = extractUnifiedDiffWriteScopes(diff);
+      if (actualWriteScopes.length === 0) throw new Error("Work-unit coding response did not contain a parseable unified diff.");
+      validateActualWriteScopes(context.workUnit, actualWriteScopes);
+      const workUnitProposal = workUnitProposalSchema.parse({
+        workUnitId: context.workUnit.id,
+        baseRevision: context.workUnit.baseRevision,
+        diff,
+        actualWriteScopes,
+        contractUpdates: input.allowContractUpdates === false ? [] : metadata?.contractUpdates ?? [],
+        discoveredDependencies: metadata?.discoveredDependencies ?? [],
+        testsProposed: [],
+        assumptions: metadata?.assumptions ?? [],
+        unresolvedIssues: metadata?.unresolvedIssues ?? [],
+        confidence: metadata?.confidence ?? "medium"
+      });
+      await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.targetNodeId, diff, artifactManifest, workUnitProposal);
+      const touched = context.workUnit.ownedNodeIds.map((nodeId) => ({
+        entityType: "node" as const,
+        entityId: nodeId,
+        status: "coded" as const,
+        note: `Work unit ${context.workUnit.id} produced a bounded proposal.`,
+        agentRunId: options.runId ?? null
+      }));
+      await options.toolbox.setStatuses(input.projectId, touched);
+      return { response, diff, touched };
+    }
+  });
+}
+
+export async function runIntegrationAgent(
+  input: { scale: "medium" | "large"; context: IntegrationAgentContext },
+  options: AgentRuntimeOptions
+): Promise<string> {
+  if (usesCliDirectEditMode(options.config)) {
+    throw new Error("Integration agents are proposal-only; direct-edit CLI permission modes are not allowed.");
+  }
+  throwIfAgentCancelled(options.signal);
+  const provider = createProvider(options.config, options.workspaceRoot);
+  const response = await provider.invoke([
+    {
+      role: "system",
+      content: [
+        "Reconcile only the bounded child proposals, interface contracts, failures, and exact source in the supplied integration capsule.",
+        "Do not request or infer a complete repository graph.",
+        "Return a reconciliation proposal only. Never apply workspace edits.",
+        `Integration scale: ${input.scale}.`
+      ].join(" ")
+    },
+    { role: "user", content: `GRAPHCODE_BOUNDED_INTEGRATION_CONTEXT_JSON\n${JSON.stringify(input.context)}` }
+  ]);
+  throwIfAgentCancelled(options.signal);
+  return response;
+}
+
+export function extractUnifiedDiffWriteScopes(diff: string): CodingWorkUnit["plannedWriteScopes"] {
+  const scopes: CodingWorkUnit["plannedWriteScopes"] = [];
+  const lines = diff.split(/\r?\n/);
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  let currentPath: string | null = null;
+  let permission: "edit" | "create" | "delete" = "edit";
+  for (const line of lines) {
+    if (line.startsWith("--- ")) {
+      oldPath = normalizeDiffHeaderPath(line.slice(4));
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      newPath = normalizeDiffHeaderPath(line.slice(4));
+      currentPath = newPath ?? oldPath;
+      permission = oldPath === null ? "create" : newPath === null ? "delete" : "edit";
+      continue;
+    }
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    if (!hunk || !currentPath) continue;
+    const startLine = Number.parseInt(hunk[1], 10);
+    const count = hunk[2] === undefined ? 1 : Number.parseInt(hunk[2], 10);
+    scopes.push({
+      path: currentPath,
+      startLine: permission === "edit" ? startLine : null,
+      endLine: permission === "edit" ? startLine + Math.max(1, count) - 1 : null,
+      symbolId: null,
+      permission
+    });
+  }
+  return scopes;
+}
+
 export async function runReviewAgent(
   input: ReviewAgentRequest & { diff?: string; targetNodeId?: string | null; targetRun?: AgentRun | null },
   options: AgentRuntimeOptions
@@ -393,11 +589,14 @@ export async function runReviewAgent(
       const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const diff = input.diff ?? "";
-      const [graph, indexState] = await Promise.all([options.toolbox.readGraph(input.projectId), options.toolbox.getIndexState(input.projectId)]);
       const detail = input.targetNodeId ? await options.toolbox.getNodeDetail(input.targetNodeId) : null;
+      const [boundedCanvas, indexState] = await Promise.all([
+        detail ? options.toolbox.getCanvasGraph(input.projectId, detail.node.parentId ?? detail.node.id, true).catch(() => null) : Promise.resolve(null),
+        options.toolbox.getIndexState(input.projectId)
+      ]);
+      const graph = { nodes: boundedCanvas?.nodes ?? (detail ? [detail.node] : []), edges: boundedCanvas?.edges ?? [] };
       const organizationScope = detail ? resolveCodingOrganizationScope(detail.node, graph.nodes) : null;
-      const scopeCanvas =
-        detail && organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
+      const scopeCanvas = detail && mode !== "small" ? boundedCanvas : null;
       const allowedPath = detail?.node.source.path ?? detail?.node.code.directory ?? null;
       const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath).catch(() => "") : "";
       const gitStatus = await options.toolbox.readGitStatus(input.projectId);
@@ -896,6 +1095,72 @@ function buildCodingContextBundle(input: CodingContextInput): string {
       .join("\n\n");
 }
 
+export type LegacyCodingContextBenchmarkInput = {
+  detail: NodeDetail;
+  graph: LegacyPlanningGraph;
+  scopeCanvas: CanvasGraph | null;
+  source: string;
+  gitStatus: string;
+  execution: BlockExecutionMetadata;
+  recommendedModeReason?: string;
+  prompt?: string;
+  coverageNotice: string;
+};
+
+export type LegacyCodingContextSize = {
+  mode: "small" | "medium" | "large";
+  promptCharacters: number;
+  estimatedInputTokens: number;
+};
+
+export function benchmarkLegacyCodingContexts(input: LegacyCodingContextBenchmarkInput): LegacyCodingContextSize[] {
+  const organizationScope = resolveCodingOrganizationScope(input.detail.node, input.graph.nodes);
+  const allowedPath = input.detail.node.source.path ?? input.detail.node.code.directory;
+  return (["small", "medium", "large"] as const).map((mode) => {
+    const context = buildCodingContextBundle({
+      ...input,
+      mode,
+      organizationScope,
+      allowedPath
+    });
+    return {
+      mode,
+      promptCharacters: context.length,
+      estimatedInputTokens: estimateLegacyInputTokens(context.length)
+    };
+  });
+}
+
+export type LegacyReviewContextBenchmarkInput = {
+  targetRun: AgentRun | null;
+  detail: NodeDetail | null;
+  graph: LegacyPlanningGraph;
+  scopeCanvas: CanvasGraph | null;
+  source: string;
+  gitStatus: string;
+  execution: BlockExecutionMetadata | null;
+  diff: string;
+  coverageNotice: string;
+};
+
+export function benchmarkLegacyReviewContexts(input: LegacyReviewContextBenchmarkInput): LegacyCodingContextSize[] {
+  const organizationScope = input.detail ? resolveCodingOrganizationScope(input.detail.node, input.graph.nodes) : null;
+  const allowedPath = input.detail?.node.source.path ?? input.detail?.node.code.directory ?? null;
+  return (["small", "medium", "large"] as const).map((mode) => {
+    const context = buildReviewContextBundle({
+      ...input,
+      mode,
+      organizationScope,
+      allowedPath
+    });
+    return {
+      mode,
+      promptCharacters: context.length,
+      estimatedInputTokens: estimateLegacyInputTokens(context.length)
+    };
+  });
+}
+
 type ReviewContextInput = {
   mode: ReviewAgentMode;
   targetRun: AgentRun | null;
@@ -1322,20 +1587,15 @@ function buildCliPrompt(messages: PromptMessage[], options: { providerName: stri
     .join("\n\n");
 }
 
-function usesWindowsCliShell(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === "win32";
-}
-
 function runCliCommand(
   command: string,
   args: string[],
   options: { cwd: string; input?: string; timeout: number; maxBuffer: number }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = crossSpawn(command, args, {
       cwd: options.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: usesWindowsCliShell(),
+      stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true
     });
     let stdout = "";
@@ -1358,14 +1618,14 @@ function runCliCommand(
       finish(new Error(`${command} timed out after ${options.timeout}ms.`));
     }, options.timeout);
     child.on("error", (error) => finish(error));
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
       if (stdout.length + stderr.length > options.maxBuffer) {
         child.kill("SIGTERM");
         finish(new Error(`${command} produced more than ${options.maxBuffer} bytes of output.`));
       }
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
       if (stdout.length + stderr.length > options.maxBuffer) {
         child.kill("SIGTERM");
@@ -1380,7 +1640,14 @@ function runCliCommand(
       const detail = stderr.trim() || stdout.trim() || (signal ? `signal ${signal}` : `exit code ${code}`);
       finish(new Error(`${command} failed: ${detail}`));
     });
-    child.stdin.end(options.input ?? "");
+    if (options.input !== undefined) {
+      child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EPIPE") {
+          finish(error);
+        }
+      });
+      child.stdin?.end(options.input);
+    }
   });
 }
 
@@ -1447,6 +1714,40 @@ function extractCodeProposalArtifactManifest(response: string): { content: strin
   }
 }
 
+const workUnitProposalMetadataSchema = z.object({
+  contractUpdates: workUnitProposalSchema.shape.contractUpdates.default([]),
+  discoveredDependencies: workUnitProposalSchema.shape.discoveredDependencies.default([]),
+  assumptions: workUnitProposalSchema.shape.assumptions.default([]),
+  unresolvedIssues: workUnitProposalSchema.shape.unresolvedIssues.default([]),
+  confidence: workUnitProposalSchema.shape.confidence.default("medium")
+});
+
+export function extractWorkUnitProposalMetadata(response: string): {
+  content: string;
+  metadata: z.infer<typeof workUnitProposalMetadataSchema> | null;
+} {
+  const marker = "GRAPHCODE_WORK_UNIT_METADATA_JSON";
+  const markerIndex = response.indexOf(marker);
+  if (markerIndex < 0) return { content: response, metadata: null };
+  const tail = response.slice(markerIndex + marker.length).trimStart();
+  const nextMarkerMatch = tail.match(/\nGRAPHCODE_[A-Z_]+/);
+  const nextMarkerIndex = nextMarkerMatch?.index ?? -1;
+  const rawBlock = (nextMarkerIndex < 0 ? tail : tail.slice(0, nextMarkerIndex))
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  const remaining = nextMarkerIndex < 0 ? "" : tail.slice(nextMarkerIndex + 1);
+  try {
+    return {
+      content: [response.slice(0, markerIndex).trimEnd(), remaining.trimStart()].filter(Boolean).join("\n"),
+      metadata: workUnitProposalMetadataSchema.parse(JSON.parse(rawBlock))
+    };
+  } catch {
+    throw new Error("Work-unit proposal metadata is not valid GRAPHCODE_WORK_UNIT_METADATA_JSON.");
+  }
+}
+
 function normalizeDiff(response: string, allowedPath: string | null | undefined): string {
   if (response.includes("diff --git") || response.includes("--- ") || response.includes("+++ ")) {
     return response;
@@ -1459,6 +1760,32 @@ function assertDiffInScope(diff: string, allowedPath: string | null | undefined)
   if (diffEscapesScope(diff, allowedPath)) {
     throw new Error(`Coding agent diff escaped the selected block scope: ${allowedPath?.replace(/^\/+/, "")}`);
   }
+}
+
+function fakeWorkUnitDiff(workUnit: CodingWorkUnit, response: string): string {
+  const scope = workUnit.plannedWriteScopes[0];
+  if (!scope) throw new Error(`Work unit ${workUnit.id} has no write scope for the fake provider.`);
+  if (scope.permission === "rename") throw new Error("The fake work-unit provider does not synthesize rename proposals.");
+  const startLine = scope.startLine ?? 1;
+  const count = scope.startLine !== null && scope.endLine !== null ? scope.endLine - scope.startLine + 1 : 1;
+  const oldHeader = scope.permission === "create" ? "/dev/null" : `a/${scope.path}`;
+  const newHeader = scope.permission === "delete" ? "/dev/null" : `b/${scope.path}`;
+  const oldRange = scope.permission === "create" ? "0,0" : `${startLine},${count}`;
+  const newRange = scope.permission === "delete" ? `${startLine},0` : `${startLine},${count}`;
+  const summary = response.replace(/\s+/g, " ").slice(0, 160);
+  return [
+    `diff --git a/${scope.path} b/${scope.path}`,
+    `--- ${oldHeader}`,
+    `+++ ${newHeader}`,
+    `@@ -${oldRange} +${newRange} @@`,
+    scope.permission === "delete" ? `-${summary}` : `+${summary}`
+  ].join("\n");
+}
+
+function normalizeDiffHeaderPath(value: string): string | null {
+  const header = value.trim().split(/\s+/)[0];
+  if (header === "/dev/null") return null;
+  return header.replace(/^[ab]\//, "");
 }
 
 function diffEscapesScope(diff: string, allowedPath: string | null | undefined): boolean {
@@ -1479,18 +1806,6 @@ function extractAllowedPath(content: string): string | null {
   const match = content.match(/^Allowed edit path:\s*(.+)$/m);
   const value = match?.[1]?.trim();
   return value && value !== "none" ? value : null;
-}
-
-function buildPlanningContextChunks(graph: PlanningGraph, parallelLimit: number): PlanningGraph[] {
-  const workerCount = Math.max(1, Math.min(parallelLimit, Math.max(graph.nodes.length, 1)));
-  const chunks: PlanningGraph[] = Array.from({ length: workerCount }, () => ({ nodes: [], edges: [] }));
-  graph.nodes.forEach((node, index) => {
-    chunks[index % workerCount].nodes.push(node);
-  });
-  graph.edges.forEach((edge, index) => {
-    chunks[index % workerCount].edges.push(edge);
-  });
-  return chunks.filter((chunk) => chunk.nodes.length > 0 || chunk.edges.length > 0);
 }
 
 async function boundedMap<T, R>(

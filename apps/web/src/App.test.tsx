@@ -52,6 +52,7 @@ vi.mock("@xyflow/react", async () => ({
       data: {
         node?: GraphNode;
         boundary?: GraphBoundary;
+        workflowOverlay?: { wave: number; scale: string; status: string } | null;
         onResizeEnd?: (nodeId: string, size: { width: number; height: number }) => void;
       };
     }>;
@@ -103,6 +104,7 @@ vi.mock("@xyflow/react", async () => ({
               <button type="button" onClick={() => onNodeClick?.({}, node)} onDoubleClick={() => onNodeDoubleClick?.({}, node)}>
                 {node.data.node.name}
               </button>
+              {node.data.workflowOverlay ? <span>W{node.data.workflowOverlay.wave} · {node.data.workflowOverlay.scale} · {node.data.workflowOverlay.status}</span> : null}
               <button
                 type="button"
                 aria-label={`Drag ${node.data.node.name}`}
@@ -776,7 +778,53 @@ describe("GraphCode app shell", () => {
             createdAt: "now",
             updatedAt: "now"
           }
-        ]
+        ],
+        orchestration: {
+          schemaVersion: 1,
+          featureVersion: "ma6-ui-test-v1",
+          workflowId: "workflow-1",
+          projectId: project.id,
+          workUnits: [
+            {
+              id: "workflow-item-1",
+              title: "Render widget partition",
+              objective: "Update the render widget without editing its read-only process dependency.",
+              ownedNodeIds: ["function-render-widget"],
+              readHaloNodeIds: ["module-web", "process-web"],
+              dependencyWorkUnitIds: [],
+              plannedWriteScopes: [{ permission: "edit", path: "apps/web/src/App.tsx", startLine: 1, endLine: 20 }],
+              layerIndex: 0,
+              selectedScale: "small",
+              status: "pending"
+            }
+          ],
+          routingDecisions: [
+            {
+              workUnitId: "workflow-item-1",
+              selectedScale: "small",
+              reasons: ["Leaf-local implementation with a bounded write scope."],
+              estimatedInputTokens: 1200,
+              estimatedOutputTokens: 500,
+              estimatedCost: 0.002,
+              assignment: { providerId: "fake", modelId: "fake-small" }
+            }
+          ],
+          interfaceContracts: [
+            {
+              id: "contract-flow",
+              edgeId: "flow-input-process",
+              contractKind: "data_shape",
+              status: "stable",
+              producerWorkUnitId: "workflow-item-1",
+              consumerWorkUnitId: "workflow-item-1-read-halo",
+              baseline: { summary: "Selection input shape remains stable." },
+              proposed: null
+            }
+          ],
+          partitioning: { cutRelationshipEdges: 1, ignoredEdges: [] },
+          partitionConstraints: { keepTogetherNodeGroups: [], separateNodePairs: [], approvedIgnoredEdges: [] },
+          executionPolicy: { maximumConcurrency: 4, maxEstimatedCost: null, currency: "USD" }
+        }
       };
       vi.stubGlobal(
       "fetch",
@@ -972,7 +1020,20 @@ describe("GraphCode app shell", () => {
             return json(defaultSettings);
           }
           if (url === "/api/coding-workflows/preview") {
-            return json(workflowResponse);
+            const payload = JSON.parse(String(init?.body ?? "{}"));
+            const overrides = new Map<string, string>((payload.modeOverrides ?? []).map((item: { nodeId: string; mode: string }) => [item.nodeId, item.mode]));
+            const selectedMode = overrides.get("function-render-widget") ?? "small";
+            return json({
+              ...workflowResponse,
+              items: workflowResponse.items.map((item) => ({ ...item, selectedMode })),
+              orchestration: {
+                ...workflowResponse.orchestration,
+                partitionConstraints: payload.partitionConstraints ?? workflowResponse.orchestration.partitionConstraints,
+                executionPolicy: payload.executionPolicy ?? workflowResponse.orchestration.executionPolicy,
+                workUnits: workflowResponse.orchestration.workUnits.map((unit) => ({ ...unit, selectedScale: selectedMode })),
+                routingDecisions: workflowResponse.orchestration.routingDecisions.map((decision) => ({ ...decision, selectedScale: selectedMode }))
+              }
+            });
           }
           if (url === "/api/coding-workflows/start") {
             const payload = JSON.parse(String(init?.body ?? "{}"));
@@ -995,6 +1056,10 @@ describe("GraphCode app shell", () => {
               status: "succeeded",
               items: workflowResponse.items.map((item) => ({ ...item, status: "applied", appliedAt: "now" }))
             });
+          }
+          if (url === "/api/coding-workflows/control") {
+            const payload = JSON.parse(String(init?.body ?? "{}"));
+            return json({ ...workflowResponse, status: payload.action === "cancel" ? "cancelled" : "blocked" });
           }
           if (url === "/api/projects/graphcode-self/coding-workflows/workflow-1") {
             return json(workflowResponse);
@@ -1811,15 +1876,29 @@ describe("GraphCode app shell", () => {
     });
     expect(await screen.findByText("Layered coding")).toBeInTheDocument();
     expect((await screen.findAllByText("renderWidget")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Workflow overlay")).toBeInTheDocument();
+    expect(screen.getByText(/W1 · small · pending/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByDisplayValue("Small"), { target: { value: "large" } });
+    expect(screen.getByRole("button", { name: /Start workflow/i })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Concurrency"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Revalidate preview/i }));
+    await waitFor(() => {
+      const previewCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/coding-workflows/preview");
+      const body = JSON.parse(String(previewCalls.at(-1)?.[1]?.body ?? "{}"));
+      expect(body).toEqual(expect.objectContaining({
+        modeOverrides: expect.arrayContaining([{ nodeId: "function-render-widget", mode: "large" }]),
+        executionPolicy: expect.objectContaining({ maximumConcurrency: 2 })
+      }));
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: /Start workflow/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /Start workflow/i }));
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
         "/api/coding-workflows/start",
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining('"mode":"large"')
+          body: expect.stringContaining('"background":true')
         })
       );
     });

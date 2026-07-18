@@ -3,7 +3,16 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, IndexState, NodeDetail } from "@graphcode/graph-model";
-import { runCodingAgent, runPlanningAgent, runReviewAgent, runScanningAgent, scanLocalOutputSchema, type GraphCodeToolbox, type ScanPipelineResult } from "./index";
+import {
+  extractWorkUnitProposalMetadata,
+  runCodingAgent,
+  runPlanningAgent,
+  runReviewAgent,
+  runScanningAgent,
+  scanLocalOutputSchema,
+  type GraphCodeToolbox,
+  type ScanPipelineResult
+} from "./index";
 
 const baseConfig: AgentConfig = {
   agentKind: "planning",
@@ -169,7 +178,9 @@ function completeIndexState(): IndexState {
 function writeFakeCli(outputLines: string[], options: { argsLog?: string; stdinLog?: string } = {}): string {
   const command = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}${process.platform === "win32" ? ".cmd" : ".sh"}`);
   if (process.platform === "win32") {
-    fs.writeFileSync(command, windowsFakeCli(outputLines, options), { mode: 0o755 });
+    const runner = `${command}.cjs`;
+    fs.writeFileSync(runner, windowsFakeCliRunner(outputLines, options));
+    fs.writeFileSync(command, windowsFakeCli(runner), { mode: 0o755 });
   } else {
     fs.writeFileSync(command, unixFakeCli(outputLines, options), { mode: 0o755 });
   }
@@ -189,29 +200,30 @@ function unixFakeCli(outputLines: string[], options: { argsLog?: string; stdinLo
     .join("\n");
 }
 
-function windowsFakeCli(outputLines: string[], options: { argsLog?: string; stdinLog?: string }): string {
+function windowsFakeCli(runnerPath: string): string {
+  return `@echo off\r\nnode "%~dp0${path.basename(runnerPath)}" %*\r\n`;
+}
+
+function windowsFakeCliRunner(outputLines: string[], options: { argsLog?: string; stdinLog?: string }): string {
+  const emitOutput = `process.stdout.write(${JSON.stringify(`${outputLines.join("\n")}\n`)});`;
   return [
-    "@echo off",
-    options.argsLog ? `if exist "${options.argsLog}" del "${options.argsLog}"` : "",
-    options.argsLog ? ":args_loop" : "",
-    options.argsLog ? "if \"%~1\"==\"\" goto after_args" : "",
-    options.argsLog ? `>>"${options.argsLog}" echo(%~1` : "",
-    options.argsLog ? "shift" : "",
-    options.argsLog ? "goto args_loop" : "",
-    options.argsLog ? ":after_args" : "",
-    options.stdinLog ? `more > "${options.stdinLog}"` : "",
-    ...outputLines.map((line) => `echo(${escapeBatchEcho(line)}`)
+    'const fs = require("node:fs");',
+    options.argsLog
+      ? `fs.writeFileSync(${JSON.stringify(options.argsLog)}, process.argv.slice(2).join("\\n") + "\\n");`
+      : "",
+    options.stdinLog ? 'let stdin = "";' : "",
+    options.stdinLog ? 'process.stdin.setEncoding("utf8");' : "",
+    options.stdinLog ? 'process.stdin.on("data", (chunk) => { stdin += chunk; });' : "",
+    options.stdinLog
+      ? `process.stdin.on("end", () => { fs.writeFileSync(${JSON.stringify(options.stdinLog)}, stdin); ${emitOutput} });`
+      : emitOutput
   ]
     .filter(Boolean)
-    .join("\r\n");
+    .join("\n");
 }
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
-}
-
-function escapeBatchEcho(value: string): string {
-  return value.replace(/\^/g, "^^").replace(/%/g, "%%").replace(/&/g, "^&").replace(/</g, "^<").replace(/>/g, "^>").replace(/\|/g, "^|");
 }
 
 function normalizeNewlines(value: string): string {
@@ -219,6 +231,40 @@ function normalizeNewlines(value: string): string {
 }
 
 describe("GraphCode agent runtime", () => {
+  it("extracts typed work-unit contract metadata without contaminating the unified diff", () => {
+    const response = [
+      "diff --git a/src/module.ts b/src/module.ts",
+      "--- a/src/module.ts",
+      "+++ b/src/module.ts",
+      "@@ -1 +1 @@",
+      "-export function run(value: string): string;",
+      "+export function run(value: number): string;",
+      "GRAPHCODE_WORK_UNIT_METADATA_JSON",
+      JSON.stringify({
+        contractUpdates: [{
+          contractId: "contract-run",
+          proposed: {
+            formatVersion: 1,
+            summary: "run signature",
+            normalizedValue: "run(number):string",
+            fingerprint: "signature-v2",
+            metadata: {}
+          },
+          rationale: "Input changed."
+        }],
+        confidence: "high"
+      })
+    ].join("\n");
+
+    const extracted = extractWorkUnitProposalMetadata(response);
+    expect(extracted.content).toContain("diff --git a/src/module.ts b/src/module.ts");
+    expect(extracted.content).not.toContain("GRAPHCODE_WORK_UNIT_METADATA_JSON");
+    expect(extracted.metadata).toEqual(expect.objectContaining({
+      confidence: "high",
+      contractUpdates: [expect.objectContaining({ contractId: "contract-run" })]
+    }));
+  });
+
   it("runs the planning agent through LangGraph and marks scoped status", async () => {
     const tools = toolbox();
     const result = await runPlanningAgent(
@@ -231,11 +277,12 @@ describe("GraphCode agent runtime", () => {
     );
 
     expect(result.response).toContain("Fake planning response");
-    expect(result.response).toContain("Parallel graph slice notes");
+    expect(result.response).toContain("Topology-scoped planning evidence");
     expect(result.graphPatch?.operations).toEqual([
       expect.objectContaining({ entityType: "node", entityId: "node-1", action: "update" })
     ]);
     expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ entityId: "node-1", status: "planning" })]);
+    expect(tools.readGraph).not.toHaveBeenCalled();
   });
 
   it("stores a scoped coding proposal and marks the block coded", async () => {
@@ -255,6 +302,7 @@ describe("GraphCode agent runtime", () => {
       expect(result.response).toContain("testScriptDirectory=tests/generated");
       expect(tools.writeCodeProposal).toHaveBeenCalled();
       expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded" })]);
+      expect(tools.readGraph).not.toHaveBeenCalled();
     });
 
     it("warns agents not to make repository-wide claims from a partial index", async () => {
@@ -683,6 +731,7 @@ describe("GraphCode agent runtime", () => {
       );
       expect(passTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "reviewed" })]);
       expect(passTools.getCanvasGraph).toHaveBeenCalledWith("project", "node-1", true);
+      expect(passTools.readGraph).not.toHaveBeenCalled();
 
       const errorDiffTools = toolbox();
       await runReviewAgent(

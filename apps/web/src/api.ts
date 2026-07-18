@@ -5,6 +5,7 @@ import type {
   CanvasGraph,
   CodingWorkflow,
   CodingWorkflowApplyLayerRequest,
+  CodingWorkflowControlRequest,
   CodingAgentRequest,
   CodingWorkflowPreviewRequest,
   CodingWorkflowStartRequest,
@@ -283,6 +284,13 @@ export async function getCodingWorkflow(projectId: string, workflowId: string): 
 
 export async function applyCodingWorkflowLayer(input: CodingWorkflowApplyLayerRequest): Promise<CodingWorkflow> {
   return request<CodingWorkflow>("/api/coding-workflows/apply-layer", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function controlCodingWorkflow(input: CodingWorkflowControlRequest): Promise<CodingWorkflow> {
+  return request<CodingWorkflow>("/api/coding-workflows/control", {
     method: "POST",
     body: JSON.stringify(input)
   });

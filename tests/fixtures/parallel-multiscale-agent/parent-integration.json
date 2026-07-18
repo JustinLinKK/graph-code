@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "parent-integration",
+  "behavior": "parent_integration",
+  "description": "Leaf implementations feed a parent module integration item.",
+  "task": "Implement parser and formatter leaves, then integrate them in the parent pipeline.",
+  "scopeNodeId": "pipeline-module",
+  "nodes": [
+    { "id": "pipeline-root", "name": "Pipeline fixture", "kind": "framework", "summary": "Fixture architecture root.", "parentId": null, "attachedToId": null, "source": { "path": "package.json", "startLine": 1, "endLine": 40 }, "agentStatus": "implemented" },
+    { "id": "pipeline-module", "name": "Pipeline module", "kind": "module", "summary": "Parent integration scope.", "parentId": "pipeline-root", "attachedToId": null, "source": { "path": "src/pipeline/index.ts", "startLine": 1, "endLine": 140 }, "agentStatus": "planning" },
+    { "id": "parse-leaf", "name": "parseInput", "kind": "function", "summary": "Parses pipeline input.", "parentId": "pipeline-module", "attachedToId": null, "source": { "path": "src/pipeline/parse.ts", "startLine": 1, "endLine": 45 }, "agentStatus": "planning" },
+    { "id": "format-leaf", "name": "formatOutput", "kind": "function", "summary": "Formats pipeline output.", "parentId": "pipeline-module", "attachedToId": null, "source": { "path": "src/pipeline/format.ts", "startLine": 1, "endLine": 45 }, "agentStatus": "planning" }
+  ],
+  "edges": [
+    { "id": "parse-flows-format", "sourceNodeId": "parse-leaf", "targetNodeId": "format-leaf", "kind": "flows", "label": "parsed data flows to formatter" }
+  ]
+}

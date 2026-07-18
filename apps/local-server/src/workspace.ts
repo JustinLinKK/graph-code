@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  codingWorkflowExecutionPolicySchema,
+  codingWorkflowPartitionConstraintsSchema,
   type AgentKind,
   type AgentProvider,
   type AgentRun,
@@ -17,8 +19,11 @@ import {
   type ClaudeInstallResult,
   type ClaudeModelInfo,
   type CodingAgentRequest,
+  type CodingAgentMode,
   type CodingWorkflow,
   type CodingWorkflowApplyLayerRequest,
+  type CodingWorkflowControlRequest,
+  type CodingWorkflowPreviewRequest,
   type CodingWorkflowStartRequest,
   type CodexAuthStartResult,
   type CodexCliStatus,
@@ -48,21 +53,43 @@ import {
   type WorkspaceSettingsMutation
 } from "@graphcode/graph-model";
 import {
+  benchmarkLegacyCodingContexts,
+  benchmarkLegacyReviewContexts,
+  compareWorkUnitContextToLegacy,
+  renderWorkUnitContext,
+  runIntegrationAgent,
+  runCodingWorkUnitAgent,
   runCodingAgent,
   runPlanningAgent,
   runReviewAgent,
   runScanningAgent,
+  WORK_UNIT_CONTEXT_COMPILER_VERSION,
   type GraphCodeToolbox,
+  type RenderedWorkUnitContext,
   type ScanEdgeDraft,
   type ScanLocalOutput,
   type ScanNodeDraft,
   type ScanPipelineResult,
-  type ScannableFile
+  type ScannableFile,
+  type WorkUnitContext,
+  type WorkUnitContextShadowComparison
 } from "@graphcode/agent-runtime";
 import { CodeGraphScanCancelledError, discoverRepositoryFiles, scanRepositoryCodeGraph, type CodeGraphSymbol } from "@graphcode/parser";
 import { openDatabase, type GraphDatabase } from "./db/connection";
 import { GraphRepository, validationError } from "./db/repository";
 import { migrate } from "./db/schema";
+import { resolveAgentFeatureFlags, type AgentFeatureFlags } from "./config";
+import { compileStoredWorkUnitContext } from "./services/work-unit-context";
+import { contextBudgetForScale } from "./services/work-unit-preview";
+import { MODEL_ROUTER_FEATURE_VERSION, routeWorkUnit, type ModelRoutingCatalog } from "./services/model-router";
+import {
+  applyCombinedPatchToWorkspace,
+  parseUnifiedDiff,
+  readCurrentSourceHashes,
+  runIntegrationGate,
+  validateCombinedPatchInTemporaryWorkspace
+} from "./services/integration-runner";
+import { createWorkflowScheduler, WorkspaceRevisionApplyLock, WorkflowScheduler, WorkflowSchedulerFailure } from "./services/workflow-scheduler";
 
 const execFileAsync = promisify(execFile);
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
@@ -128,8 +155,14 @@ export class WorkspaceRuntime {
   private repository: GraphRepository;
   private readonly indexStates = new Map<string, IndexState>();
   private readonly indexControllers = new Map<string, AbortController>();
+  private readonly revisionApplyLock = new WorkspaceRevisionApplyLock();
+  private readonly workflowSchedulers = new Map<string, WorkflowScheduler>();
 
-  constructor(private readonly fallbackDbPath: string, private readonly selfRootPath: string) {
+  constructor(
+    private readonly fallbackDbPath: string,
+    private readonly selfRootPath: string,
+    private readonly agentFeatureFlags: AgentFeatureFlags = resolveAgentFeatureFlags()
+  ) {
     this.db = openDatabase(fallbackDbPath);
     migrate(this.db);
     this.repository = new GraphRepository(this.db);
@@ -637,8 +670,91 @@ export class WorkspaceRuntime {
     return codingRun;
   }
 
-  previewCodingWorkflow(input: { projectId: string; scopeNodeId: string }): CodingWorkflow {
-    return this.repository.previewCodingWorkflow(input.projectId, input.scopeNodeId);
+  previewCodingWorkflow(input: CodingWorkflowPreviewRequest): CodingWorkflow {
+    const partitionConstraints = codingWorkflowPartitionConstraintsSchema.parse(input.partitionConstraints ?? {});
+    const executionPolicy = codingWorkflowExecutionPolicySchema.parse(input.executionPolicy ?? {});
+    const workflow = this.agentFeatureFlags.graphPartitionedWorkflows
+      ? this.repository.previewGraphPartitionedCodingWorkflow(
+          input.projectId,
+          input.scopeNodeId,
+          this.workUnitRevisionContext(input.projectId),
+          input.modeOverrides,
+          { partitionConstraints, executionPolicy }
+        )
+      : this.repository.previewCodingWorkflow(input.projectId, input.scopeNodeId, input.modeOverrides);
+    return this.agentFeatureFlags.graphPartitionedWorkflows && this.agentFeatureFlags.modelRouterV2
+      ? this.applyModelRouter(workflow)
+      : workflow;
+  }
+
+  async previewCodingWorkUnitContext(input: {
+    projectId: string;
+    workflowId: string;
+    workUnitId: string;
+    task: string;
+    provider: RenderedWorkUnitContext["provider"];
+    purpose: RenderedWorkUnitContext["purpose"];
+    includeLegacyShadow: boolean;
+    scaleOverride?: CodingAgentMode;
+  }): Promise<{
+    context: WorkUnitContext;
+    rendered: RenderedWorkUnitContext;
+    shadowComparison: WorkUnitContextShadowComparison | null;
+  }> {
+    if (!this.agentFeatureFlags.graphPartitionedWorkflows || !this.agentFeatureFlags.workUnitContext) {
+      throw validationError("Work-unit context preview requires graph-partitioned workflows and MA-3 context flags.");
+    }
+    const workflow = this.getCodingWorkflow(input.projectId, input.workflowId);
+    const orchestration = workflow.orchestration;
+    if (!orchestration) throw validationError("Coding workflow has no orchestration metadata.");
+    const revisionContext = this.workUnitRevisionContext(input.projectId);
+    const observedRevision = {
+      indexRevision: revisionContext.indexRevision,
+      workspaceRevision: revisionContext.workspaceRevision,
+      graphRevision: revisionContext.graphRevision,
+      sourceHashes: Object.fromEntries(this.repository.listScanFileStates(input.projectId).map((file) => [file.filePath, file.contentHash])),
+      contextCompilerVersion: WORK_UNIT_CONTEXT_COMPILER_VERSION,
+      routingFeatureVersion: orchestration.revision.routingFeatureVersion,
+      capturedAt: new Date().toISOString()
+    };
+    const context = await compileStoredWorkUnitContext({
+      repository: this.repository,
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      workUnitId: input.workUnitId,
+      task: input.task,
+      observedRevision,
+      indexState: revisionContext.indexState,
+      readSource: async (sourcePath) => this.readSourceFile(input.projectId, sourcePath).catch(() => null),
+      scaleOverride: input.scaleOverride
+        ? { scale: input.scaleOverride, contextBudget: contextBudgetForScale(input.scaleOverride) }
+        : undefined
+    });
+    const rendered = renderWorkUnitContext(context, { provider: input.provider, purpose: input.purpose });
+    const shadowComparison = input.includeLegacyShadow
+      ? await this.compareLegacyWorkUnitContexts(workflow, context)
+      : null;
+    this.repository.saveCodingWorkUnitContextDiagnostics({
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      workUnitId: input.workUnitId,
+      compilerVersion: context.compilerVersion,
+      diagnostics: {
+        compilerVersion: context.compilerVersion,
+        selectionPolicyVersion: context.selectionPolicyVersion,
+        revision: context.revision,
+        nodes: context.nodes,
+        edges: context.edges,
+        sources: context.sources.map(({ content: _content, ...source }) => source),
+        contracts: context.contracts.map((contract) => ({ id: contract.id, edgeId: contract.edgeId, status: contract.status })),
+        upstreamAccepted: context.upstreamAccepted.map((summary) => ({ workUnitId: summary.workUnitId, proposalId: summary.proposalId })),
+        omissions: context.omissions,
+        tokenUsage: context.tokenUsage,
+        provenance: context.provenance,
+        shadowComparison
+      }
+    });
+    return { context, rendered, shadowComparison };
   }
 
   getCodingWorkflow(projectId: string, workflowId: string): CodingWorkflow {
@@ -650,17 +766,311 @@ export class WorkspaceRuntime {
   }
 
   async startCodingWorkflow(input: CodingWorkflowStartRequest): Promise<CodingWorkflow> {
-    const workflow = this.repository.createCodingWorkflow(input.projectId, input.scopeNodeId, input.modeOverrides, "running");
+    const partitionConstraints = codingWorkflowPartitionConstraintsSchema.parse(input.partitionConstraints ?? {});
+    const executionPolicy = codingWorkflowExecutionPolicySchema.parse(input.executionPolicy ?? {});
+    let workflow =
+      this.agentFeatureFlags.graphPartitionedWorkflows && this.agentFeatureFlags.modelRouterV2
+        ? this.repository.createGraphPartitionedCodingWorkflow(
+            input.projectId,
+            input.scopeNodeId,
+            this.workUnitRevisionContext(input.projectId),
+            input.modeOverrides,
+            "running",
+            { partitionConstraints, executionPolicy }
+          )
+        : this.repository.createCodingWorkflow(
+            input.projectId,
+            input.scopeNodeId,
+            input.modeOverrides,
+            "running",
+            this.agentFeatureFlags.graphPartitionedWorkflows ? this.workUnitRevisionContext(input.projectId) : undefined
+          );
+    if (this.agentFeatureFlags.graphPartitionedWorkflows && this.agentFeatureFlags.modelRouterV2) {
+      workflow = this.applyModelRouter(workflow);
+    }
+    if (input.background) {
+      void this.runCodingWorkflowCurrentLayer(workflow.id).catch(() => {
+        this.repository.updateCodingWorkflowStatus(workflow.id, "failed");
+      });
+      return this.repository.getCodingWorkflow(workflow.id);
+    }
     await this.runCodingWorkflowCurrentLayer(workflow.id);
     return this.repository.getCodingWorkflow(workflow.id);
   }
 
   async applyCodingWorkflowLayer(input: CodingWorkflowApplyLayerRequest): Promise<CodingWorkflow> {
-    const workflow = this.repository.applyCodingWorkflowLayer(input.projectId, input.workflowId, input.layerIndex);
+    const workflow = this.agentFeatureFlags.integrationGate && this.agentFeatureFlags.graphPartitionedWorkflows
+      ? await this.applyIntegratedCodingWorkflowLayer(input, true)
+      : this.repository.applyCodingWorkflowLayer(input.projectId, input.workflowId, input.layerIndex);
     if (workflow.status === "blocked") {
       await this.runCodingWorkflowCurrentLayer(workflow.id);
     }
     return this.repository.getCodingWorkflow(workflow.id);
+  }
+
+  async controlCodingWorkflow(input: CodingWorkflowControlRequest): Promise<CodingWorkflow> {
+    const workflow = this.getCodingWorkflow(input.projectId, input.workflowId);
+    const scheduler = this.workflowSchedulers.get(workflow.id);
+    if (input.action === "pause") {
+      scheduler?.pause();
+      return this.repository.updateCodingWorkflowStatus(workflow.id, "blocked");
+    }
+    if (input.action === "cancel") {
+      scheduler?.cancel();
+      for (const item of workflow.items.filter((candidate) => !["applied", "skipped", "proposed", "cancelled"].includes(candidate.status))) {
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "cancelled" });
+      }
+      return this.repository.updateCodingWorkflowStatus(workflow.id, "cancelled");
+    }
+    if (input.action === "resume") {
+      if (scheduler) {
+        scheduler.resume();
+        return this.repository.updateCodingWorkflowStatus(workflow.id, "running");
+      }
+      for (const item of workflow.items.filter((candidate) => candidate.layerIndex === workflow.currentLayer && candidate.status === "blocked" && !candidate.proposalId)) {
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "pending" });
+      }
+      this.repository.updateCodingWorkflowStatus(workflow.id, "running");
+      await this.runCodingWorkflowCurrentLayer(workflow.id);
+      return this.repository.getCodingWorkflow(workflow.id);
+    }
+    if (input.action === "integrate") {
+      if (!this.agentFeatureFlags.integrationGate || !this.agentFeatureFlags.graphPartitionedWorkflows) {
+        throw validationError("Validate-only integration requires the graph-partitioned integration gate.");
+      }
+      return this.applyIntegratedCodingWorkflowLayer(
+        { projectId: input.projectId, workflowId: input.workflowId, layerIndex: workflow.currentLayer },
+        false
+      );
+    }
+    const item = workflow.items.find((candidate) => candidate.id === input.itemId);
+    if (!item) throw validationError(`Coding workflow item not found in workflow: ${input.itemId ?? "missing"}.`);
+    if (input.action === "skip") {
+      this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "skipped" });
+      return this.repository.getCodingWorkflow(workflow.id);
+    }
+    if (input.action === "escalate") {
+      if (!workflow.orchestration) throw validationError("Tier escalation requires graph-partitioned workflow metadata.");
+      const orchestration = structuredClone(workflow.orchestration);
+      const unit = orchestration.workUnits.find((candidate) => candidate.id === item.id);
+      const decision = orchestration.routingDecisions.find((candidate) => candidate.workUnitId === item.id);
+      if (!unit || !decision) throw validationError(`Routing metadata is missing for work unit ${item.id}.`);
+      if (decision.selectedScale === "large") throw validationError(`Work unit ${item.id} is already at the large tier.`);
+      const nextScale = decision.selectedScale === "small" ? "medium" : "large";
+      const catalog = this.modelRoutingCatalog(workflow.projectId);
+      decision.selectedScale = nextScale;
+      decision.assignment = catalog[nextScale];
+      decision.override = { actor: "user", reason: "User requested workflow-control escalation." };
+      decision.reasons = [...decision.reasons, `User escalated this work unit to ${nextScale}.`];
+      unit.selectedScale = nextScale;
+      unit.contextBudget = contextBudgetForScale(nextScale);
+      this.repository.replaceCodingWorkflowOrchestration(workflow.id, orchestration);
+    }
+    this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "pending", agentRunId: null, proposalId: null });
+    this.repository.updateCodingWorkflowStatus(workflow.id, "running", item.layerIndex);
+    await this.runCodingWorkflowCurrentLayer(workflow.id);
+    return this.repository.getCodingWorkflow(workflow.id);
+  }
+
+  private async applyIntegratedCodingWorkflowLayer(input: CodingWorkflowApplyLayerRequest, applyToWorkspace: boolean): Promise<CodingWorkflow> {
+    const workflow = this.repository.getCodingWorkflow(input.workflowId);
+    if (workflow.projectId !== input.projectId) throw validationError("Coding workflow does not belong to this project.");
+    const orchestration = workflow.orchestration;
+    if (!orchestration) throw validationError("The integration gate requires graph-partitioned workflow metadata.");
+    const layerItems = workflow.items.filter((item) => item.layerIndex === input.layerIndex);
+    if (layerItems.length === 0) throw validationError(`Coding workflow layer ${input.layerIndex} does not exist.`);
+    const proposals = layerItems
+      .filter((item) => item.status === "proposed")
+      .map((item) => {
+        if (!item.proposalId) throw validationError(`Coding workflow item ${item.id} does not have a code proposal.`);
+        const stored = this.repository.getCodeProposal(item.proposalId);
+        if (stored.workUnitProposal && stored.workUnitProposal.workUnitId !== item.id) {
+          throw validationError(`Code proposal ${stored.id} belongs to work unit ${stored.workUnitProposal.workUnitId}, not ${item.id}.`);
+        }
+        return {
+          proposalId: stored.id,
+          workUnitId: item.id,
+          diff: stored.diff,
+          contractUpdates: stored.workUnitProposal?.contractUpdates ?? [],
+          outputSummary: stored.workUnitProposal?.unresolvedIssues.length
+            ? `Unresolved: ${stored.workUnitProposal.unresolvedIssues.join("; ")}`
+            : "Child produced a scoped code proposal."
+        };
+      });
+    const paths = new Set<string>();
+    for (const unit of orchestration.workUnits.filter((candidate) => candidate.layerIndex === input.layerIndex)) {
+      for (const scope of unit.plannedWriteScopes) paths.add(scope.path);
+    }
+    for (const proposal of proposals) {
+      try {
+        for (const file of parseUnifiedDiff(proposal.diff).files) {
+          if (file.oldPath) paths.add(file.oldPath);
+          if (file.newPath) paths.add(file.newPath);
+        }
+      } catch {
+        // The integration gate records the authoritative parse failure.
+      }
+    }
+    const project = this.repository.getProject(input.projectId);
+    const revisionPaths = [...paths].sort();
+    const expectedRevision = await this.integrationRevisionKey(input.projectId, project.rootPath, revisionPaths);
+    return this.revisionApplyLock.runExclusive({
+      workspaceId: input.projectId,
+      expectedRevision,
+      observeRevision: () => this.integrationRevisionKey(input.projectId, project.rootPath, revisionPaths),
+      apply: async () => {
+        const currentSourceHashes = await readCurrentSourceHashes(project.rootPath, revisionPaths);
+        const validationCommands = this.integrationValidationCommands(workflow, input.layerIndex, project.rootPath);
+        const result = await runIntegrationGate({
+          orchestration,
+          layerIndex: input.layerIndex,
+          proposals,
+          currentSourceHashes,
+          validationCommands,
+          validateCombinedPatch: ({ combinedDiff, commands }) =>
+            validateCombinedPatchInTemporaryWorkspace({
+              workspaceRoot: project.rootPath,
+              combinedDiff,
+              commands,
+              timeoutMs: 120000
+            }),
+          invokeIntegrationAgent: ({ scale, context }) =>
+            runIntegrationAgent(
+              { scale, context },
+              {
+                config: { ...this.repository.getCodingAgentConfig(workflow.projectId, scale), agentKind: "coding" },
+                workspaceRoot: project.rootPath,
+                toolbox: this.createToolbox(workflow.projectId)
+              }
+            )
+        });
+        const previousActualWriteCheck = workflow.integrationChecks?.find(
+          (check) => check.layerIndex === input.layerIndex && check.checkKind === "actual_write_set"
+        );
+        const rawPreviousProposalIds = previousActualWriteCheck?.diagnostics.proposalIds;
+        const previouslyValidatedProposalIds =
+          rawPreviousProposalIds && typeof rawPreviousProposalIds === "object" && !Array.isArray(rawPreviousProposalIds)
+            ? (rawPreviousProposalIds as Record<string, string>)
+            : {};
+        this.repository.replaceIntegrationChecks({
+          workflowId: workflow.id,
+          layerIndex: input.layerIndex,
+          checks: result.checks.map((check) => ({
+            itemId: check.itemId,
+            checkKind: check.kind,
+            status: check.status,
+            diagnostics: check.diagnostics
+          }))
+        });
+        this.repository.updateInterfaceContractStates(workflow.id, result.contractReconciliation.contracts);
+        for (const parsed of result.parsedProposals) {
+          const item = layerItems.find((candidate) => candidate.id === parsed.workUnitId)!;
+          this.repository.updateCodingWorkflowItemIntegrationMetadata({
+            itemId: parsed.workUnitId,
+            actualWriteScopes: parsed.actualWriteScopes,
+            proposalRevision:
+              previouslyValidatedProposalIds[parsed.workUnitId] === parsed.proposalId
+                ? (item.proposalRevision ?? 1)
+                : (item.proposalRevision ?? 0) + 1
+          });
+        }
+        if (!result.applicable) {
+          for (const item of layerItems.filter((candidate) => candidate.status === "proposed")) {
+            this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "blocked" });
+          }
+          this.repository.updateCodingWorkflowStatus(workflow.id, "blocked", input.layerIndex);
+          const failedKinds = result.checks.filter((check) => check.status !== "passed").map((check) => check.kind);
+          throw validationError(`Coding workflow integration gate failed: ${[...new Set(failedKinds)].join(", ")}.`);
+        }
+
+        if (!applyToWorkspace) {
+          this.repository.updateCodingWorkflowStatus(workflow.id, "blocked", input.layerIndex);
+          return this.repository.getCodingWorkflow(workflow.id);
+        }
+
+        await applyCombinedPatchToWorkspace({ workspaceRoot: project.rootPath, combinedDiff: result.combinedDiff, timeoutMs: 60000 });
+        let applied = this.repository.applyCodingWorkflowLayer(input.projectId, input.workflowId, input.layerIndex);
+        for (const blockedWorkUnitId of result.contractReconciliation.blockedWorkUnitIds) {
+          const blockedItem = applied.items.find((candidate) => candidate.id === blockedWorkUnitId);
+          if (blockedItem && blockedItem.status !== "applied" && blockedItem.status !== "skipped") {
+            this.repository.updateCodingWorkflowItem({ itemId: blockedItem.id, status: "blocked" });
+          }
+        }
+        if (result.contractReconciliation.blockedWorkUnitIds.length > 0 && applied.status === "succeeded") {
+          this.repository.updateCodingWorkflowStatus(workflow.id, "blocked", input.layerIndex);
+        }
+        applied = this.repository.getCodingWorkflow(workflow.id);
+        if (!applied.orchestration) return applied;
+        const refreshedOrchestration = structuredClone(applied.orchestration);
+        const revisionSourcePaths = new Set(Object.keys(refreshedOrchestration.revision.sourceHashes));
+        for (const parsed of result.parsedProposals) {
+          for (const file of parsed.files) {
+            if (file.oldPath) revisionSourcePaths.add(file.oldPath);
+            if (file.newPath) revisionSourcePaths.add(file.newPath);
+          }
+        }
+        const refreshedHashes = await readCurrentSourceHashes(project.rootPath, [...revisionSourcePaths]);
+        refreshedOrchestration.revision = {
+          ...refreshedOrchestration.revision,
+          sourceHashes: refreshedHashes,
+          capturedAt: new Date().toISOString()
+        };
+        refreshedOrchestration.interfaceContracts = result.contractReconciliation.contracts;
+        refreshedOrchestration.workUnits = refreshedOrchestration.workUnits.map((unit) => ({
+          ...unit,
+          baseRevision: refreshedOrchestration.revision
+        }));
+        return this.repository.replaceCodingWorkflowOrchestration(workflow.id, refreshedOrchestration);
+      }
+    });
+  }
+
+  private async integrationRevisionKey(projectId: string, workspaceRoot: string, paths: string[]): Promise<string> {
+    const revision = this.workUnitRevisionContext(projectId);
+    const hashes = await readCurrentSourceHashes(workspaceRoot, paths);
+    return crypto
+      .createHash("sha1")
+      .update(JSON.stringify({
+        indexRevision: revision.indexRevision,
+        workspaceRevision: revision.workspaceRevision,
+        graphRevision: revision.graphRevision,
+        hashes: Object.fromEntries(Object.entries(hashes).sort(([left], [right]) => left.localeCompare(right)))
+      }))
+      .digest("hex");
+  }
+
+  private integrationValidationCommands(workflow: CodingWorkflow, layerIndex: number, workspaceRoot: string): string[] {
+    const commands: string[] = [];
+    const packageJsonPath = path.join(workspaceRoot, "package.json");
+    if (fs.existsSync(packageJsonPath)) {
+      try {
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { scripts?: Record<string, string> };
+        const runner = fs.existsSync(path.join(workspaceRoot, "pnpm-lock.yaml"))
+          ? "pnpm"
+          : fs.existsSync(path.join(workspaceRoot, "yarn.lock"))
+            ? "yarn"
+            : "npm run";
+        for (const script of ["format:check", "lint", "typecheck", "build", "test"] as const) {
+          if (packageJson.scripts?.[script]) commands.push(`${runner} ${script}`);
+        }
+      } catch {
+        // Project-specific block commands below remain authoritative when package metadata is malformed.
+      }
+    }
+    for (const item of workflow.items.filter((candidate) => candidate.layerIndex === layerIndex)) {
+      const metadata = this.repository.resolveExecutionMetadata(item.nodeId);
+      if (!metadata.testCommand?.trim()) continue;
+      const workingDirectory = metadata.workingDirectory?.trim() || ".";
+      const absoluteWorkingDirectory = path.resolve(workspaceRoot, workingDirectory);
+      if (absoluteWorkingDirectory !== workspaceRoot && !absoluteWorkingDirectory.startsWith(`${workspaceRoot}${path.sep}`)) {
+        throw validationError(`Integration test working directory escapes the workspace: ${workingDirectory}.`);
+      }
+      const relativeWorkingDirectory = path.relative(workspaceRoot, absoluteWorkingDirectory) || ".";
+      const setup = metadata.setupCommand?.trim();
+      const test = metadata.testCommand.trim();
+      commands.push(`cd ${shellQuote(relativeWorkingDirectory)} && ${setup ? `${setup} && ` : ""}${test}`);
+    }
+    return [...new Set(commands)];
   }
 
     async runReview(input: ReviewAgentRequest): Promise<AgentRun> {
@@ -916,6 +1326,14 @@ export class WorkspaceRuntime {
   }
 
   private async runCodingWorkflowCurrentLayer(workflowId: string): Promise<void> {
+    if (
+      this.agentFeatureFlags.graphPartitionedWorkflows &&
+      this.agentFeatureFlags.workUnitContext &&
+      this.agentFeatureFlags.modelRouterV2
+    ) {
+      await this.runPartitionedCodingWorkflow(workflowId);
+      return;
+    }
     let workflow = this.repository.getCodingWorkflow(workflowId);
     const readyItems = this.repository.getReadyCodingWorkflowItems(workflowId);
     if (readyItems.length === 0) {
@@ -957,6 +1375,302 @@ export class WorkspaceRuntime {
     this.repository.updateCodingWorkflowStatus(workflowId, complete ? "blocked" : "running");
   }
 
+  private async runPartitionedCodingWorkflow(workflowId: string): Promise<void> {
+    let workflow = this.repository.getCodingWorkflow(workflowId);
+    const orchestration = workflow.orchestration;
+    if (!orchestration) throw validationError("Partitioned coding workflow has no orchestration metadata.");
+    const itemById = new Map(workflow.items.map((item) => [item.id, item]));
+    const decisionByUnitId = new Map(orchestration.routingDecisions.map((decision) => [decision.workUnitId, decision]));
+    const catalog = this.modelRoutingCatalog(workflow.projectId);
+    const observedAtStart = this.workUnitRevisionContext(workflow.projectId);
+    const providerConcurrency: Record<string, number> = {};
+    const modelConcurrency: Record<string, number> = {};
+    for (const tier of Object.values(catalog)) {
+      providerConcurrency[tier.providerId] = Math.min(providerConcurrency[tier.providerId] ?? tier.maxConcurrency, tier.maxConcurrency);
+      modelConcurrency[`${tier.providerId}/${tier.modelId}`] = tier.maxConcurrency;
+    }
+    const scheduler = createWorkflowScheduler({
+      units: orchestration.workUnits.map((unit) => {
+        const item = itemById.get(unit.id);
+        const decision = decisionByUnitId.get(unit.id);
+        if (!item || !decision) throw validationError(`Stored scheduler metadata is incomplete for work unit ${unit.id}.`);
+        return {
+          id: unit.id,
+          dependencyWorkUnitIds: unit.dependencyWorkUnitIds,
+          plannedWriteScopes: unit.plannedWriteScopes,
+          routingDecision: decision,
+          baseRevisionKey: `${unit.baseRevision.indexRevision ?? "none"}:${unit.baseRevision.workspaceRevision ?? "none"}:${unit.baseRevision.graphRevision}`,
+          indexState: decision.features.indexState,
+          executionMode: "proposal_only" as const,
+          coordinatedProposalUnitIds: unit.coordinationWorkUnitIds,
+          initialOutcome:
+            item.status === "applied"
+              ? ("accepted" as const)
+              : item.status === "skipped"
+                ? ("waived" as const)
+                : item.status === "proposed"
+                  ? ("proposed" as const)
+                  : item.status === "failed"
+                    ? ("failed" as const)
+                    : undefined
+        };
+      }),
+      limits: {
+        globalConcurrency: Math.max(
+          1,
+          Math.min(
+            orchestration.executionPolicy?.maximumConcurrency ?? 16,
+            16,
+            ...Object.values(catalog).map((tier) => tier.maxConcurrency)
+          )
+        ),
+        providerConcurrency,
+        modelConcurrency,
+        ...(orchestration.executionPolicy?.maxEstimatedCost !== null && orchestration.executionPolicy?.maxEstimatedCost !== undefined
+          ? { globalCostBudget: orchestration.executionPolicy.maxEstimatedCost }
+          : {}),
+        maxRetries: 1,
+        maxEscalations: 1
+      },
+      validateRevision: (scheduled) => {
+        const unit = orchestration.workUnits.find((candidate) => candidate.id === scheduled.id)!;
+        return (
+          unit.baseRevision.indexRevision === observedAtStart.indexRevision &&
+          unit.baseRevision.workspaceRevision === observedAtStart.workspaceRevision &&
+          unit.baseRevision.graphRevision === observedAtStart.graphRevision
+        );
+      },
+      indexStateAllowed: (state) => state === "complete",
+      assignmentForScale: (scale) => catalog[scale],
+      execute: async (dispatch) => {
+        const unit = orchestration.workUnits.find((candidate) => candidate.id === dispatch.workUnitId)!;
+        const item = itemById.get(unit.id)!;
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "running" });
+        let compiled: Awaited<ReturnType<WorkspaceRuntime["previewCodingWorkUnitContext"]>>;
+        try {
+          compiled = await this.previewCodingWorkUnitContext({
+            projectId: workflow.projectId,
+            workflowId: workflow.id,
+            workUnitId: unit.id,
+            task: `Execute work unit ${unit.title}: ${unit.objective}`,
+            provider: renderProviderForAgent(dispatch.providerId),
+            purpose: "coding",
+            includeLegacyShadow: false,
+            scaleOverride: dispatch.scale
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Work-unit context compilation failed.";
+          throw new WorkflowSchedulerFailure(/stale|revision/i.test(message) ? "stale_revision" : "context_insufficient", message);
+        }
+        const run = this.repository.createAgentRun({
+          projectId: workflow.projectId,
+          agentKind: "coding",
+          codingMode: dispatch.scale,
+          targetNodeId: item.nodeId,
+          prompt: unit.objective,
+          status: "running"
+        });
+        this.repository.addAgentMessage({ runId: run.id, role: "user", content: unit.objective });
+        const completed = await this.finishAgentRun(run, () =>
+          runCodingWorkUnitAgent(
+            {
+              projectId: workflow.projectId,
+              targetNodeId: item.nodeId,
+              context: compiled.context,
+              rendered: compiled.rendered,
+              allowContractUpdates: this.agentFeatureFlags.edgeContracts
+            },
+            {
+              config: { ...this.repository.getCodingAgentConfig(workflow.projectId, dispatch.scale), agentKind: "coding" },
+              runId: run.id,
+              workspaceRoot: this.repository.getProject(workflow.projectId).rootPath,
+              toolbox: this.createToolbox(workflow.projectId),
+              signal: dispatch.signal
+            }
+          )
+        );
+        if (completed.status !== "succeeded") {
+          throw new WorkflowSchedulerFailure("transient_provider", completed.error ?? "Work-unit provider execution failed.");
+        }
+        const proposal = this.repository.getLatestCodeProposalForRun(completed.id);
+        if (!proposal) throw new WorkflowSchedulerFailure("validation_failure", "Work-unit provider returned no stored proposal.");
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "proposed", agentRunId: completed.id, proposalId: proposal.id });
+        return {
+          outcome: "proposed" as const,
+          actualInputTokens: compiled.rendered.estimatedInputTokens,
+          actualOutputTokens: Math.ceil(completed.response.length / 4),
+          testOutcome: "not_run" as const
+        };
+      }
+    });
+    this.repository.updateCodingWorkflowStatus(workflowId, "running");
+    this.workflowSchedulers.set(workflowId, scheduler);
+    let scheduled: Awaited<ReturnType<WorkflowScheduler["run"]>>;
+    try {
+      scheduled = await scheduler.run();
+    } finally {
+      if (this.workflowSchedulers.get(workflowId) === scheduler) this.workflowSchedulers.delete(workflowId);
+    }
+    workflow = this.repository.getCodingWorkflow(workflowId);
+    const updated = structuredClone(workflow.orchestration!);
+    const scheduledById = new Map(scheduled.units.map((unit) => [unit.id, unit]));
+    updated.routingDecisions = updated.routingDecisions.map((decision) => {
+      const result = scheduledById.get(decision.workUnitId)!;
+      return {
+        ...decision,
+        selectedScale: result.scale,
+        assignment: catalog[result.scale],
+        metrics: result.metrics
+      };
+    });
+    updated.workUnits = updated.workUnits.map((unit) => {
+      const result = scheduledById.get(unit.id)!;
+      return {
+        ...unit,
+        selectedScale: result.scale,
+        contextBudget: contextBudgetForScale(result.scale),
+        status: result.status === "waived" ? "skipped" : result.status
+      };
+    });
+    for (const result of scheduled.units) {
+      const item = itemById.get(result.id)!;
+      if (result.status === "failed") this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "failed" });
+      if (result.status === "blocked" || result.status === "stale") {
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "blocked" });
+      }
+      if (result.status === "cancelled") this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "cancelled" });
+    }
+    this.repository.replaceCodingWorkflowOrchestration(workflowId, updated);
+    const refreshed = this.repository.getCodingWorkflow(workflowId);
+    const hasProposal = refreshed.items.some((item) => item.status === "proposed");
+    const allAccepted = refreshed.items.every((item) => item.status === "applied" || item.status === "skipped");
+    this.repository.updateCodingWorkflowStatus(
+      workflowId,
+      scheduled.status === "cancelled" ? "cancelled" : allAccepted ? "succeeded" : hasProposal ? "blocked" : scheduled.status === "failed" ? "failed" : "blocked"
+    );
+  }
+
+  private workUnitRevisionContext(projectId: string) {
+    const indexState = this.getIndexState(projectId);
+    const completeness = indexState.completeness;
+    const routingIndexState =
+      completeness.status === "complete"
+        ? ("complete" as const)
+        : completeness.status === "partial"
+          ? (indexState.progress.phase === "idle" ? ("unavailable" as const) : ("partial" as const))
+          : completeness.status;
+    return {
+      indexRevision: indexState.indexRevision,
+      workspaceRevision: indexState.workspaceRevision,
+      graphRevision: this.repository.currentGraphRevision(projectId),
+      indexState: routingIndexState
+    };
+  }
+
+  private applyModelRouter(workflow: CodingWorkflow): CodingWorkflow {
+    if (!workflow.orchestration) return workflow;
+    const orchestration = structuredClone(workflow.orchestration);
+    const catalog = this.modelRoutingCatalog(workflow.projectId);
+    const unitById = new Map(orchestration.workUnits.map((unit) => [unit.id, unit]));
+    orchestration.routingDecisions = orchestration.routingDecisions.map((existingDecision) => {
+      const workUnit = unitById.get(existingDecision.workUnitId);
+      if (!workUnit) throw validationError(`Routing decision references missing work unit ${existingDecision.workUnitId}.`);
+      const estimatedInputTokens = Math.max(
+        existingDecision.estimatedInputTokens,
+        600 + existingDecision.features.estimatedSourceTokens + existingDecision.features.cutEdgeCount * 64
+      );
+      const estimatedOutputTokens = Math.max(existingDecision.estimatedOutputTokens, 600);
+      return routeWorkUnit({
+        workUnit,
+        features: existingDecision.features,
+        catalog,
+        estimatedInputTokens,
+        estimatedOutputTokens,
+        existingDecision
+      });
+    });
+    const decisionByUnitId = new Map(orchestration.routingDecisions.map((decision) => [decision.workUnitId, decision]));
+    orchestration.revision = { ...orchestration.revision, routingFeatureVersion: MODEL_ROUTER_FEATURE_VERSION };
+    orchestration.workUnits = orchestration.workUnits.map((unit) => {
+      const decision = decisionByUnitId.get(unit.id)!;
+      return {
+        ...unit,
+        recommendedScale: decision.recommendedScale,
+        selectedScale: decision.selectedScale,
+        contextBudget: contextBudgetForScale(decision.selectedScale),
+        baseRevision: { ...unit.baseRevision, routingFeatureVersion: MODEL_ROUTER_FEATURE_VERSION }
+      };
+    });
+    return this.repository.replaceCodingWorkflowOrchestration(workflow.id, orchestration);
+  }
+
+  private modelRoutingCatalog(projectId: string): ModelRoutingCatalog {
+    return Object.fromEntries(
+      (["small", "medium", "large"] as CodingAgentMode[]).map((scale) => {
+        const config = this.repository.getCodingAgentConfig(projectId, scale);
+        return [
+          scale,
+          {
+            providerId: config.provider,
+            modelId: config.model.trim() || `${config.provider}-default`,
+            maxConcurrency: config.parallelLimit,
+            inputPricePerMillion: null,
+            outputPricePerMillion: null,
+            currency: "USD"
+          }
+        ];
+      })
+    ) as ModelRoutingCatalog;
+  }
+
+  private async compareLegacyWorkUnitContexts(
+    workflow: CodingWorkflow,
+    context: WorkUnitContext
+  ): Promise<WorkUnitContextShadowComparison> {
+    const targetNodeId = context.workUnit.ownedNodeIds[0];
+    if (!targetNodeId) {
+      return compareWorkUnitContextToLegacy(context, { legacyCodingPromptCharacters: 0, legacyReviewPromptCharacters: 0 });
+    }
+    const detail = this.repository.getNodeDetail(targetNodeId);
+    const graph = {
+      nodes: this.repository.listProjectNodes(context.projectId),
+      edges: this.repository.listProjectEdges(context.projectId)
+    };
+    const scopeCanvas = await this.repository
+      .getCanvasGraph({ projectId: context.projectId, rootNodeId: workflow.scopeNodeId, includeAttachments: true })
+      .catch(() => null);
+    const allowedPath = detail.node.source.path ?? detail.node.code.directory;
+    const source = allowedPath ? await this.readSourceFile(context.projectId, allowedPath).catch(() => "") : "";
+    const gitStatus = await this.readGitStatus(context.projectId).catch(() => "");
+    const execution = this.repository.resolveExecutionMetadata(targetNodeId);
+    const coverageNotice = workUnitCoverageNotice(this.getIndexState(context.projectId));
+    const coding = benchmarkLegacyCodingContexts({
+      detail,
+      graph,
+      scopeCanvas,
+      source,
+      gitStatus,
+      execution,
+      prompt: context.task,
+      coverageNotice
+    }).find((entry) => entry.mode === context.scale)!;
+    const review = benchmarkLegacyReviewContexts({
+      targetRun: null,
+      detail,
+      graph,
+      scopeCanvas,
+      source,
+      gitStatus,
+      execution,
+      diff: "",
+      coverageNotice
+    }).find((entry) => entry.mode === context.scale)!;
+    return compareWorkUnitContextToLegacy(context, {
+      legacyCodingPromptCharacters: coding.promptCharacters,
+      legacyReviewPromptCharacters: review.promptCharacters
+    });
+  }
+
   private createToolbox(projectId: string): GraphCodeToolbox {
     return {
       readGraph: async (inputProjectId) => ({
@@ -986,8 +1700,15 @@ export class WorkspaceRuntime {
       },
       readSourceFile: async (relativePath) => this.readSourceFile(projectId, relativePath),
       resolveExecutionMetadata: async (nodeId) => this.repository.resolveExecutionMetadata(nodeId),
-      writeCodeProposal: async (inputProjectId, runId, targetNodeId, diff, artifactManifest) => {
-        this.repository.storeCodeProposal({ projectId: inputProjectId, agentRunId: runId, targetNodeId, diff, artifactManifest });
+      writeCodeProposal: async (inputProjectId, runId, targetNodeId, diff, artifactManifest, workUnitProposal) => {
+        this.repository.storeCodeProposal({
+          projectId: inputProjectId,
+          agentRunId: runId,
+          targetNodeId,
+          diff,
+          artifactManifest,
+          workUnitProposal
+        });
       },
       readGitStatus: async (inputProjectId) => this.readGitStatus(inputProjectId),
       readGitDiff: async (inputProjectId) => this.readGitDiff(inputProjectId),
@@ -1636,6 +2357,12 @@ function hashPath(value: string): string {
   return crypto.createHash("sha1").update(value).digest("hex").slice(0, 16);
 }
 
+function shellQuote(value: string): string {
+  return process.platform === "win32"
+    ? `"${value.replace(/"/g, '""')}"`
+    : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function samePath(first: string, second: string): boolean {
   return realPathOrResolve(first) === realPathOrResolve(second);
 }
@@ -1677,6 +2404,13 @@ function realPathOrResolve(value: string): string {
 
 function isCliProvider(provider: AgentProvider): provider is "codex" | "claudecode" {
   return provider === "codex" || provider === "claudecode";
+}
+
+function renderProviderForAgent(provider: string): RenderedWorkUnitContext["provider"] {
+  if (provider === "gemini") return "google";
+  if (provider === "claudecode") return "anthropic";
+  if (provider === "openai" || provider === "openrouter" || provider === "codex") return "openai";
+  return "generic";
 }
 
 function defaultCliCommand(provider: "codex" | "claudecode"): string {
@@ -2008,6 +2742,15 @@ function normalizeLanguage(value: string): LanguageType {
     "other"
   ]);
   return languages.has(value) ? (value as LanguageType) : "other";
+}
+
+function workUnitCoverageNotice(state: IndexState): string {
+  const counts = state.counts;
+  const countSummary = `discovered=${counts.discovered}, supported=${counts.supported}, indexed=${counts.indexed}, unsupported=${counts.unsupported}, excluded=${counts.excluded}, failed=${counts.failed}`;
+  if (state.completeness.status === "complete") return `Index coverage: COMPLETE (${countSummary}).`;
+  if (state.completeness.status === "partial") return `Index coverage warning: PARTIAL (${countSummary}). ${state.completeness.reasons.join(" ")}`;
+  if (state.completeness.status === "stale") return `Index coverage warning: STALE since ${state.completeness.sinceRevision}.`;
+  return `Index coverage warning: FAILED (${state.completeness.errorCode}).`;
 }
 
 function parseGitStatusByPath(status: string): Map<string, GitStatusInfo> {

@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:ui": "playwright test",
+    "test:ui:headed": "playwright test --headed",
+    "test:ui:report": "playwright show-report ../../.graphcode/playwright-report"
   },
   "dependencies": {
     "@graphcode/graph-model": "workspace:*",

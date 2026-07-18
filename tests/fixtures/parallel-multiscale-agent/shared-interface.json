@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "id": "shared-interface",
+  "behavior": "shared_interface",
+  "description": "Sibling producer and consumer functions share a call contract across files.",
+  "task": "Change the producer result and update its consumer safely.",
+  "scopeNodeId": "interface-module",
+  "nodes": [
+    { "id": "interface-root", "name": "Interface fixture", "kind": "framework", "summary": "Fixture architecture root.", "parentId": null, "attachedToId": null, "source": { "path": "package.json", "startLine": 1, "endLine": 40 }, "agentStatus": "implemented" },
+    { "id": "interface-module", "name": "Interface module", "kind": "module", "summary": "Owns a producer-consumer contract.", "parentId": "interface-root", "attachedToId": null, "source": { "path": "src/interface/index.ts", "startLine": 1, "endLine": 100 }, "agentStatus": "planning" },
+    { "id": "producer", "name": "produceValue", "kind": "function", "summary": "Produces a shared result.", "parentId": "interface-module", "attachedToId": null, "source": { "path": "src/interface/producer.ts", "startLine": 1, "endLine": 35 }, "agentStatus": "planning" },
+    { "id": "consumer", "name": "consumeValue", "kind": "function", "summary": "Consumes the shared result.", "parentId": "interface-module", "attachedToId": null, "source": { "path": "src/interface/consumer.ts", "startLine": 1, "endLine": 40 }, "agentStatus": "planning" }
+  ],
+  "edges": [
+    { "id": "producer-consumer-call", "sourceNodeId": "consumer", "targetNodeId": "producer", "kind": "calls", "label": "consumeValue calls produceValue" }
+  ]
+}

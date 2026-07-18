@@ -7,6 +7,16 @@
     Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #111827;
   background: #f7f8fb;
+  color-scheme: light;
+  --app-bg: #f5f6f9;
+  --surface: #ffffff;
+  --surface-muted: #f7f8fa;
+  --surface-raised: #ffffff;
+  --border: #e3e6eb;
+  --text: #111827;
+  --muted: #667085;
+  --accent-soft: #eef6ff;
+  --accent-border: #bfdbfe;
   --canvas-surface: #ffffff;
   --canvas-grid-dot: #e5e7eb;
   --canvas-panel-bg: rgba(255, 255, 255, 0.92);
@@ -71,6 +81,16 @@ select {
 :root[data-theme="dark"] {
   color: #e5e7eb;
   background: #111318;
+  color-scheme: dark;
+  --app-bg: #111318;
+  --surface: #1d212b;
+  --surface-muted: #171b24;
+  --surface-raised: #232833;
+  --border: #313845;
+  --text: #f1f5f9;
+  --muted: #aab4c5;
+  --accent-soft: #17253d;
+  --accent-border: #31527d;
   --canvas-surface: #151820;
   --canvas-grid-dot: #334155;
   --canvas-panel-bg: rgba(29, 33, 43, 0.92);
@@ -95,6 +115,16 @@ select {
   :root[data-theme="system"] {
     color: #e5e7eb;
     background: #111318;
+    color-scheme: dark;
+    --app-bg: #111318;
+    --surface: #1d212b;
+    --surface-muted: #171b24;
+    --surface-raised: #232833;
+    --border: #313845;
+    --text: #f1f5f9;
+    --muted: #aab4c5;
+    --accent-soft: #17253d;
+    --accent-border: #31527d;
     --canvas-surface: #151820;
     --canvas-grid-dot: #334155;
     --canvas-panel-bg: rgba(29, 33, 43, 0.92);
@@ -626,6 +656,31 @@ select {
   outline-offset: 3px;
 }
 
+.graph-node-card.workflow-owned:not(.selected) {
+  outline: 3px solid var(--workflow-partition-color);
+  outline-offset: 2px;
+}
+
+.graph-node-card.workflow-read_halo:not(.selected) {
+  outline: 2px dashed var(--workflow-partition-color);
+  outline-offset: 2px;
+}
+
+.workflow-node-overlay {
+  align-self: flex-start;
+  max-width: 100%;
+  margin-top: 7px;
+  padding: 2px 6px;
+  overflow: hidden;
+  border: 1px solid;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .graph-node-card.agent-boundary-planning,
 .graph-node-card.agent-boundary-coded,
 .graph-node-card.agent-boundary-review {
@@ -1145,6 +1200,24 @@ select {
 
 .canvas-status strong {
   color: var(--canvas-panel-strong);
+}
+
+.workflow-canvas-legend {
+  display: grid;
+  gap: 2px;
+  min-width: 140px;
+  padding: 8px 10px;
+  color: var(--canvas-panel-text);
+  background: var(--canvas-panel-bg);
+  border: 1px solid var(--canvas-panel-border);
+  border-radius: 8px;
+  box-shadow: 0 8px 20px rgba(17, 24, 39, 0.08);
+  font-size: 11px;
+}
+
+.workflow-canvas-legend strong {
+  color: var(--canvas-panel-strong);
+  font-size: 12px;
 }
 
 .canvas-draw-status {
@@ -2163,7 +2236,9 @@ select {
 .coding-workflow-panel {
   display: grid;
   gap: 10px;
+  max-height: min(72vh, 920px);
   padding: 12px;
+  overflow: auto;
   border-bottom: 1px solid #e5e7eb;
   background: #f8fafc;
 }
@@ -2203,19 +2278,25 @@ select {
 
 .coding-workflow-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 96px;
+  grid-template-columns: auto minmax(0, 1fr) 96px;
   gap: 8px;
   align-items: start;
   padding: 8px;
   background: #fff;
   border: 1px solid #e5e7eb;
   border-radius: 8px;
+  content-visibility: auto;
+  contain-intrinsic-size: 190px;
 }
 
-.coding-workflow-item > div {
+.coding-workflow-item > div:not(.coding-workflow-item-actions) {
   display: grid;
   gap: 3px;
   min-width: 0;
+}
+
+.coding-workflow-item:not(:has(.coding-workflow-select-unit)) > div:first-child {
+  grid-column: 1 / 3;
 }
 
 .coding-workflow-item select {
@@ -2224,7 +2305,176 @@ select {
 
 .coding-workflow-actions {
   display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   justify-content: flex-end;
+}
+
+.coding-workflow-progress,
+.coding-workflow-validation-warning,
+.coding-workflow-partition-actions,
+.coding-workflow-pagination,
+.coding-workflow-item-actions,
+.workflow-contract,
+.workflow-check {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.coding-workflow-progress {
+  display: grid;
+}
+
+.coding-workflow-progress progress {
+  width: 100%;
+}
+
+.coding-workflow-policy {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.coding-workflow-policy label,
+.coding-workflow-evidence div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.coding-workflow-policy input {
+  width: 100%;
+  min-width: 0;
+}
+
+.coding-workflow-validation-warning,
+.workflow-blocker,
+.workflow-check.status-failed,
+.workflow-check.status-blocked {
+  color: #b45309;
+}
+
+.coding-workflow-partition-actions,
+.coding-workflow-pagination {
+  flex-wrap: wrap;
+  justify-content: space-between;
+}
+
+.coding-workflow-select-unit {
+  margin-top: 2px;
+}
+
+.coding-workflow-item-actions {
+  grid-column: 2 / -1;
+  flex-wrap: wrap;
+}
+
+.coding-workflow-item-actions button,
+.coding-workflow-pagination button,
+.workflow-contract button {
+  padding: 3px 7px;
+  color: #334155;
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.coding-workflow-item-actions button:disabled,
+.coding-workflow-pagination button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.coding-workflow-evidence {
+  display: grid;
+  gap: 5px;
+  margin: 6px 0 0;
+}
+
+.coding-workflow-evidence dt {
+  color: #475569;
+  font-size: 10px;
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.coding-workflow-evidence dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.coding-workflow-contracts,
+.coding-workflow-checks {
+  min-width: 0;
+}
+
+.workflow-contract,
+.workflow-check {
+  align-items: flex-start;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  padding: 7px;
+  background: #fff;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.workflow-contract small,
+.workflow-check pre {
+  flex-basis: 100%;
+}
+
+.workflow-check pre {
+  max-height: 180px;
+  margin: 0;
+  padding: 6px;
+  overflow: auto;
+  background: #f1f5f9;
+  border-radius: 5px;
+  font-size: 10px;
+  white-space: pre-wrap;
+}
+
+.coding-workflow-item.status-failed,
+.workflow-contract.status-conflicted,
+.workflow-contract.status-invalid {
+  border-color: #fca5a5;
+}
+
+.coding-workflow-item.status-cancelled {
+  border-color: #94a3b8;
+  opacity: 0.78;
+}
+
+:root[data-theme="dark"] .coding-workflow-panel,
+:root[data-theme="dark"] .coding-workflow-item,
+:root[data-theme="dark"] .workflow-contract,
+:root[data-theme="dark"] .workflow-check,
+:root[data-theme="dark"] .coding-workflow-item-actions button,
+:root[data-theme="dark"] .coding-workflow-pagination button,
+:root[data-theme="dark"] .workflow-contract button {
+  color: var(--card-text);
+  background: var(--card-bg);
+  border-color: var(--card-border);
+}
+
+:root[data-theme="dark"] .coding-workflow-header strong,
+:root[data-theme="dark"] .coding-workflow-item strong,
+:root[data-theme="dark"] .coding-workflow-evidence dt {
+  color: var(--card-heading);
+}
+
+:root[data-theme="dark"] .coding-workflow-header span,
+:root[data-theme="dark"] .coding-workflow-item span,
+:root[data-theme="dark"] .coding-workflow-item small,
+:root[data-theme="dark"] .coding-workflow-panel p,
+:root[data-theme="dark"] .coding-workflow-evidence dd {
+  color: var(--card-muted);
 }
 
 @media (max-width: 980px) {
@@ -2276,5 +2526,424 @@ select {
     grid-template-columns: repeat(3, 1fr);
     border-right: 0;
     border-bottom: 1px solid #e5e7eb;
+  }
+}
+
+/* Cohesive shell, theme, and responsive behavior used by browser-level visual QA. */
+.app-shell {
+  background: var(--app-bg);
+}
+
+.app-shell-empty {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app-shell-empty .left-panel,
+.app-shell-empty .left-panel-resizer,
+.app-shell-empty .right-panel-resizer,
+.app-shell-empty .right-panel {
+  display: none;
+}
+
+.app-shell-empty .canvas-panel {
+  grid-column: 1;
+}
+
+.top-bar,
+.left-panel,
+.right-panel,
+.left-panel-resizer,
+.right-panel-resizer {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.top-bar {
+  min-width: 0;
+}
+
+.brand-lockup {
+  flex: 0 1 250px;
+}
+
+.brand-lockup > div:last-child {
+  min-width: 0;
+}
+
+.brand-lockup h1 {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.brand-lockup p {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-actions {
+  flex: 0 0 auto;
+  min-width: 0;
+  white-space: nowrap;
+}
+
+.top-actions > span,
+.top-actions > .add-menu-wrap {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.reset-workspace-action {
+  color: #9f3a38 !important;
+  background: transparent !important;
+}
+
+.reset-workspace-action:hover,
+.reset-workspace-action:focus-visible {
+  color: #b42318 !important;
+  background: #fef3f2 !important;
+}
+
+.index-state-badge {
+  flex: 0 1 auto;
+  max-width: min(260px, 24vw);
+}
+
+.index-state-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.index-state-badge.unavailable {
+  color: #526071;
+  background: var(--surface-muted);
+  border-color: var(--border);
+}
+
+button:disabled,
+[data-disabled="true"] {
+  cursor: not-allowed !important;
+  filter: saturate(0.35);
+  opacity: 0.48 !important;
+}
+
+.right-panel-tabs button,
+.settings-nav button {
+  color: var(--muted);
+}
+
+.right-panel-tabs button.active,
+.settings-nav button.active {
+  color: var(--text);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.tree-row.selected {
+  background: var(--accent-soft);
+}
+
+.panel-header,
+.tree-text span,
+.inspector-title h2,
+.inspector-section h3,
+.source-box span,
+.relationship-grid strong,
+.status-detail-grid strong,
+.planning-header span,
+.planning-input span,
+.settings-title h2,
+.settings-section h3,
+.agent-settings-card h4 {
+  color: var(--text);
+}
+
+.style-controls label,
+.mode-control-label {
+  color: var(--text);
+}
+
+.mode-segmented-control {
+  background: var(--surface-muted);
+  border-color: var(--border);
+}
+
+.mode-segmented-control button {
+  color: var(--muted);
+}
+
+.mode-segmented-control button.active {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+.tree-text small,
+.inspector-title p,
+.muted,
+.tag-editor,
+.status-detail-grid span,
+.settings-title p,
+.settings-note {
+  color: var(--muted);
+}
+
+.search-field,
+.source-box,
+.relationship-grid div,
+.status-detail-grid div,
+.planning-composer,
+.agent-settings-card,
+.github-auth-box,
+.github-device-box,
+.custom-type-box,
+.dialog-warning {
+  background: var(--surface-muted);
+  border-color: var(--border);
+}
+
+.search-field input,
+.tag-editor input,
+.form-field input,
+.form-field select,
+.form-field textarea,
+.planning-input textarea,
+.git-status-box {
+  color: var(--text);
+  background: var(--surface-raised);
+  border-color: var(--border);
+}
+
+.inspector-title,
+.inspector-section,
+.right-panel-tabs,
+.settings-title,
+.settings-actions,
+.settings-nav {
+  border-color: var(--border);
+}
+
+.dialog,
+.settings-page {
+  color: var(--text);
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.dialog-title h2,
+.dialog-warning strong,
+.github-device-box strong {
+  color: var(--text);
+}
+
+.dialog-title p,
+.github-auth-box small,
+.github-device-box span {
+  color: var(--muted);
+}
+
+.settings-nav {
+  background: var(--surface-muted);
+}
+
+.settings-actions {
+  justify-content: flex-end;
+}
+
+.settings-actions .settings-ok,
+.settings-actions .settings-error {
+  margin-right: auto;
+}
+
+:root[data-theme="dark"] .top-actions [data-slot="button"].button--secondary,
+:root[data-theme="dark"] .top-actions [data-slot="button"].button--ghost,
+:root[data-theme="dark"] .right-panel [data-slot="button"].button--secondary,
+:root[data-theme="dark"] .right-panel [data-slot="button"].button--ghost,
+:root[data-theme="dark"] .dialog [data-slot="button"][class*="secondary"],
+:root[data-theme="dark"] .settings-page [data-slot="button"][class*="secondary"] {
+  color: var(--text);
+  background: var(--surface-raised);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] .app-shell,
+  :root[data-theme="system"] .top-bar,
+  :root[data-theme="system"] .left-panel,
+  :root[data-theme="system"] .right-panel,
+  :root[data-theme="system"] .left-panel-resizer,
+  :root[data-theme="system"] .right-panel-resizer {
+    color: var(--text);
+    background: var(--surface);
+    border-color: var(--border);
+  }
+
+  :root[data-theme="system"] .top-actions [data-slot="button"].button--secondary,
+  :root[data-theme="system"] .top-actions [data-slot="button"].button--ghost,
+  :root[data-theme="system"] .right-panel [data-slot="button"].button--secondary,
+  :root[data-theme="system"] .right-panel [data-slot="button"].button--ghost,
+  :root[data-theme="system"] .dialog [data-slot="button"][class*="secondary"],
+  :root[data-theme="system"] .settings-page [data-slot="button"][class*="secondary"] {
+    color: var(--text);
+    background: var(--surface-raised);
+  }
+
+  :root[data-theme="system"] .coding-workflow-panel,
+  :root[data-theme="system"] .coding-workflow-item,
+  :root[data-theme="system"] .workflow-contract,
+  :root[data-theme="system"] .workflow-check,
+  :root[data-theme="system"] .coding-workflow-item-actions button,
+  :root[data-theme="system"] .coding-workflow-pagination button,
+  :root[data-theme="system"] .workflow-contract button {
+    color: var(--card-text);
+    background: var(--card-bg);
+    border-color: var(--card-border);
+  }
+}
+
+@media (max-width: 1280px) {
+  .app-shell:not(.app-shell-empty) {
+    grid-template-columns: 270px 5px minmax(0, 1fr) 5px 318px;
+  }
+
+  .toolbar-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  .app-shell-empty .toolbar-label {
+    position: static;
+    width: auto;
+    height: auto;
+    padding: initial;
+    margin: 0;
+    overflow: visible;
+    clip: auto;
+  }
+
+  .top-actions {
+    gap: 5px;
+  }
+
+  .brand-lockup {
+    flex-basis: 210px;
+  }
+}
+
+@media (max-width: 980px) {
+  html,
+  body,
+  #root {
+    max-width: 100%;
+    overflow-x: hidden;
+  }
+
+  .app-shell,
+  .app-shell:not(.app-shell-empty) {
+    grid-template-rows: auto 260px minmax(520px, 1fr) auto;
+    grid-template-columns: minmax(0, 1fr);
+    width: 100%;
+    max-width: 100vw;
+  }
+
+  .app-shell-empty {
+    grid-template-rows: auto minmax(0, 1fr);
+    height: 100vh;
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  .app-shell-empty .canvas-panel {
+    min-height: 0;
+  }
+
+  .top-bar {
+    grid-column: 1;
+    flex-wrap: wrap;
+    width: 100%;
+    max-width: 100vw;
+    height: auto;
+    min-height: 58px;
+    padding: 9px 12px;
+    gap: 8px;
+  }
+
+  .brand-lockup {
+    flex: 1 1 190px;
+  }
+
+  .top-actions {
+    margin-left: auto;
+  }
+
+  .index-state-badge {
+    order: 3;
+    max-width: 100%;
+  }
+
+  .left-panel,
+  .right-panel,
+  .canvas-panel {
+    width: 100%;
+    max-width: 100vw;
+  }
+
+  .settings-nav {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .brand-lockup p {
+    display: none;
+  }
+
+  .brand-lockup {
+    flex-basis: 140px;
+  }
+
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+  }
+
+  .dialog-backdrop,
+  .settings-overlay {
+    padding: 8px;
+  }
+
+  .dialog {
+    width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    padding: 14px;
+  }
+
+  .directory-picker-row {
+    grid-template-columns: 1fr;
+  }
+
+  .dialog-actions {
+    flex-wrap: wrap;
+  }
+
+  .dialog-actions [data-slot="button"] {
+    flex: 1 1 auto;
+  }
+
+  .settings-nav {
+    display: grid;
+    grid-auto-columns: minmax(112px, 1fr);
+    grid-auto-flow: column;
+    grid-template-columns: none;
+    overflow-x: auto;
   }
 }

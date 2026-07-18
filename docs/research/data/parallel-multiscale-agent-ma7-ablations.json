@@ -1,0 +1,678 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-18T12:25:08.976Z",
+  "releaseCandidate": "ma7-default-on-candidate-1",
+  "machine": {
+    "platform": "linux",
+    "architecture": "x64",
+    "nodeVersion": "v24.15.0",
+    "cpuCount": 32
+  },
+  "fixtureCount": 6,
+  "conditions": [
+    {
+      "condition": "serial_large_full_graph",
+      "label": "Serial, large tier, full-graph legacy context",
+      "providerMode": "deterministic_fake_only",
+      "fixtureCount": 6,
+      "attemptedWorkUnits": 18,
+      "speed": {
+        "observedWallTimeMs": 92.56069500000012,
+        "deterministicCriticalPathMs": 90,
+        "providerCallLatencyMs": 5,
+        "providerQueueLatencyMs": 4.722222222222222,
+        "peakConcurrency": 1,
+        "schedulingWaves": 18
+      },
+      "usage": {
+        "inputTokens": 21480,
+        "outputTokens": 43200,
+        "successfulTaskCost": 0.9713999999999999,
+        "totalAttemptedCost": 0.9713999999999999,
+        "repairCost": 0,
+        "currency": "USD",
+        "priceBasis": "normalized_research_prices_not_provider_quotes"
+      },
+      "routing": {
+        "distribution": {
+          "small": 0,
+          "medium": 0,
+          "large": 18
+        },
+        "escalationRate": 0,
+        "overrides": 0
+      },
+      "quality": {
+        "acceptedPatches": 18,
+        "rejectedProposals": 0,
+        "patchAcceptanceRate": 1,
+        "passingTests": 18,
+        "testPassRate": 1,
+        "localizationRecallAtK": 1,
+        "contextSufficiencyRate": 1,
+        "followUpRetrievals": 0
+      },
+      "integration": {
+        "overlapConflicts": 0,
+        "mergeConflictRate": 0,
+        "contractConflicts": 0,
+        "contractConflictRate": 0,
+        "integrationAgentCalls": 0
+      }
+    },
+    {
+      "condition": "parallel_large_round_robin",
+      "label": "Parallel, large tier, legacy round-robin partitions",
+      "providerMode": "deterministic_fake_only",
+      "fixtureCount": 6,
+      "attemptedWorkUnits": 24,
+      "speed": {
+        "observedWallTimeMs": 30.79975099999865,
+        "deterministicCriticalPathMs": 30,
+        "providerCallLatencyMs": 5,
+        "providerQueueLatencyMs": 4.166666666666667,
+        "peakConcurrency": 4,
+        "schedulingWaves": 6
+      },
+      "usage": {
+        "inputTokens": 28640,
+        "outputTokens": 57600,
+        "successfulTaskCost": 0.8634666666666666,
+        "totalAttemptedCost": 1.5272,
+        "repairCost": 0.232,
+        "currency": "USD",
+        "priceBasis": "normalized_research_prices_not_provider_quotes"
+      },
+      "routing": {
+        "distribution": {
+          "small": 0,
+          "medium": 0,
+          "large": 24
+        },
+        "escalationRate": 0,
+        "overrides": 0
+      },
+      "quality": {
+        "acceptedPatches": 16,
+        "rejectedProposals": 8,
+        "patchAcceptanceRate": 0.6666666666666666,
+        "passingTests": 16,
+        "testPassRate": 0.6666666666666666,
+        "localizationRecallAtK": 0,
+        "contextSufficiencyRate": 0.5,
+        "followUpRetrievals": 6
+      },
+      "integration": {
+        "overlapConflicts": 2,
+        "mergeConflictRate": 0.08333333333333333,
+        "contractConflicts": 6,
+        "contractConflictRate": 0.25,
+        "integrationAgentCalls": 8
+      }
+    },
+    {
+      "condition": "parallel_large_topology",
+      "label": "Parallel, large tier, topology-aware partitions",
+      "providerMode": "deterministic_fake_only",
+      "fixtureCount": 6,
+      "attemptedWorkUnits": 18,
+      "speed": {
+        "observedWallTimeMs": 67.14762500000143,
+        "deterministicCriticalPathMs": 65,
+        "providerCallLatencyMs": 5,
+        "providerQueueLatencyMs": 3.888888888888889,
+        "peakConcurrency": 4,
+        "schedulingWaves": 13
+      },
+      "usage": {
+        "inputTokens": 37065,
+        "outputTokens": 43200,
+        "successfulTaskCost": 0.9327333333333333,
+        "totalAttemptedCost": 1.1073250000000001,
+        "repairCost": 0.058,
+        "currency": "USD",
+        "priceBasis": "normalized_research_prices_not_provider_quotes"
+      },
+      "routing": {
+        "distribution": {
+          "small": 0,
+          "medium": 0,
+          "large": 18
+        },
+        "escalationRate": 0,
+        "overrides": 0
+      },
+      "quality": {
+        "acceptedPatches": 16,
+        "rejectedProposals": 2,
+        "patchAcceptanceRate": 0.8888888888888888,
+        "passingTests": 16,
+        "testPassRate": 0.8888888888888888,
+        "localizationRecallAtK": 0.6666666666666666,
+        "contextSufficiencyRate": 1,
+        "followUpRetrievals": 2
+      },
+      "integration": {
+        "overlapConflicts": 0,
+        "mergeConflictRate": 0,
+        "contractConflicts": 2,
+        "contractConflictRate": 0.1111111111111111,
+        "integrationAgentCalls": 2
+      }
+    },
+    {
+      "condition": "topology_multiscale",
+      "label": "Topology-aware partitions plus multi-scale routing",
+      "providerMode": "deterministic_fake_only",
+      "fixtureCount": 6,
+      "attemptedWorkUnits": 18,
+      "speed": {
+        "observedWallTimeMs": 66.81661200000235,
+        "deterministicCriticalPathMs": 65,
+        "providerCallLatencyMs": 5,
+        "providerQueueLatencyMs": 3.888888888888889,
+        "peakConcurrency": 4,
+        "schedulingWaves": 13
+      },
+      "usage": {
+        "inputTokens": 37065,
+        "outputTokens": 15600,
+        "successfulTaskCost": 0.0567037037037037,
+        "totalAttemptedCost": 0.12179166666666666,
+        "repairCost": 0.058,
+        "currency": "USD",
+        "priceBasis": "normalized_research_prices_not_provider_quotes"
+      },
+      "routing": {
+        "distribution": {
+          "small": 10,
+          "medium": 8,
+          "large": 0
+        },
+        "escalationRate": 0,
+        "overrides": 0
+      },
+      "quality": {
+        "acceptedPatches": 16,
+        "rejectedProposals": 2,
+        "patchAcceptanceRate": 0.8888888888888888,
+        "passingTests": 16,
+        "testPassRate": 0.8888888888888888,
+        "localizationRecallAtK": 0.6666666666666666,
+        "contextSufficiencyRate": 1,
+        "followUpRetrievals": 2
+      },
+      "integration": {
+        "overlapConflicts": 0,
+        "mergeConflictRate": 0,
+        "contractConflicts": 2,
+        "contractConflictRate": 0.1111111111111111,
+        "integrationAgentCalls": 2
+      }
+    },
+    {
+      "condition": "topology_multiscale_contracts",
+      "label": "Topology-aware multi-scale routing with edge-contract integration",
+      "providerMode": "deterministic_fake_only",
+      "fixtureCount": 6,
+      "attemptedWorkUnits": 18,
+      "speed": {
+        "observedWallTimeMs": 66.72538899999927,
+        "deterministicCriticalPathMs": 65,
+        "providerCallLatencyMs": 5,
+        "providerQueueLatencyMs": 3.888888888888889,
+        "peakConcurrency": 4,
+        "schedulingWaves": 13
+      },
+      "usage": {
+        "inputTokens": 37065,
+        "outputTokens": 15600,
+        "successfulTaskCost": 0.06379166666666666,
+        "totalAttemptedCost": 0.06379166666666666,
+        "repairCost": 0,
+        "currency": "USD",
+        "priceBasis": "normalized_research_prices_not_provider_quotes"
+      },
+      "routing": {
+        "distribution": {
+          "small": 10,
+          "medium": 8,
+          "large": 0
+        },
+        "escalationRate": 0,
+        "overrides": 0
+      },
+      "quality": {
+        "acceptedPatches": 18,
+        "rejectedProposals": 0,
+        "patchAcceptanceRate": 1,
+        "passingTests": 18,
+        "testPassRate": 1,
+        "localizationRecallAtK": 0.6666666666666666,
+        "contextSufficiencyRate": 1,
+        "followUpRetrievals": 2
+      },
+      "integration": {
+        "overlapConflicts": 0,
+        "mergeConflictRate": 0,
+        "contractConflicts": 0,
+        "contractConflictRate": 0,
+        "integrationAgentCalls": 0
+      }
+    },
+    {
+      "condition": "topology_multiscale_contracts_query",
+      "label": "Condition 5 plus bounded executable graph-query retrieval",
+      "providerMode": "deterministic_fake_only",
+      "fixtureCount": 6,
+      "attemptedWorkUnits": 18,
+      "speed": {
+        "observedWallTimeMs": 66.81878700000016,
+        "deterministicCriticalPathMs": 65,
+        "providerCallLatencyMs": 5,
+        "providerQueueLatencyMs": 3.888888888888889,
+        "peakConcurrency": 4,
+        "schedulingWaves": 13
+      },
+      "usage": {
+        "inputTokens": 40031,
+        "outputTokens": 15600,
+        "successfulTaskCost": 0.06543944444444444,
+        "totalAttemptedCost": 0.06543944444444444,
+        "repairCost": 0,
+        "currency": "USD",
+        "priceBasis": "normalized_research_prices_not_provider_quotes"
+      },
+      "routing": {
+        "distribution": {
+          "small": 10,
+          "medium": 8,
+          "large": 0
+        },
+        "escalationRate": 0,
+        "overrides": 0
+      },
+      "quality": {
+        "acceptedPatches": 18,
+        "rejectedProposals": 0,
+        "patchAcceptanceRate": 1,
+        "passingTests": 18,
+        "testPassRate": 1,
+        "localizationRecallAtK": 1,
+        "contextSufficiencyRate": 1,
+        "followUpRetrievals": 0
+      },
+      "integration": {
+        "overlapConflicts": 0,
+        "mergeConflictRate": 0,
+        "contractConflicts": 0,
+        "contractConflictRate": 0,
+        "integrationAgentCalls": 0
+      }
+    }
+  ],
+  "researchTargets": {
+    "independentParallelMakespanReduction": 0.6,
+    "independentParallelMakespanReductionTarget": 0.4,
+    "independentParallelMakespanTargetPassed": true,
+    "clearlyLeafLocalSmallTierRate": 0.8,
+    "clearlyLeafLocalSmallTierTarget": 0.6,
+    "clearlyLeafLocalSmallTierTargetPassed": true,
+    "inputTokenReductionVsLargeFullGraph": -0.7255586592178771,
+    "inputTokenReductionTargetPassed": false,
+    "patchAndTestSuccessNotDecreased": true,
+    "integrationConflictReductionVsRoundRobin": 1,
+    "integrationConflictTargetPassed": true
+  },
+  "calibration": {
+    "partition": {
+      "candidates": [
+        {
+          "smallMergeTokenLimit": 4000,
+          "highCouplingWeight": 1,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 4000,
+          "highCouplingWeight": 2,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 4000,
+          "highCouplingWeight": 3,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 8000,
+          "highCouplingWeight": 1,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 8000,
+          "highCouplingWeight": 2,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 8000,
+          "highCouplingWeight": 3,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 12000,
+          "highCouplingWeight": 1,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 12000,
+          "highCouplingWeight": 2,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        },
+        {
+          "smallMergeTokenLimit": 12000,
+          "highCouplingWeight": 3,
+          "relatedEdgeLocalityRatio": 0.6666666666666666,
+          "cutEdges": 2,
+          "workUnits": 18,
+          "valid": true,
+          "score": 53.066666666666656
+        }
+      ],
+      "selected": {
+        "smallMergeTokenLimit": 8000,
+        "highCouplingWeight": 2
+      }
+    },
+    "routing": {
+      "candidates": [
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 1,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 2,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 8000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 12000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.6,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.7,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        },
+        {
+          "smallMaximumCutEdges": 3,
+          "broadSourceTokens": 16000,
+          "smallMinimumPlanningConfidence": 0.8,
+          "accuracy": 1,
+          "clearlyLeafLocalSmallTierRate": 0,
+          "unsafeSmallSelections": 0
+        }
+      ],
+      "selected": {
+        "smallMaximumCutEdges": 2,
+        "broadSourceTokens": 12000,
+        "smallMinimumPlanningConfidence": 0.7
+      }
+    }
+  },
+  "defaultOnObservation": {
+    "releaseId": "ma7-default-on-candidate-1",
+    "observedWorkflowCount": 6,
+    "featureFlags": {
+      "graphPartitionedWorkflows": true,
+      "workUnitContext": true,
+      "modelRouterV2": true,
+      "edgeContracts": true,
+      "integrationGate": true
+    },
+    "providerCalls": {
+      "fake": 18,
+      "paid": 0
+    },
+    "legacyCalls": {
+      "roundRobinPlanningChunks": 0,
+      "compatibilityWorkflowScheduler": 0,
+      "fullProjectCodingContextReads": 0,
+      "fullProjectReviewContextReads": 0
+    },
+    "gates": {
+      "uniqueOwnership": true,
+      "completeBoundaryCoverage": true,
+      "acyclicDependencies": true,
+      "boundedContexts": true,
+      "paidProviderCalls": 0
+    }
+  },
+  "limitations": [
+    "All provider work is performed by a deterministic delayed fake; patch and test success measure harness correctness, not production-model quality.",
+    "Costs use fixed normalized research prices so conditions remain comparable; they are not current provider quotes.",
+    "The default-on observation is the repository's six-workflow release-candidate corpus, not external production telemetry.",
+    "Actual wall time is measured locally, while the deterministic critical path is the reproducible cross-machine speed metric.",
+    "The optional graph-query condition models bounded one-hop retrieval over the existing executable partition graph; it does not invoke a model or network service."
+  ]
+}

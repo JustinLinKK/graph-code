@@ -4,6 +4,7 @@ import {
   boundaryMutationSchema,
   boundaryUpdateSchema,
   codingWorkflowApplyLayerRequestSchema,
+  codingWorkflowControlRequestSchema,
   codingWorkflowPreviewRequestSchema,
   codingWorkflowStartRequestSchema,
   codingAgentRequestSchema,
@@ -39,6 +40,17 @@ const projectRunParamsSchema = projectParamsSchema.extend({
 
 const projectWorkflowParamsSchema = projectParamsSchema.extend({
   workflowId: z.string().min(1)
+});
+
+const projectWorkUnitParamsSchema = projectWorkflowParamsSchema.extend({
+  workUnitId: z.string().min(1)
+});
+
+const workUnitContextPreviewBodySchema = z.object({
+  task: z.string().min(1),
+  provider: z.enum(["generic", "openai", "anthropic", "google"]).optional().default("generic"),
+  purpose: z.enum(["coding", "review"]).optional().default("coding"),
+  includeLegacyShadow: z.boolean().optional().default(false)
 });
 
 const nodeParamsSchema = z.object({
@@ -210,9 +222,20 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
     return runtime.getCodingWorkflow(projectId, workflowId);
   });
 
+  app.post("/api/projects/:projectId/coding-workflows/:workflowId/work-units/:workUnitId/context-preview", async (request) => {
+    const { projectId, workflowId, workUnitId } = projectWorkUnitParamsSchema.parse(request.params);
+    const body = workUnitContextPreviewBodySchema.parse(request.body);
+    return runtime.previewCodingWorkUnitContext({ projectId, workflowId, workUnitId, ...body });
+  });
+
   app.post("/api/coding-workflows/apply-layer", async (request) => {
     const body = codingWorkflowApplyLayerRequestSchema.parse(request.body);
     return runtime.applyCodingWorkflowLayer(body);
+  });
+
+  app.post("/api/coding-workflows/control", async (request) => {
+    const body = codingWorkflowControlRequestSchema.parse(request.body);
+    return runtime.controlCodingWorkflow(body);
   });
 
   app.post("/api/agents/review", async (request) => {

@@ -5,6 +5,8 @@ import type {
   CanvasGraph,
   CodingAgentMode,
   CodingWorkflow,
+  CodingWorkflowExecutionPolicy,
+  CodingWorkflowPartitionConstraints,
   CreateCustomBlockType,
   CustomBlockType,
   EdgeMutation,
@@ -35,6 +37,7 @@ import {
   applyCodingWorkflowLayer,
   autoLayoutCanvas,
   cancelCurrentIndexRun,
+  controlCodingWorkflow,
   createBoundary,
   createCustomBlockType,
   createEdge,
@@ -42,6 +45,7 @@ import {
   deleteBoundary,
   deleteEdge,
   getCanvasGraph,
+  getCodingWorkflow,
   getHierarchy,
   getIndexState,
   getGitStatus,
@@ -130,6 +134,17 @@ export default function App() {
   const [applyingRunIds, setApplyingRunIds] = useState<string[]>([]);
   const [codingWorkflow, setCodingWorkflow] = useState<CodingWorkflow | null>(null);
   const [workflowModeOverrides, setWorkflowModeOverrides] = useState<Record<string, CodingAgentMode>>({});
+  const [workflowPartitionConstraints, setWorkflowPartitionConstraints] = useState<CodingWorkflowPartitionConstraints>({
+    keepTogetherNodeGroups: [],
+    separateNodePairs: [],
+    approvedIgnoredEdges: []
+  });
+  const [workflowExecutionPolicy, setWorkflowExecutionPolicy] = useState<CodingWorkflowExecutionPolicy>({
+    maximumConcurrency: 4,
+    maxEstimatedCost: null,
+    currency: "USD"
+  });
+  const [workflowPreviewDirty, setWorkflowPreviewDirty] = useState(false);
   const [gitStatus, setGitStatus] = useState("");
   const [restoreViewport, setRestoreViewport] = useState<CanvasViewport | null | undefined>(undefined);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
@@ -1405,6 +1420,17 @@ export default function App() {
           });
           setCodingWorkflow(workflow);
           setWorkflowModeOverrides(Object.fromEntries(workflow.items.map((item) => [item.nodeId, item.selectedMode])));
+          setWorkflowPartitionConstraints(workflow.orchestration?.partitionConstraints ?? {
+            keepTogetherNodeGroups: [],
+            separateNodePairs: [],
+            approvedIgnoredEdges: []
+          });
+          setWorkflowExecutionPolicy(workflow.orchestration?.executionPolicy ?? {
+            maximumConcurrency: 4,
+            maxEstimatedCost: null,
+            currency: "USD"
+          });
+          setWorkflowPreviewDirty(false);
           return;
         }
         await runCodingAgent({
@@ -1433,6 +1459,83 @@ export default function App() {
           }
         : current
     );
+    setWorkflowPreviewDirty(true);
+  }, []);
+
+  const revalidateCodingWorkflow = useCallback(
+    async (
+      partitionConstraints = workflowPartitionConstraints,
+      executionPolicy = workflowExecutionPolicy
+    ) => {
+      if (!selectedProjectId || !codingWorkflow) return;
+      setAgentBusy(true);
+      setError(null);
+      try {
+        const workflow = await previewCodingWorkflow({
+          projectId: selectedProjectId,
+          scopeNodeId: codingWorkflow.scopeNodeId,
+          modeOverrides: Object.entries(workflowModeOverrides).map(([nodeId, mode]) => ({ nodeId, mode })),
+          partitionConstraints,
+          executionPolicy
+        });
+        setCodingWorkflow(workflow);
+        setWorkflowModeOverrides(Object.fromEntries(workflow.items.map((item) => [item.nodeId, item.selectedMode])));
+        setWorkflowPartitionConstraints(workflow.orchestration?.partitionConstraints ?? partitionConstraints);
+        setWorkflowExecutionPolicy(workflow.orchestration?.executionPolicy ?? executionPolicy);
+        setWorkflowPreviewDirty(false);
+      } catch (workflowError) {
+        setError(workflowError instanceof Error ? workflowError.message : "Workflow preview validation failed.");
+      } finally {
+        setAgentBusy(false);
+      }
+    }, [codingWorkflow, selectedProjectId, workflowExecutionPolicy, workflowModeOverrides, workflowPartitionConstraints]
+  );
+
+  const handleMergeWorkflowUnits = useCallback(
+    (workUnitIds: string[]) => {
+      if (!codingWorkflow?.orchestration || workUnitIds.length < 2) return;
+      const selected = codingWorkflow.orchestration.workUnits.filter((unit) => workUnitIds.includes(unit.id));
+      const nodeGroup = [...new Set(selected.flatMap((unit) => unit.ownedNodeIds))];
+      if (nodeGroup.length < 2) return;
+      const next = {
+        ...workflowPartitionConstraints,
+        keepTogetherNodeGroups: [...workflowPartitionConstraints.keepTogetherNodeGroups, nodeGroup]
+      };
+      setWorkflowPartitionConstraints(next);
+      void revalidateCodingWorkflow(next, workflowExecutionPolicy);
+    }, [codingWorkflow, revalidateCodingWorkflow, workflowExecutionPolicy, workflowPartitionConstraints]
+  );
+
+  const handleSplitWorkflowUnit = useCallback(
+    (workUnitId: string) => {
+      const unit = codingWorkflow?.orchestration?.workUnits.find((candidate) => candidate.id === workUnitId);
+      if (!unit || unit.ownedNodeIds.length < 2) return;
+      const next = {
+        ...workflowPartitionConstraints,
+        separateNodePairs: [...workflowPartitionConstraints.separateNodePairs, [unit.ownedNodeIds[0], unit.ownedNodeIds[1]] as [string, string]]
+      };
+      setWorkflowPartitionConstraints(next);
+      void revalidateCodingWorkflow(next, workflowExecutionPolicy);
+    }, [codingWorkflow, revalidateCodingWorkflow, workflowExecutionPolicy, workflowPartitionConstraints]
+  );
+
+  const handleApproveIgnoredWorkflowEdge = useCallback(
+    (edgeId: string) => {
+      const next = {
+        ...workflowPartitionConstraints,
+        approvedIgnoredEdges: [
+          ...workflowPartitionConstraints.approvedIgnoredEdges.filter((edge) => edge.edgeId !== edgeId),
+          { edgeId, reason: "User approved this informational boundary omission in the workflow preview.", approvedBy: "user" as const, approvalReference: `ui:${Date.now()}` }
+        ]
+      };
+      setWorkflowPartitionConstraints(next);
+      void revalidateCodingWorkflow(next, workflowExecutionPolicy);
+    }, [revalidateCodingWorkflow, workflowExecutionPolicy, workflowPartitionConstraints]
+  );
+
+  const handleWorkflowExecutionPolicyChange = useCallback((policy: CodingWorkflowExecutionPolicy) => {
+    setWorkflowExecutionPolicy(policy);
+    setWorkflowPreviewDirty(true);
   }, []);
 
   const handleStartCodingWorkflow = useCallback(async () => {
@@ -1445,9 +1548,13 @@ export default function App() {
       const workflow = await startCodingWorkflow({
         projectId: selectedProjectId,
         scopeNodeId: codingWorkflow.scopeNodeId,
-        modeOverrides: Object.entries(workflowModeOverrides).map(([nodeId, mode]) => ({ nodeId, mode }))
+        modeOverrides: Object.entries(workflowModeOverrides).map(([nodeId, mode]) => ({ nodeId, mode })),
+        partitionConstraints: workflowPartitionConstraints,
+        executionPolicy: workflowExecutionPolicy,
+        background: true
       });
       setCodingWorkflow(workflow);
+      setWorkflowPreviewDirty(false);
       const [nextRuns, nextGitStatus] = await Promise.all([listAgentRuns(selectedProjectId), getGitStatus(selectedProjectId).catch(() => ({ status: "" }))]);
       setAgentRuns(nextRuns);
       setGitStatus(nextGitStatus.status);
@@ -1457,7 +1564,23 @@ export default function App() {
     } finally {
       setAgentBusy(false);
     }
-  }, [canvas?.scopeNodeId, codingWorkflow, loadProject, selectedNodeId, selectedProjectId, workflowModeOverrides]);
+  }, [canvas?.scopeNodeId, codingWorkflow, loadProject, selectedNodeId, selectedProjectId, workflowExecutionPolicy, workflowModeOverrides, workflowPartitionConstraints]);
+
+  const handleCodingWorkflowControl = useCallback(
+    async (action: "pause" | "resume" | "cancel" | "retry" | "escalate" | "skip" | "integrate", itemId?: string) => {
+      if (!selectedProjectId || !codingWorkflow) return;
+      setAgentBusy(true);
+      setError(null);
+      try {
+        const workflow = await controlCodingWorkflow({ projectId: selectedProjectId, workflowId: codingWorkflow.id, action, itemId });
+        setCodingWorkflow(workflow);
+      } catch (workflowError) {
+        setError(workflowError instanceof Error ? workflowError.message : `Workflow ${action} failed.`);
+      } finally {
+        setAgentBusy(false);
+      }
+    }, [codingWorkflow, selectedProjectId]
+  );
 
   const handleApplyCodingWorkflowLayer = useCallback(
     async (workflowId: string, layerIndex: number) => {
@@ -1545,6 +1668,26 @@ export default function App() {
   }, [agentRuns, refreshAgentState]);
 
   useEffect(() => {
+    if (!selectedProjectId || !codingWorkflow || codingWorkflow.status !== "running") {
+      return;
+    }
+    let active = true;
+    const refreshWorkflow = async () => {
+      try {
+        const workflow = await getCodingWorkflow(selectedProjectId, codingWorkflow.id);
+        if (active) setCodingWorkflow(workflow);
+      } catch (workflowError) {
+        if (active) setError(workflowError instanceof Error ? workflowError.message : "Failed to refresh coding workflow progress.");
+      }
+    };
+    const timer = window.setInterval(() => void refreshWorkflow(), 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [codingWorkflow?.id, codingWorkflow?.status, selectedProjectId]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = settings?.general.theme ?? "system";
   }, [settings?.general.theme]);
 
@@ -1573,6 +1716,8 @@ export default function App() {
         applyingRunIds={applyingRunIds}
         codingWorkflow={codingWorkflow}
         workflowModeOverrides={workflowModeOverrides}
+        workflowExecutionPolicy={workflowExecutionPolicy}
+        workflowPreviewDirty={workflowPreviewDirty}
         gitStatus={gitStatus}
         onSelectNode={handleInspectNode}
         onOpenNode={handleOpenNode}
@@ -1611,6 +1756,12 @@ export default function App() {
         onApplyPlanningPatch={handleApplyPlanningPatch}
         onStartCode={handleStartCode}
         onWorkflowModeChange={handleWorkflowModeChange}
+        onWorkflowExecutionPolicyChange={handleWorkflowExecutionPolicyChange}
+        onRevalidateCodingWorkflow={() => void revalidateCodingWorkflow()}
+        onMergeWorkflowUnits={handleMergeWorkflowUnits}
+        onSplitWorkflowUnit={handleSplitWorkflowUnit}
+        onApproveIgnoredWorkflowEdge={handleApproveIgnoredWorkflowEdge}
+        onCodingWorkflowControl={(action, itemId) => void handleCodingWorkflowControl(action, itemId)}
         onStartCodingWorkflow={() => void handleStartCodingWorkflow()}
         onApplyCodingWorkflowLayer={(workflowId, layerIndex) => void handleApplyCodingWorkflowLayer(workflowId, layerIndex)}
         onCloseCodingWorkflow={() => setCodingWorkflow(null)}
