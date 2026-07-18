@@ -1,4 +1,4 @@
-import { CODING_AGENT_MODES, type AgentRun, type CanvasGraph, type CodingAgentMode, type CodingWorkflow, type EdgePointingDirection, type GraphBoundary, type GraphEdge, type GraphNodeKind, type HierarchyNode, type NodeDetail, type Project, type TagAssignment, type WorkspaceSettings } from "@graphcode/graph-model";
+import { CODING_AGENT_MODES, type AgentRun, type CanvasGraph, type CodingAgentMode, type CodingWorkflow, type EdgePointingDirection, type GraphBoundary, type GraphEdge, type GraphNodeKind, type HierarchyNode, type IndexState, type NodeDetail, type Project, type TagAssignment, type WorkspaceSettings } from "@graphcode/graph-model";
 import { Button, Spinner } from "@heroui/react";
 import {
   Activity,
@@ -34,6 +34,7 @@ import { WorkspaceCanvas, type MemberLayout } from "./WorkspaceCanvas";
 
 type AppShellProps = {
   selectedProject: Project | null;
+  indexState: IndexState | null;
   hierarchy: HierarchyNode[];
   canvas: CanvasGraph | null;
   theme: WorkspaceSettings["general"]["theme"];
@@ -102,10 +103,12 @@ type AppShellProps = {
   onCloseCodingWorkflow: () => void;
   onRunReview: (runId: string) => void;
   onRunScanning: () => void;
+  onCancelIndex: () => void;
 };
 
 export function AppShell({
   selectedProject,
+  indexState,
   hierarchy,
   canvas,
   theme,
@@ -168,7 +171,8 @@ export function AppShell({
   onApplyCodingWorkflowLayer,
   onCloseCodingWorkflow,
   onRunReview,
-  onRunScanning
+  onRunScanning,
+  onCancelIndex
 }: AppShellProps) {
   const [query, setQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -183,6 +187,7 @@ export function AppShell({
   const nodeCount = canvas?.nodes.length ?? 0;
   const edgeCount = canvas?.edges.length ?? 0;
   const filteredHierarchy = useMemo(() => filterHierarchy(hierarchy, query), [hierarchy, query]);
+  const indexActive = Boolean(indexState && ["discovering", "parsing", "linking", "persisting"].includes(indexState.progress.phase));
   const handleResizeStart = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (event.button !== 0) {
@@ -268,6 +273,22 @@ export function AppShell({
             <p>{selectedProject ? `${nodeCount} blocks · ${edgeCount} links` : "No project loaded"}</p>
           </div>
         </div>
+
+        {selectedProject && indexState ? (
+          <div
+            className={`index-state-badge ${indexState.completeness.status}`}
+            role="status"
+            title={indexStateTitle(indexState)}
+          >
+            {indexState.completeness.status === "complete" ? <CheckCircle2 size={14} /> : indexActive ? <Activity size={14} /> : <AlertTriangle size={14} />}
+            <span>{indexStateLabel(indexState)}</span>
+            {indexActive ? (
+              <button type="button" onClick={onCancelIndex} aria-label="Cancel indexing">
+                Cancel
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         <div className="top-actions">
           <span title="Open a repository workspace">
@@ -778,6 +799,38 @@ function PlanningPanel({
       </section>
     </div>
   );
+}
+
+function indexStateLabel(state: IndexState): string {
+  const counts = state.counts;
+  if (["discovering", "parsing", "linking", "persisting"].includes(state.progress.phase)) {
+    return `${state.progress.message} ${state.progress.completed}/${state.progress.total}`;
+  }
+  switch (state.completeness.status) {
+    case "complete":
+      return `Index complete · ${counts.indexed}/${counts.discovered}`;
+    case "partial":
+      return `Index partial · ${counts.indexed}/${counts.discovered}`;
+    case "stale":
+      return `Index stale · ${state.completeness.changedFiles.length} changed`;
+    case "failed":
+      return state.completeness.errorCode === "index_state_unavailable" ? "Index state unavailable" : "Index failed";
+  }
+}
+
+function indexStateTitle(state: IndexState): string {
+  const counts = state.counts;
+  const countsText = `Discovered ${counts.discovered}; supported ${counts.supported}; indexed ${counts.indexed}; unsupported ${counts.unsupported}; excluded ${counts.excluded}; failed ${counts.failed}.`;
+  if (state.completeness.status === "partial") {
+    return `${countsText} ${state.completeness.reasons.join(" ")}`;
+  }
+  if (state.completeness.status === "stale") {
+    return `${countsText} Stale since ${state.completeness.sinceRevision}.`;
+  }
+  if (state.completeness.status === "failed") {
+    return `${countsText} ${state.completeness.errorCode}.`;
+  }
+  return countsText;
 }
 
 function ticketStatusLabel(run: AgentRun): string {

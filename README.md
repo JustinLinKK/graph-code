@@ -165,6 +165,55 @@ For daily development after dependencies are installed, run `pnpm dev` directly 
 
 Use `pnpm seed` only when you intentionally want the optional self-repo demo/reset fixture. It rebuilds the local self-repo fixture at `.graphcode/graphcode.sqlite` and erases local graph edits, saved placements, agent runs, and settings in that database.
 
+## Codex Integration
+
+GraphCode uses the local account-authenticated Codex CLI for Codex agents. Install and sign in to Codex from the same OS shell you use to start GraphCode, then open GraphCode settings and refresh **Integrations > Codex CLI**.
+
+The model catalog command prints JSON and can be large, so the checks below redirect it to a temporary file.
+
+### macOS
+
+```bash
+npm install -g @openai/codex
+codex --version
+codex login --device-auth
+codex login status
+codex doctor
+codex debug models > /tmp/codex-models.json
+ls -lh /tmp/codex-models.json
+```
+
+### Linux
+
+```bash
+npm install -g @openai/codex
+codex --version
+codex login --device-auth
+codex login status
+codex doctor
+codex debug models > /tmp/codex-models.json
+ls -lh /tmp/codex-models.json
+```
+
+If `codex` is not found after install, open a new terminal or add your npm global binary directory to `PATH`.
+
+### Windows PowerShell
+
+Use the `cmd /c` form from PowerShell so Windows runs the `.cmd` shims and avoids PowerShell script-execution policy blocks.
+
+```powershell
+cd C:\GitHub\graph-code
+cmd /c npm install -g @openai/codex
+cmd /c codex --version
+cmd /c codex login --device-auth
+cmd /c codex login status
+cmd /c codex doctor
+cmd /c "codex debug models > %TEMP%\codex-models.json"
+Get-Item "$env:TEMP\codex-models.json"
+```
+
+If Windows cannot find `codex` after install, close and reopen PowerShell so the Node.js install directory is loaded into `PATH`, then rerun `cmd /c codex --version`.
+
 ## Feature Tour
 
 ### Repository Graph Workspace

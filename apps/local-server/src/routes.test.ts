@@ -73,6 +73,21 @@ describe("graph API routes", () => {
     expect(flat).not.toContain("\"kind\":\"process\"");
   });
 
+  it("exposes complete index coverage and progress through the v2 index-state route", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/v2/projects/graphcode-self/index-state" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(
+      expect.objectContaining({
+        projectId: "graphcode-self",
+        providerId: "current-parser",
+        completeness: { status: "complete" },
+        counts: expect.objectContaining({ discovered: 1, supported: 1, indexed: 1, excluded: 0, failed: 0 }),
+        progress: expect.objectContaining({ phase: "complete", completed: 1, total: 1 })
+      })
+    );
+  });
+
   it("returns canvas scope data plus attachments", async () => {
     const response = await app.inject({
       method: "GET",

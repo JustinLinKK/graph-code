@@ -98,6 +98,103 @@ export const LANGUAGE_TYPES = [
 export const AGENT_STATUSES = ["none", "planning", "coded", "reviewed", "implemented", "bugged"] as const;
 export const GIT_WORKTREE_STATUSES = ["untracked", "pending", "staged", "committed"] as const;
 export const GIT_CHANGE_STATUSES = ["new", "modified", "deleted"] as const;
+export const INDEX_PROGRESS_PHASES = ["idle", "discovering", "parsing", "linking", "persisting", "complete", "failed", "cancelled"] as const;
+
+export const indexCompletenessSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("complete") }),
+  z.object({
+    status: z.literal("partial"),
+    indexedFiles: z.number().int().nonnegative(),
+    discoveredFiles: z.number().int().nonnegative(),
+    reasons: z.array(z.string().min(1))
+  }),
+  z.object({
+    status: z.literal("stale"),
+    changedFiles: z.array(z.string().min(1)),
+    sinceRevision: z.string().min(1)
+  }),
+  z.object({
+    status: z.literal("failed"),
+    lastCompleteRevision: z.string().min(1).nullable(),
+    errorCode: z.string().min(1)
+  })
+]);
+
+export const indexFileCountsSchema = z
+  .object({
+    discovered: z.number().int().nonnegative(),
+    supported: z.number().int().nonnegative(),
+    indexed: z.number().int().nonnegative(),
+    unsupported: z.number().int().nonnegative(),
+    excluded: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative()
+  })
+  .superRefine((counts, context) => {
+    if (counts.supported + counts.unsupported + counts.excluded !== counts.discovered) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Discovered files must reconcile to supported, unsupported, and excluded counts."
+      });
+    }
+    if (counts.indexed + counts.failed > counts.supported) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Indexed and failed files cannot exceed the supported file count."
+      });
+    }
+  });
+
+export const indexProgressSchema = z.object({
+  phase: z.enum(INDEX_PROGRESS_PHASES),
+  completed: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  message: z.string(),
+  updatedAt: z.string().datetime()
+});
+
+export const indexTelemetrySchema = z.object({
+  discoveryMs: z.number().nonnegative(),
+  parseMs: z.number().nonnegative(),
+  linkMs: z.number().nonnegative(),
+  persistMs: z.number().nonnegative(),
+  peakRssBytes: z.number().int().nonnegative()
+});
+
+export const indexStateSchema = z
+  .object({
+    projectId: z.string().min(1),
+    providerId: z.string().min(1),
+    indexRevision: z.string().min(1).nullable(),
+    workspaceRevision: z.string().min(1).nullable(),
+    generatedAt: z.string().datetime(),
+    completeness: indexCompletenessSchema,
+    counts: indexFileCountsSchema,
+    progress: indexProgressSchema,
+    telemetry: indexTelemetrySchema
+  })
+  .superRefine((state, context) => {
+    if (state.completeness.status === "complete" && (state.counts.indexed !== state.counts.supported || state.counts.failed > 0 || state.counts.excluded > 0)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A complete index must account for every supported file without failures or exclusions."
+      });
+    }
+    if (
+      state.completeness.status === "partial" &&
+      (state.completeness.indexedFiles !== state.counts.indexed || state.completeness.discoveredFiles !== state.counts.discovered)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Partial completeness counts must match the index state counts."
+      });
+    }
+  });
+
+export type IndexCompleteness = z.infer<typeof indexCompletenessSchema>;
+export type IndexFileCounts = z.infer<typeof indexFileCountsSchema>;
+export type IndexProgress = z.infer<typeof indexProgressSchema>;
+export type IndexTelemetry = z.infer<typeof indexTelemetrySchema>;
+export type IndexState = z.infer<typeof indexStateSchema>;
 export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const;
 export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "conflicted"] as const;
 export const AGENT_PROVIDERS = ["fake", "codex", "claudecode", "openai", "gemini", "openrouter"] as const;

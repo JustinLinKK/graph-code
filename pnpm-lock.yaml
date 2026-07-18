@@ -162,6 +162,9 @@ importers:
 
   packages/parser:
     dependencies:
+      '@graphcode/graph-model':
+        specifier: workspace:*
+        version: link:../graph-model
       typescript:
         specifier: ^5.8.3
         version: 5.9.3

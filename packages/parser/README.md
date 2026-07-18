@@ -14,4 +14,6 @@ Current responsibilities:
 - Preserve deterministic IDs, source paths, and line ranges for generated graph rows.
 - Feed the local server's scanner-backed `.graphcode` refresh.
 
-The exported entrypoint is `scanRepositoryCodeGraph(rootPath, options?)`.
+The exported entrypoint is `scanRepositoryCodeGraph(rootPath, options?)`. It has no default file-count cap. Snapshots include reconciled coverage counts, typed completeness, phase timings, parse failures, and sampled peak RSS. Callers may provide `onProgress`, an `AbortSignal`, or an explicit diagnostic `maxFiles`; an explicit cap always produces `partial` completeness.
+
+`discoverRepositoryFiles(rootPath, options?)` is the shared discovery policy used by both deterministic parsing and the local scanning inventory, preventing independent hidden limits.

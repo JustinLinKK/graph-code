@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, NodeDetail } from "@graphcode/graph-model";
+import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, IndexState, NodeDetail } from "@graphcode/graph-model";
 import { runCodingAgent, runPlanningAgent, runReviewAgent, runScanningAgent, scanLocalOutputSchema, type GraphCodeToolbox, type ScanPipelineResult } from "./index";
 
 const baseConfig: AgentConfig = {
@@ -106,6 +106,7 @@ function canvas(nodes: GraphNode[] = [node], edges: GraphEdge[] = []): CanvasGra
 function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
   return {
     readGraph: vi.fn(async () => ({ nodes: [node], edges: [] as GraphEdge[] })),
+      getIndexState: vi.fn(async () => completeIndexState()),
       getNodeDetail: vi.fn(async () => detail),
       getCanvasGraph: vi.fn(async () => canvas()),
     resolveExecutionMetadata: vi.fn(async () => execution),
@@ -147,6 +148,21 @@ function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
     readGitStatus: vi.fn(async () => ""),
     refreshCodeGraph: vi.fn(async () => ({ nodeCount: 12, edgeCount: 4, fileCount: 3, symbolCount: 5, workflowNodeCount: 4 })),
     ...overrides
+  };
+}
+
+function completeIndexState(): IndexState {
+  const now = new Date().toISOString();
+  return {
+    projectId: "project",
+    providerId: "current-parser",
+    indexRevision: "revision-1",
+    workspaceRevision: "revision-1",
+    generatedAt: now,
+    completeness: { status: "complete" },
+    counts: { discovered: 1, supported: 1, indexed: 1, unsupported: 0, excluded: 0, failed: 0 },
+    progress: { phase: "complete", completed: 1, total: 1, message: "Complete", updatedAt: now },
+    telemetry: { discoveryMs: 1, parseMs: 1, linkMs: 1, persistMs: 1, peakRssBytes: 1 }
   };
 }
 
@@ -239,6 +255,28 @@ describe("GraphCode agent runtime", () => {
       expect(result.response).toContain("testScriptDirectory=tests/generated");
       expect(tools.writeCodeProposal).toHaveBeenCalled();
       expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded" })]);
+    });
+
+    it("warns agents not to make repository-wide claims from a partial index", async () => {
+      const partial = completeIndexState();
+      partial.completeness = {
+        status: "partial",
+        indexedFiles: 1,
+        discoveredFiles: 2,
+        reasons: ["Configured file limit excluded one supported file."]
+      };
+      partial.counts = { discovered: 2, supported: 1, indexed: 1, unsupported: 0, excluded: 1, failed: 0 };
+      const result = await runCodingAgent(
+        { projectId: "project", nodeId: "node-1", mode: "small", prompt: "Update value" },
+        {
+          config: { ...baseConfig, agentKind: "coding" },
+          runId: "run-partial",
+          toolbox: toolbox({ getIndexState: vi.fn(async () => partial) })
+        }
+      );
+
+      expect(result.response).toContain("Index coverage warning: PARTIAL");
+      expect(result.response).toContain("Do not describe findings as repository-wide");
     });
 
     it("stores parsed test artifact manifests with coding proposals", async () => {

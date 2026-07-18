@@ -15,6 +15,7 @@ import type {
   GraphNodeKind,
   GraphTag,
   HierarchyNode,
+  IndexState,
   NodeDetail,
   NodeTypeStyle,
   NodeMutation,
@@ -33,6 +34,7 @@ import {
   applyAgentGraphPatch,
   applyCodingWorkflowLayer,
   autoLayoutCanvas,
+  cancelCurrentIndexRun,
   createBoundary,
   createCustomBlockType,
   createEdge,
@@ -41,6 +43,7 @@ import {
   deleteEdge,
   getCanvasGraph,
   getHierarchy,
+  getIndexState,
   getGitStatus,
   getNodeDetail,
   getWorkspaceSettings,
@@ -91,6 +94,7 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [hierarchy, setHierarchy] = useState<HierarchyNode[]>([]);
   const [canvas, setCanvas] = useState<CanvasGraph | null>(null);
+  const [indexState, setIndexState] = useState<IndexState | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedBoundaryId, setSelectedBoundaryId] = useState<string | null>(null);
@@ -164,15 +168,17 @@ export default function App() {
     setError(null);
     setRestoreViewport(undefined);
     try {
-      const [nextHierarchy, nextCanvas] = await Promise.all([
+      const [nextHierarchy, nextCanvas, nextIndexState] = await Promise.all([
         getHierarchy(projectId),
         getCanvasGraph(projectId, {
           rootNodeId,
           includeAttachments: true
-        })
+        }),
+        getIndexState(projectId)
       ]);
       setHierarchy(nextHierarchy);
       setCanvas(nextCanvas);
+      setIndexState(nextIndexState);
       rememberCanvasScope(projectId, nextCanvas.scopeNodeId);
       setRestoreViewport(getStoredCanvasViewport(projectId, nextCanvas.scopeNodeId));
       const fallbackSelected = selectedNodeOverride !== undefined ? selectedNodeOverride : nextCanvas.scopeNodeId ?? nextCanvas.nodes[0]?.id ?? null;
@@ -207,6 +213,7 @@ export default function App() {
     setSelectedProjectId(null);
     setHierarchy([]);
     setCanvas(null);
+    setIndexState(null);
     setSelectedNodeId(null);
     setSelectedEdgeId(null);
     setSelectedBoundaryId(null);
@@ -1257,9 +1264,14 @@ export default function App() {
     if (!selectedProjectId) {
       return;
     }
-    const [nextRuns, nextGitStatus] = await Promise.all([listAgentRuns(selectedProjectId), getGitStatus(selectedProjectId).catch(() => ({ status: "" }))]);
+    const [nextRuns, nextGitStatus, nextIndexState] = await Promise.all([
+      listAgentRuns(selectedProjectId),
+      getGitStatus(selectedProjectId).catch(() => ({ status: "" })),
+      getIndexState(selectedProjectId)
+    ]);
     setAgentRuns(nextRuns);
     setGitStatus(nextGitStatus.status);
+    setIndexState(nextIndexState);
 
     // Auto-refresh canvas when a background scanning agent completes,
     // so newly scanned nodes appear without a manual refresh.
@@ -1507,6 +1519,17 @@ export default function App() {
     }
   }, [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProject?.description, selectedProject?.scanningInstructions, selectedProjectId]);
 
+  const handleCancelIndex = useCallback(async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    try {
+      setIndexState(await cancelCurrentIndexRun(selectedProjectId));
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Failed to cancel indexing.");
+    }
+  }, [selectedProjectId]);
+
   useEffect(() => {
     void refreshAgentState();
   }, [refreshAgentState]);
@@ -1529,6 +1552,7 @@ export default function App() {
     <>
       <AppShell
         selectedProject={selectedProject}
+        indexState={indexState}
         hierarchy={hierarchy}
         canvas={canvas}
         theme={settings?.general.theme ?? "system"}
@@ -1592,6 +1616,7 @@ export default function App() {
         onCloseCodingWorkflow={() => setCodingWorkflow(null)}
         onRunReview={handleRunReview}
         onRunScanning={handleRunScanning}
+        onCancelIndex={() => void handleCancelIndex()}
       />
       {settingsOpen && selectedProject && settings ? (
         <SettingsPage

@@ -28,3 +28,5 @@ claude -p --append-system-prompt <systemPrompt> --permission-mode plan --disallo
 ```
 
 Settings validation checks that the CLI command exists and that the local CLI account is signed in before saving the configuration.
+
+Every planning, coding, review, and scanning context includes the current index completeness. Partial, stale, failed, and in-progress indexes explicitly prohibit repository-wide claims. `benchmarkAgentContext` measures legacy context construction without invoking a model for the scalability baseline.

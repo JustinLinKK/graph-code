@@ -30,6 +30,7 @@ import type {
   GraphNode,
   GraphNodeReuse,
   HierarchyNode,
+  IndexState,
   FolderPickerResult,
   LayoutPatch,
   NodeDetail,
@@ -51,6 +52,7 @@ import type {
   SettingsValidationResult,
   TagAssignment
 } from "@graphcode/graph-model";
+import { indexStateSchema } from "@graphcode/graph-model";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL ?? "";
 
@@ -127,6 +129,14 @@ export async function pickWorkspaceFolder(): Promise<FolderPickerResult> {
 
 export async function getHierarchy(projectId: string): Promise<HierarchyNode[]> {
   return request<HierarchyNode[]>(`/api/projects/${projectId}/hierarchy`);
+}
+
+export async function getIndexState(projectId: string): Promise<IndexState> {
+  return indexStateSchema.parse(await request<unknown>(`/api/v2/projects/${projectId}/index-state`));
+}
+
+export async function cancelCurrentIndexRun(projectId: string): Promise<IndexState> {
+  return indexStateSchema.parse(await request<unknown>(`/api/v2/projects/${projectId}/index-runs/current`, { method: "DELETE" }));
 }
 
 export async function getCanvasGraph(

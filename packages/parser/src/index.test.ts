@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { codeGraphId, scanRepositoryCodeGraph } from "./index";
+import { CodeGraphScanCancelledError, codeGraphId, scanRepositoryCodeGraph } from "./index";
 
 describe("TypeScript code graph scanner", () => {
   it("extracts directories, files, nested symbols, calls, and control-flow workflows", () => {
@@ -140,5 +140,60 @@ describe("TypeScript code graph scanner", () => {
 
     expect(snapshot.files.map((file) => file.path)).toEqual(["python/app.py"]);
     expect(snapshot.symbols.map((symbol) => symbol.name)).toEqual(expect.arrayContaining(["Greeter", "Greeter.greet", "run"]));
+  });
+
+  it("indexes a 2,001-file repository without a silent default cap", () => {
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-parser-scale-"));
+    try {
+      for (let index = 0; index < 2001; index += 1) {
+        fs.writeFileSync(path.join(rootPath, `file-${String(index).padStart(4, "0")}.sh`), `work_${index}() { echo ${index}; }\n`);
+      }
+
+      const snapshot = scanRepositoryCodeGraph(rootPath);
+
+      expect(snapshot.files).toHaveLength(2001);
+      expect(snapshot.scan.completeness).toEqual({ status: "complete" });
+      expect(snapshot.scan.counts).toEqual({
+        discovered: 2001,
+        supported: 2001,
+        indexed: 2001,
+        unsupported: 0,
+        excluded: 0,
+        failed: 0
+      });
+    } finally {
+      fs.rmSync(rootPath, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("reports an explicitly configured cap as partial and supports cancellation progress", () => {
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-parser-policy-"));
+    try {
+      for (let index = 0; index < 12; index += 1) {
+        fs.writeFileSync(path.join(rootPath, `file-${index}.ts`), `export const value${index} = ${index};\n`);
+      }
+      const capped = scanRepositoryCodeGraph(rootPath, { maxFiles: 10 });
+      expect(capped.files).toHaveLength(10);
+      expect(capped.scan.completeness).toEqual({
+        status: "partial",
+        indexedFiles: 10,
+        discoveredFiles: 12,
+        reasons: ["Configured file limit 10 excluded 2 supported files."]
+      });
+
+      const controller = new AbortController();
+      expect(() =>
+        scanRepositoryCodeGraph(rootPath, {
+          signal: controller.signal,
+          onProgress: (progress) => {
+            if (progress.phase === "parsing" && progress.completed === 2) {
+              controller.abort();
+            }
+          }
+        })
+      ).toThrow(CodeGraphScanCancelledError);
+    } finally {
+      fs.rmSync(rootPath, { recursive: true, force: true });
+    }
   });
 });

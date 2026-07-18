@@ -1643,6 +1643,50 @@ select {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
+.index-state-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 5px 8px;
+  color: #334155;
+  background: #f1f5f9;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.index-state-badge.complete {
+  color: #166534;
+  background: #f0fdf4;
+  border-color: #86efac;
+}
+
+.index-state-badge.partial,
+.index-state-badge.stale {
+  color: #92400e;
+  background: #fffbeb;
+  border-color: #fcd34d;
+}
+
+.index-state-badge.failed {
+  color: #991b1b;
+  background: #fef2f2;
+  border-color: #fca5a5;
+}
+
+.index-state-badge button {
+  padding: 0 0 0 6px;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  border-left: 1px solid currentColor;
+  font: inherit;
+  cursor: pointer;
+}
+
 .directory-picker-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

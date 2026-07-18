@@ -18,6 +18,7 @@ import {
   type GraphNode,
   type GraphPatch,
   type GraphStatusPatch,
+  type IndexState,
   type NodeDetail,
     type PlanningChatRequest,
     type ReviewAgentRequest,
@@ -43,6 +44,7 @@ import { z } from "zod";
 
 export type GraphCodeToolbox = {
   readGraph: (projectId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
+  getIndexState: (projectId: string) => Promise<IndexState>;
   getNodeDetail: (nodeId: string) => Promise<NodeDetail>;
   getCanvasGraph: (projectId: string, rootNodeId: string, includeAttachments?: boolean) => Promise<CanvasGraph>;
   resolveExecutionMetadata: (nodeId: string) => Promise<BlockExecutionMetadata>;
@@ -70,12 +72,40 @@ export type GraphCodeToolbox = {
 
 type PlanningGraph = Awaited<ReturnType<GraphCodeToolbox["readGraph"]>>;
 
+export type AgentContextBenchmark = {
+  durationMs: number;
+  promptCharacters: number;
+  chunks: number;
+  nodes: number;
+  edges: number;
+};
+
+export function benchmarkAgentContext(graph: PlanningGraph, parallelLimit = 4): AgentContextBenchmark {
+  const startedAt = performance.now();
+  const chunks = buildPlanningContextChunks(graph, parallelLimit);
+  const promptCharacters = chunks.reduce(
+    (total, chunk) =>
+      total +
+      chunk.nodes.reduce((count, node) => count + `${node.id}:${node.name}:${node.kind}:${node.summary}\n`.length, 0) +
+      chunk.edges.reduce((count, edge) => count + `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}\n`.length, 0),
+    0
+  );
+  return {
+    durationMs: performance.now() - startedAt,
+    promptCharacters,
+    chunks: chunks.length,
+    nodes: graph.nodes.length,
+    edges: graph.edges.length
+  };
+}
+
 export type AgentRuntimeOptions = {
   config: AgentConfig;
   scanningConfigs?: Partial<Record<ScanningAgentMode, ScanningAgentConfig & { skipCodexDefaultSystemPrompt?: boolean }>>;
   runId?: string;
   workspaceRoot?: string;
   toolbox: GraphCodeToolbox;
+  signal?: AbortSignal;
 };
 
 export type AgentResult = {
@@ -209,7 +239,8 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
     prompt: input.prompt,
     execute: async () => {
       const provider = createProvider(options.config, options.workspaceRoot);
-      const graph = await options.toolbox.readGraph(input.projectId);
+      const [graph, indexState] = await Promise.all([options.toolbox.readGraph(input.projectId), options.toolbox.getIndexState(input.projectId)]);
+      const coverageNotice = formatIndexCoverageForPrompt(indexState);
       const scope = input.scopeNodeId ? graph.nodes.find((node) => node.id === input.scopeNodeId) ?? null : null;
       const planningChunks = buildPlanningContextChunks(graph, options.config.parallelLimit);
       const chunkNotes = await boundedMap(planningChunks, options.config.parallelLimit, async (chunk, index) =>
@@ -219,6 +250,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
             role: "user",
             content: [
               `Planning prompt: ${input.prompt}`,
+              coverageNotice,
               scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
               `Slice ${index + 1} of ${planningChunks.length}`,
               `Nodes: ${chunk.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}`,
@@ -239,6 +271,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
           role: "user",
           content: [
             `Prompt: ${input.prompt}`,
+            coverageNotice,
             scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
             `Writable node ids:\n${graph.nodes.slice(0, 120).map((node) => `${node.id}: ${node.name} (${node.kind})`).join("\n")}`,
             `Writable edge ids:\n${graph.edges.slice(0, 160).map((edge) => `${edge.id}: ${edge.sourceNodeId}->${edge.targetNodeId} (${edge.kind})`).join("\n")}`,
@@ -297,7 +330,7 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
       const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const detail = await options.toolbox.getNodeDetail(input.nodeId);
-      const graph = await options.toolbox.readGraph(input.projectId);
+      const [graph, indexState] = await Promise.all([options.toolbox.readGraph(input.projectId), options.toolbox.getIndexState(input.projectId)]);
       const organizationScope = resolveCodingOrganizationScope(detail.node, graph.nodes);
       const scopeCanvas =
         organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
@@ -316,7 +349,8 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
           gitStatus,
           execution,
           recommendedModeReason: input.recommendedModeReason,
-          prompt: input.prompt
+          prompt: input.prompt,
+          coverageNotice: formatIndexCoverageForPrompt(indexState)
         });
         const response = await provider.invoke([
           { role: "system", content: resolveSystemPrompt(options.config, "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest.") },
@@ -359,7 +393,7 @@ export async function runReviewAgent(
       const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const diff = input.diff ?? "";
-      const graph = await options.toolbox.readGraph(input.projectId);
+      const [graph, indexState] = await Promise.all([options.toolbox.readGraph(input.projectId), options.toolbox.getIndexState(input.projectId)]);
       const detail = input.targetNodeId ? await options.toolbox.getNodeDetail(input.targetNodeId) : null;
       const organizationScope = detail ? resolveCodingOrganizationScope(detail.node, graph.nodes) : null;
       const scopeCanvas =
@@ -379,7 +413,8 @@ export async function runReviewAgent(
         source,
         gitStatus,
         execution,
-        diff
+        diff,
+        coverageNotice: formatIndexCoverageForPrompt(indexState)
       });
       const response = await provider.invoke([
         {
@@ -418,8 +453,12 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
     kind: "scanning",
     prompt: scanningPrompt(input),
     execute: async () => {
+      throwIfAgentCancelled(options.signal);
       const scanConfigs = resolveScanningConfigs(options);
       const inventory = await options.toolbox.listScannableFiles(input.projectId);
+      const indexState = await options.toolbox.getIndexState(input.projectId);
+      const coverageNotice = formatIndexCoverageForPrompt(indexState);
+      throwIfAgentCancelled(options.signal);
       const previousStates = await options.toolbox.getScanFileStates(input.projectId);
       const previousByPath = new Map(previousStates.map((state) => [state.filePath, state.contentHash]));
       const inventoryByPath = new Map(inventory.map((file) => [file.path, file]));
@@ -427,12 +466,18 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
       const deletedFiles = previousStates.filter((state) => !inventoryByPath.has(state.filePath));
       const initial = previousStates.length === 0;
       const localTargets = initial ? inventory : changedFiles;
-      const localOutputs = await boundedMap(localTargets, scanConfigs.local.parallelLimit, (file) =>
-        runLocalScan(input, file, scanConfigs.local, options.toolbox, options.workspaceRoot)
+      const localOutputs = await boundedMap(
+        localTargets,
+        scanConfigs.local.parallelLimit,
+        (file) => runLocalScan(input, file, scanConfigs.local, options.toolbox, coverageNotice, options.workspaceRoot),
+        options.signal
       );
       const mediumScopes = directoriesForScan(initial ? inventory : [...changedFiles, ...deletedFiles.map((file) => ({ path: file.filePath, contentHash: file.contentHash, size: 0, language: "unknown" }))]);
-      const mediumOutputs = await boundedMap(mediumScopes, scanConfigs.medium.parallelLimit, (scopePath) =>
-        runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium, options.workspaceRoot)
+      const mediumOutputs = await boundedMap(
+        mediumScopes,
+        scanConfigs.medium.parallelLimit,
+        (scopePath) => runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium, coverageNotice, options.workspaceRoot),
+        options.signal
       );
       const unchangedGraphSummary = initial
         ? { nodes: [], edges: [] }
@@ -440,7 +485,8 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
             ...changedFiles.map((file) => file.path),
             ...deletedFiles.map((file) => file.filePath)
           ]);
-      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global, options.workspaceRoot);
+      throwIfAgentCancelled(options.signal);
+      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global, coverageNotice, options.workspaceRoot);
       const pipeline = scanPipelineResultSchema.parse({
         initial,
         inventory,
@@ -451,11 +497,15 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
         globalOutput
       });
       const result = await options.toolbox.applyScanResult(input.projectId, pipeline, options.runId ?? null);
+      const finalIndexState = await options.toolbox.getIndexState(input.projectId);
       return {
         response: [
           `Scanned ${result.fileCount} files into ${result.nodeCount} Code Graph nodes.`,
           `Changed ${changedFiles.length} files, removed ${deletedFiles.length} files, ran ${localOutputs.length} local, ${mediumOutputs.length} medium, and 1 global scan pass.`,
-          `Extracted ${result.symbolCount} symbols, ${result.workflowNodeCount} workflow blocks, and ${result.edgeCount} edges.`
+          `Extracted ${result.symbolCount} symbols, ${result.workflowNodeCount} workflow blocks, and ${result.edgeCount} edges.`,
+          finalIndexState.completeness.status === "complete"
+            ? "Index coverage is complete for the discovered supported files."
+            : `Index coverage is ${finalIndexState.completeness.status}; repository-wide coverage must not be claimed.`
         ].join(" "),
         touched: []
       };
@@ -520,6 +570,7 @@ async function runLocalScan(
   file: ScannableFile,
   config: ScanningAgentConfig,
   toolbox: GraphCodeToolbox,
+  coverageNotice: string,
   workspaceRoot?: string
 ): Promise<ScanLocalOutput> {
   if (config.provider === "fake") {
@@ -533,6 +584,7 @@ async function runLocalScan(
       role: "user",
       content: [
         scanningPrompt(input),
+        coverageNotice,
         `Mode: local`,
         `File: ${file.path}`,
         `Content hash: ${file.contentHash}`,
@@ -551,6 +603,7 @@ async function runMediumScan(
   inventory: ScannableFile[],
   localOutputs: ScanLocalOutput[],
   config: ScanningAgentConfig,
+  coverageNotice: string,
   workspaceRoot?: string
 ): Promise<ScanMediumOutput> {
   if (config.provider === "fake") {
@@ -563,6 +616,7 @@ async function runMediumScan(
       role: "user",
       content: [
         scanningPrompt(input),
+        coverageNotice,
         `Mode: medium`,
         `Scope path: ${scopePath}`,
         `Files in scope:\n${inventory.filter((file) => fileInScope(file.path, scopePath)).map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
@@ -581,6 +635,7 @@ async function runGlobalScan(
   mediumOutputs: ScanMediumOutput[],
   unchangedGraphSummary: { nodes: object[]; edges: object[] },
   config: ScanningAgentConfig,
+  coverageNotice: string,
   workspaceRoot?: string
 ): Promise<ScanGlobalOutput> {
   if (config.provider === "fake") {
@@ -593,6 +648,7 @@ async function runGlobalScan(
       role: "user",
       content: [
         scanningPrompt(input),
+        coverageNotice,
         `Mode: global`,
         `Repository inventory:\n${inventory.map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
         `Compact unchanged graph summaries:\n${JSON.stringify(unchangedGraphSummary, null, 2)}`,
@@ -794,6 +850,7 @@ type CodingContextInput = {
   execution: BlockExecutionMetadata;
   recommendedModeReason?: string;
   prompt?: string;
+  coverageNotice: string;
 };
 
 function buildCodingContextBundle(input: CodingContextInput): string {
@@ -816,6 +873,7 @@ function buildCodingContextBundle(input: CodingContextInput): string {
 
   return [
     `Coding mode: ${input.mode}`,
+    input.coverageNotice,
     input.recommendedModeReason ? `Recommended mode reason: ${input.recommendedModeReason}` : "",
     `Target node: ${formatNode(input.detail.node)}`,
     `Organization scope: ${input.organizationScope ? formatNode(input.organizationScope) : "none"}`,
@@ -850,6 +908,7 @@ type ReviewContextInput = {
   gitStatus: string;
   execution: BlockExecutionMetadata | null;
   diff: string;
+  coverageNotice: string;
 };
 
 function buildReviewContextBundle(input: ReviewContextInput): string {
@@ -875,6 +934,7 @@ function buildReviewContextBundle(input: ReviewContextInput): string {
 
   return [
     `Review mode: ${input.mode}`,
+    input.coverageNotice,
     input.targetRun
       ? [
           `Target run: ${input.targetRun.id}`,
@@ -1433,16 +1493,45 @@ function buildPlanningContextChunks(graph: PlanningGraph, parallelLimit: number)
   return chunks.filter((chunk) => chunk.nodes.length > 0 || chunk.edges.length > 0);
 }
 
-async function boundedMap<T, R>(items: T[], parallelLimit: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
+async function boundedMap<T, R>(
+  items: T[],
+  parallelLimit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal
+): Promise<R[]> {
   const results: R[] = [];
   let nextIndex = 0;
   const workerCount = Math.max(1, Math.min(parallelLimit, items.length || 1));
   async function worker(): Promise<void> {
     while (nextIndex < items.length) {
+      throwIfAgentCancelled(signal);
       const index = nextIndex++;
       results[index] = await mapper(items[index], index);
     }
   }
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return results;
+}
+
+function throwIfAgentCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const error = new Error("Agent indexing was cancelled.");
+    error.name = "AbortError";
+    throw error;
+  }
+}
+
+function formatIndexCoverageForPrompt(state: IndexState): string {
+  const counts = state.counts;
+  const countSummary = `discovered=${counts.discovered}, supported=${counts.supported}, indexed=${counts.indexed}, unsupported=${counts.unsupported}, excluded=${counts.excluded}, failed=${counts.failed}`;
+  if (state.completeness.status === "complete") {
+    return `Index coverage: COMPLETE (${countSummary}). Repository-wide claims may use only this indexed revision.`;
+  }
+  if (state.completeness.status === "partial") {
+    return `Index coverage warning: PARTIAL (${countSummary}). Reasons: ${state.completeness.reasons.join(" ")} Do not describe findings as repository-wide; explicitly identify omitted or unindexed regions.`;
+  }
+  if (state.completeness.status === "stale") {
+    return `Index coverage warning: STALE since ${state.completeness.sinceRevision}; ${state.completeness.changedFiles.length} changed files are not represented. Do not claim current repository-wide coverage.`;
+  }
+  return `Index coverage warning: FAILED (${state.completeness.errorCode}); last complete revision ${state.completeness.lastCompleteRevision ?? "none"}. Do not claim repository-wide coverage.`;
 }

@@ -31,6 +31,7 @@ import {
   type GithubDeviceStartResponse,
   type GraphPatch,
   type GraphStatusPatch,
+  type IndexState,
   type GitStatusInfo,
   type FolderPickerResult,
   type LanguageType,
@@ -58,7 +59,7 @@ import {
   type ScanPipelineResult,
   type ScannableFile
 } from "@graphcode/agent-runtime";
-import { scanRepositoryCodeGraph, type CodeGraphSymbol } from "@graphcode/parser";
+import { CodeGraphScanCancelledError, discoverRepositoryFiles, scanRepositoryCodeGraph, type CodeGraphSymbol } from "@graphcode/parser";
 import { openDatabase, type GraphDatabase } from "./db/connection";
 import { GraphRepository, validationError } from "./db/repository";
 import { migrate } from "./db/schema";
@@ -125,6 +126,8 @@ const CLAUDE_MODEL_CATALOG: ClaudeModelInfo[] = [
 export class WorkspaceRuntime {
   private db: GraphDatabase;
   private repository: GraphRepository;
+  private readonly indexStates = new Map<string, IndexState>();
+  private readonly indexControllers = new Map<string, AbortController>();
 
   constructor(private readonly fallbackDbPath: string, private readonly selfRootPath: string) {
     this.db = openDatabase(fallbackDbPath);
@@ -134,6 +137,34 @@ export class WorkspaceRuntime {
 
   repo(): GraphRepository {
     return this.repository;
+  }
+
+  getIndexState(projectId: string): IndexState {
+    this.repository.getProject(projectId);
+    return this.indexStates.get(projectId) ?? unavailableIndexState(projectId);
+  }
+
+  cancelIndex(projectId: string): IndexState {
+    this.repository.getProject(projectId);
+    this.indexControllers.get(projectId)?.abort();
+    const previous = this.getIndexState(projectId);
+    const cancelled = {
+      ...previous,
+      generatedAt: new Date().toISOString(),
+      completeness: {
+        status: "failed" as const,
+        lastCompleteRevision: previous.completeness.status === "complete" ? previous.indexRevision : null,
+        errorCode: "index_cancelled"
+      },
+      progress: {
+        ...previous.progress,
+        phase: "cancelled" as const,
+        message: "Indexing cancellation requested.",
+        updatedAt: new Date().toISOString()
+      }
+    };
+    this.indexStates.set(projectId, cancelled);
+    return cancelled;
   }
 
   seedSelfGraph(): Project {
@@ -349,6 +380,9 @@ export class WorkspaceRuntime {
     }
     if (process.platform === "win32") {
       return pickWindowsFolder();
+    }
+    if (isWsl()) {
+      return pickWindowsFolder(windowsPathToWslPath);
     }
     if (process.platform === "darwin") {
       return pickMacFolder();
@@ -683,24 +717,38 @@ export class WorkspaceRuntime {
       status: "running"
     });
     this.repository.addAgentMessage({ runId: run.id, role: "user", content: prompt });
-    const execute = () =>
-      runScanningAgent(enrichedInput, {
-        config: this.repository.getAgentConfig(input.projectId, "scanning"),
-        scanningConfigs: Object.fromEntries(
-          SCANNING_AGENT_MODES.map((mode) => {
-            const config = this.repository.getScanningAgentConfig(input.projectId, mode);
-            return [
-              mode,
-              input.skipCodexDefaultSystemPrompt && config.provider === "codex"
-                ? { ...config, skipCodexDefaultSystemPrompt: true }
-                : config
-            ];
-          })
-        ),
-        runId: run.id,
-        workspaceRoot: project.rootPath,
-        toolbox: this.createToolbox(input.projectId)
-      });
+    const controller = new AbortController();
+    this.indexControllers.get(input.projectId)?.abort();
+    this.indexControllers.set(input.projectId, controller);
+    const execute = async () => {
+      try {
+        return await runScanningAgent(enrichedInput, {
+          config: this.repository.getAgentConfig(input.projectId, "scanning"),
+          scanningConfigs: Object.fromEntries(
+            SCANNING_AGENT_MODES.map((mode) => {
+              const config = this.repository.getScanningAgentConfig(input.projectId, mode);
+              return [
+                mode,
+                input.skipCodexDefaultSystemPrompt && config.provider === "codex"
+                  ? { ...config, skipCodexDefaultSystemPrompt: true }
+                  : config
+              ];
+            })
+          ),
+          runId: run.id,
+          workspaceRoot: project.rootPath,
+          toolbox: this.createToolbox(input.projectId),
+          signal: controller.signal
+        });
+      } catch (error) {
+        this.markIndexFailed(input.projectId, error);
+        throw error;
+      } finally {
+        if (this.indexControllers.get(input.projectId) === controller) {
+          this.indexControllers.delete(input.projectId);
+        }
+      }
+    };
     if (input.background) {
       void this.finishAgentRun(run, execute);
       return run;
@@ -837,6 +885,11 @@ export class WorkspaceRuntime {
   }
 
   private switchDatabase(dbPath: string): void {
+    for (const controller of this.indexControllers.values()) {
+      controller.abort();
+    }
+    this.indexControllers.clear();
+    this.indexStates.clear();
     this.db.close();
     this.db = openDatabase(dbPath);
     migrate(this.db);
@@ -910,6 +963,7 @@ export class WorkspaceRuntime {
         nodes: this.repository.listProjectNodes(inputProjectId),
         edges: this.repository.listProjectEdges(inputProjectId)
       }),
+      getIndexState: async (inputProjectId) => this.getIndexState(inputProjectId),
       getNodeDetail: async (nodeId) => this.repository.getNodeDetail(nodeId),
       getCanvasGraph: async (inputProjectId, rootNodeId, includeAttachments) =>
         this.repository.getCanvasGraph({ projectId: inputProjectId, rootNodeId, includeAttachments: includeAttachments ?? true }),
@@ -928,7 +982,7 @@ export class WorkspaceRuntime {
       buildFakeLocalScanOutput: async (inputProjectId, file) => this.buildFakeLocalScanOutput(inputProjectId, file),
       applyScanResult: async (inputProjectId, result, runId) => {
         await this.validateScanResultSourceRanges(inputProjectId, result);
-        return this.repository.applyScanPipelineResult(inputProjectId, result, runId);
+        return this.applyScanPipelineResult(inputProjectId, result, runId);
       },
       readSourceFile: async (relativePath) => this.readSourceFile(projectId, relativePath),
       resolveExecutionMetadata: async (nodeId) => this.repository.resolveExecutionMetadata(nodeId),
@@ -947,8 +1001,150 @@ export class WorkspaceRuntime {
     if (requestedRootPath && !samePath(requestedRootPath, rootPath)) {
       throw validationError("Scanning root path must match the active project root.");
     }
-    const snapshot = scanRepositoryCodeGraph(rootPath);
-    return this.repository.replaceScannedCodeGraph(projectId, snapshot);
+    const controller = new AbortController();
+    this.indexControllers.get(projectId)?.abort();
+    this.indexControllers.set(projectId, controller);
+    this.indexStates.set(projectId, indexingState(projectId, "discovering", "Discovering workspace files."));
+    try {
+      const snapshot = scanRepositoryCodeGraph(rootPath, {
+        signal: controller.signal,
+        onProgress: (progress) => {
+          const previous = this.indexStates.get(projectId) ?? indexingState(projectId, progress.phase, progress.message);
+          this.indexStates.set(projectId, {
+            ...previous,
+            generatedAt: new Date().toISOString(),
+            progress: {
+              phase: progress.phase,
+              completed: progress.completed,
+              total: progress.total,
+              message: progress.message,
+              updatedAt: new Date().toISOString()
+            }
+          });
+        }
+      });
+      const persistStartedAt = performance.now();
+      const prior = this.indexStates.get(projectId);
+      if (prior) {
+        this.indexStates.set(projectId, {
+          ...prior,
+          progress: {
+            phase: "persisting",
+            completed: 0,
+            total: snapshot.files.length,
+            message: "Persisting generated graph projection.",
+            updatedAt: new Date().toISOString()
+          }
+        });
+      }
+      const result = this.repository.replaceScannedCodeGraph(projectId, snapshot);
+      const persistMs = performance.now() - persistStartedAt;
+      const indexRevision = indexRevisionForSnapshot(snapshot.files.map((file) => file.path), snapshot.symbols.map((symbol) => symbol.id));
+      this.indexStates.set(projectId, {
+        projectId,
+        providerId: "current-parser",
+        indexRevision,
+        workspaceRevision: null,
+        generatedAt: snapshot.scan.generatedAt,
+        completeness: snapshot.scan.completeness,
+        counts: snapshot.scan.counts,
+        progress: {
+          phase: "complete",
+          completed: snapshot.scan.counts.indexed,
+          total: snapshot.scan.counts.supported,
+          message:
+            snapshot.scan.completeness.status === "complete"
+              ? `Indexed all ${snapshot.scan.counts.indexed} supported files.`
+              : `Indexed ${snapshot.scan.counts.indexed} files with visible omissions.`,
+          updatedAt: new Date().toISOString()
+        },
+        telemetry: { ...snapshot.scan.telemetry, persistMs }
+      });
+      return result;
+    } catch (error) {
+      this.markIndexFailed(projectId, error);
+      throw error;
+    } finally {
+      if (this.indexControllers.get(projectId) === controller) {
+        this.indexControllers.delete(projectId);
+      }
+    }
+  }
+
+  private applyScanPipelineResult(projectId: string, result: ScanPipelineResult, runId?: string | null) {
+    const previous = this.getIndexState(projectId);
+    this.indexStates.set(projectId, {
+      ...previous,
+      progress: {
+        phase: "persisting",
+        completed: 0,
+        total: result.inventory.length,
+        message: "Persisting scanner output.",
+        updatedAt: new Date().toISOString()
+      }
+    });
+    const persistStartedAt = performance.now();
+    const refresh = this.repository.applyScanPipelineResult(projectId, result, runId);
+    const failed = Math.max(0, previous.counts.supported - result.inventory.length);
+    const counts = {
+      ...previous.counts,
+      indexed: result.inventory.length,
+      failed
+    };
+    const completeness: IndexState["completeness"] =
+      failed === 0
+        ? { status: "complete" }
+        : {
+            status: "partial",
+            indexedFiles: result.inventory.length,
+            discoveredFiles: previous.counts.discovered,
+            reasons: [`${failed} supported files could not be read or indexed.`]
+          };
+    const indexRevision = indexRevisionForSnapshot(
+      result.inventory.map((file) => `${file.path}:${file.contentHash}`),
+      result.localOutputs.flatMap((output) => output.nodes.map((node) => node.stableKey))
+    );
+    this.indexStates.set(projectId, {
+      ...previous,
+      indexRevision,
+      workspaceRevision: indexRevision,
+      generatedAt: new Date().toISOString(),
+      completeness,
+      counts,
+      progress: {
+        phase: "complete",
+        completed: result.inventory.length,
+        total: previous.counts.supported,
+        message: completeness.status === "complete" ? `Indexed all ${result.inventory.length} supported files.` : `Indexed ${result.inventory.length} files with visible omissions.`,
+        updatedAt: new Date().toISOString()
+      },
+      telemetry: {
+        ...previous.telemetry,
+        persistMs: performance.now() - persistStartedAt,
+        peakRssBytes: Math.max(previous.telemetry.peakRssBytes, process.memoryUsage().rss)
+      }
+    });
+    return refresh;
+  }
+
+  private markIndexFailed(projectId: string, error: unknown): void {
+    const previous = this.indexStates.get(projectId) ?? unavailableIndexState(projectId);
+    const cancelled = error instanceof CodeGraphScanCancelledError || (error instanceof Error && error.name === "AbortError");
+    this.indexStates.set(projectId, {
+      ...previous,
+      generatedAt: new Date().toISOString(),
+      completeness: {
+        status: "failed",
+        lastCompleteRevision: previous.completeness.status === "complete" ? previous.indexRevision : null,
+        errorCode: cancelled ? "index_cancelled" : "index_failed"
+      },
+      progress: {
+        ...previous.progress,
+        phase: cancelled ? "cancelled" : "failed",
+        message: cancelled ? "Indexing was cancelled." : "Indexing failed; the previous graph remains available.",
+        updatedAt: new Date().toISOString()
+      }
+    });
   }
 
   private async readSourceFile(projectId: string, relativePath: string): Promise<string> {
@@ -971,21 +1167,49 @@ export class WorkspaceRuntime {
     if (!fs.existsSync(project.rootPath)) {
       return [];
     }
-    let relativePaths: string[];
-    try {
-      const { stdout } = await execFileAsync("git", ["-C", project.rootPath, "ls-files", "-co", "--exclude-standard"], {
-        timeout: 20000,
-        maxBuffer: 1024 * 1024 * 4
-      });
-      relativePaths = stdout
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line && isScannablePath(line))
-        .slice(0, 2000);
-    } catch {
-      relativePaths = await this.walkScannableFiles(project.rootPath, project.rootPath);
-    }
+    const controller = this.indexControllers.get(projectId);
+    const discoveredPaths = discoverRepositoryFiles(project.rootPath, {
+      signal: controller?.signal,
+      onProgress: (progress) => {
+        const previous = this.indexStates.get(projectId) ?? indexingState(projectId, progress.phase, progress.message);
+        this.indexStates.set(projectId, {
+          ...previous,
+          generatedAt: new Date().toISOString(),
+          progress: { ...progress, updatedAt: new Date().toISOString() }
+        });
+      }
+    });
+    const relativePaths = discoveredPaths.filter(isScannablePath);
     const uniquePaths = [...new Set(relativePaths.map((relativePath) => normalizeGitPath(relativePath)))].sort();
+    this.indexStates.set(projectId, {
+      projectId,
+      providerId: "current-scanner",
+      indexRevision: this.indexStates.get(projectId)?.indexRevision ?? null,
+      workspaceRevision: null,
+      generatedAt: new Date().toISOString(),
+      completeness: {
+        status: "partial",
+        indexedFiles: 0,
+        discoveredFiles: discoveredPaths.length,
+        reasons: ["Indexing is in progress; repository-wide claims are not yet supported."]
+      },
+      counts: {
+        discovered: discoveredPaths.length,
+        supported: uniquePaths.length,
+        indexed: 0,
+        unsupported: discoveredPaths.length - uniquePaths.length,
+        excluded: 0,
+        failed: 0
+      },
+      progress: {
+        phase: "parsing",
+        completed: 0,
+        total: uniquePaths.length,
+        message: `Preparing ${uniquePaths.length} supported files for scanning.`,
+        updatedAt: new Date().toISOString()
+      },
+      telemetry: emptyIndexTelemetry()
+    });
     const files = await Promise.all(uniquePaths.map((relativePath) => this.scannableFile(project.rootPath, relativePath)));
     return files.filter((file): file is ScannableFile => Boolean(file));
   }
@@ -1009,29 +1233,6 @@ export class WorkspaceRuntime {
       size: stat.size,
       language: normalizeLanguage(languageForFilePath(relativePath))
     };
-  }
-
-  private async walkScannableFiles(rootPath: string, currentPath: string): Promise<string[]> {
-    const entries = await fsp.readdir(currentPath, { withFileTypes: true });
-    const files: string[] = [];
-    for (const entry of entries) {
-      if ([".git", ".graphcode", "node_modules", "dist", "build", "coverage"].includes(entry.name)) {
-        continue;
-      }
-      const absolute = path.join(currentPath, entry.name);
-      if (entry.isDirectory()) {
-        files.push(...(await this.walkScannableFiles(rootPath, absolute)));
-      } else {
-        const relative = path.relative(rootPath, absolute);
-        if (isScannablePath(relative)) {
-          files.push(relative);
-        }
-      }
-      if (files.length >= 2000) {
-        break;
-      }
-    }
-    return files;
   }
 
   private async buildFakeLocalScanOutput(projectId: string, file: ScannableFile): Promise<ScanLocalOutput> {
@@ -1538,7 +1739,7 @@ function outputText(value: unknown): string {
   return "";
 }
 
-async function pickWindowsFolder(): Promise<FolderPickerResult> {
+async function pickWindowsFolder(transformPath: (selectedPath: string) => string = (selectedPath) => selectedPath): Promise<FolderPickerResult> {
   const script = [
     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "Add-Type -AssemblyName System.Windows.Forms",
@@ -1556,11 +1757,12 @@ async function pickWindowsFolder(): Promise<FolderPickerResult> {
       maxBuffer: 1024 * 32
     });
     const selectedPath = firstOutputLine(stdout);
+    const normalizedPath = selectedPath ? transformPath(selectedPath) : null;
     return {
       supported: true,
-      selected: Boolean(selectedPath),
-      path: selectedPath,
-      message: selectedPath ? null : "No folder was selected."
+      selected: Boolean(normalizedPath),
+      path: normalizedPath,
+      message: normalizedPath ? null : "No folder was selected."
     };
   } catch (error) {
     if (exitCode(error) === 2) {
@@ -1578,6 +1780,49 @@ async function pickWindowsFolder(): Promise<FolderPickerResult> {
       message: cliErrorMessage(error, "Windows folder picker failed. Paste the workspace path manually.")
     };
   }
+}
+
+function unavailableIndexState(projectId: string): IndexState {
+  const now = new Date().toISOString();
+  return {
+    projectId,
+    providerId: "current-parser",
+    indexRevision: null,
+    workspaceRevision: null,
+    generatedAt: now,
+    completeness: { status: "failed", lastCompleteRevision: null, errorCode: "index_state_unavailable" },
+    counts: { discovered: 0, supported: 0, indexed: 0, unsupported: 0, excluded: 0, failed: 0 },
+    progress: { phase: "idle", completed: 0, total: 0, message: "Index state is unavailable until the next scan.", updatedAt: now },
+    telemetry: emptyIndexTelemetry()
+  };
+}
+
+function indexingState(projectId: string, phase: IndexState["progress"]["phase"], message: string): IndexState {
+  const now = new Date().toISOString();
+  return {
+    projectId,
+    providerId: "current-parser",
+    indexRevision: null,
+    workspaceRevision: null,
+    generatedAt: now,
+    completeness: {
+      status: "partial",
+      indexedFiles: 0,
+      discoveredFiles: 0,
+      reasons: ["Indexing is in progress; repository-wide claims are not yet supported."]
+    },
+    counts: { discovered: 0, supported: 0, indexed: 0, unsupported: 0, excluded: 0, failed: 0 },
+    progress: { phase, completed: 0, total: 0, message, updatedAt: now },
+    telemetry: emptyIndexTelemetry()
+  };
+}
+
+function emptyIndexTelemetry(): IndexState["telemetry"] {
+  return { discoveryMs: 0, parseMs: 0, linkMs: 0, persistMs: 0, peakRssBytes: process.memoryUsage().rss };
+}
+
+function indexRevisionForSnapshot(files: string[], symbols: string[]): string {
+  return `current-${crypto.createHash("sha1").update([...files].sort().join("\n")).update("\0").update([...symbols].sort().join("\n")).digest("hex")}`;
 }
 
 async function pickMacFolder(): Promise<FolderPickerResult> {
@@ -1622,6 +1867,30 @@ function firstOutputLine(value: unknown): string | null {
 function exitCode(error: unknown): number | null {
   const code = (error as { code?: unknown }).code;
   return typeof code === "number" ? code : null;
+}
+
+function isWsl(): boolean {
+  if (process.platform !== "linux") {
+    return false;
+  }
+  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
+    return true;
+  }
+  try {
+    return fs.readFileSync("/proc/version", "utf8").toLowerCase().includes("microsoft");
+  } catch {
+    return false;
+  }
+}
+
+function windowsPathToWslPath(selectedPath: string): string {
+  const drivePath = /^([a-zA-Z]):[\\/](.*)$/.exec(selectedPath);
+  if (!drivePath) {
+    return selectedPath;
+  }
+  const drive = drivePath[1].toLowerCase();
+  const rest = drivePath[2].replace(/\\/g, "/");
+  return `/mnt/${drive}/${rest}`;
 }
 
 function parseCodexModels(raw: string): CodexModelInfo[] {

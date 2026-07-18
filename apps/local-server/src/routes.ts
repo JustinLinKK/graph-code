@@ -14,6 +14,7 @@ import {
   githubDevicePollRequestSchema,
   githubDeviceStartRequestSchema,
   graphNodeKindSchema,
+  indexStateSchema,
   layoutPatchSchema,
   nodeReuseMutationSchema,
   nodeMutationSchema,
@@ -104,6 +105,16 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
   app.post("/api/claude/auth/start", async () => runtime.startClaudeAuth());
 
   app.get("/api/projects", async () => runtime.repo().listProjects());
+
+  app.get("/api/v2/projects/:projectId/index-state", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return indexStateSchema.parse(runtime.getIndexState(projectId));
+  });
+
+  app.delete("/api/v2/projects/:projectId/index-runs/current", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return indexStateSchema.parse(runtime.cancelIndex(projectId));
+  });
 
   app.post("/api/workspaces/open", async (request, reply) => {
     const body = openWorkspaceSchema.parse(request.body);

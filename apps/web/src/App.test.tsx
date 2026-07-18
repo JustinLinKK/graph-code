@@ -796,6 +796,19 @@ describe("GraphCode app shell", () => {
         if (url === "/api/projects/graphcode-self/hierarchy") {
           return json(hierarchy);
         }
+        if (url === "/api/v2/projects/graphcode-self/index-state") {
+          return json({
+            projectId: "graphcode-self",
+            providerId: "current-parser",
+            indexRevision: "revision-1",
+            workspaceRevision: "revision-1",
+            generatedAt: new Date().toISOString(),
+            completeness: { status: "complete" },
+            counts: { discovered: 12, supported: 10, indexed: 10, unsupported: 2, excluded: 0, failed: 0 },
+            progress: { phase: "complete", completed: 10, total: 10, message: "Complete", updatedAt: new Date().toISOString() },
+            telemetry: { discoveryMs: 1, parseMs: 2, linkMs: 1, persistMs: 1, peakRssBytes: 1024 }
+          });
+        }
         if (url.startsWith("/api/projects/graphcode-self/canvas")) {
           if (url.includes("rootNodeId=function-render-widget")) {
             return json(functionCanvasGraph);
@@ -1180,6 +1193,7 @@ describe("GraphCode app shell", () => {
     const canvas = within(await screen.findByTestId("react-flow"));
     expect(await canvas.findByText("Web Workspace")).toBeInTheDocument();
     expect(canvas.queryByText("GraphCode Workspace")).not.toBeInTheDocument();
+    expect(screen.getByText("Index complete · 10/12")).toBeInTheDocument();
   });
 
   it("shows boundary groups and member labels in the hierarchy", async () => {
