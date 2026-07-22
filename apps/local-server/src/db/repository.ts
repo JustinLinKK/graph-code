@@ -308,6 +308,7 @@ type AgentRunRow = {
   status: AgentRunStatus;
   base_graph_revision: number;
   applied_graph_revision: number | null;
+  implemented_at: string | null;
   conflict_reason: string | null;
   target_node_id: string | null;
   prompt: string;
@@ -1425,7 +1426,7 @@ export class GraphRepository {
 
   updateAgentRun(
     runId: string,
-    input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error" | "appliedGraphRevision" | "conflictReason">> & { graphPatch?: GraphPatch | null }
+    input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error" | "appliedGraphRevision" | "implementedAt" | "conflictReason">> & { graphPatch?: GraphPatch | null }
   ): AgentRun {
     const existing = this.getAgentRun(runId);
     this.db
@@ -1439,6 +1440,7 @@ export class GraphRepository {
           graph_patch_json = @graphPatchJson,
           error = @error,
           applied_graph_revision = @appliedGraphRevision,
+          implemented_at = @implementedAt,
           conflict_reason = @conflictReason,
           updated_at = datetime('now')
         WHERE id = @id
@@ -1452,6 +1454,7 @@ export class GraphRepository {
         graphPatchJson: input.graphPatch === undefined ? (existing.graphPatch ? JSON.stringify(existing.graphPatch) : null) : input.graphPatch ? JSON.stringify(input.graphPatch) : null,
         error: input.error === undefined ? existing.error : input.error,
         appliedGraphRevision: input.appliedGraphRevision === undefined ? existing.appliedGraphRevision : input.appliedGraphRevision,
+        implementedAt: input.implementedAt === undefined ? existing.implementedAt : input.implementedAt,
         conflictReason: input.conflictReason === undefined ? existing.conflictReason : input.conflictReason
       });
     return this.getAgentRun(runId);
@@ -7517,6 +7520,7 @@ function mapAgentRun(row: AgentRunRow): AgentRun {
     status: row.status,
     baseGraphRevision: row.base_graph_revision ?? 0,
     appliedGraphRevision: row.applied_graph_revision ?? null,
+    implementedAt: row.implemented_at ?? null,
     conflictReason: row.conflict_reason ?? null,
     targetNodeId: row.target_node_id,
     prompt: row.prompt,

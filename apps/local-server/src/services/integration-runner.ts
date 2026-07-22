@@ -346,7 +346,7 @@ export function parseUnifiedDiff(diff: string): ParsedUnifiedDiff {
     current = null;
   };
 
-  for (const line of diff.split(/\r?\n/)) {
+  for (const line of normalizeUnifiedDiffFormatting(diff).split("\n")) {
     if (line.startsWith("diff --git ")) {
       finish();
       current = { oldPath: null, newPath: null, renameFrom: null, renameTo: null, hunks: [], sawOldHeader: false, sawNewHeader: false };
@@ -394,9 +394,40 @@ export function parseUnifiedDiff(diff: string): ParsedUnifiedDiff {
 export function combineIndependentDiffs(proposals: Array<Pick<IntegrationProposal, "diff" | "workUnitId">>): string {
   return [...proposals]
     .sort((left, right) => left.workUnitId.localeCompare(right.workUnitId))
-    .map((proposal) => proposal.diff.trimEnd())
+    .map((proposal) => normalizeUnifiedDiffFormatting(proposal.diff).trimEnd())
     .join("\n")
     .concat("\n");
+}
+
+export function normalizeUnifiedDiffFormatting(diff: string): string {
+  const lines = diff.replace(/\r\n/g, "\n").split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const header = lines[index].match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
+    if (!header) continue;
+    let oldCount = 0;
+    let newCount = 0;
+    for (let bodyIndex = index + 1; bodyIndex < lines.length; bodyIndex += 1) {
+      const line = lines[bodyIndex];
+      if (
+        line.startsWith("@@ ") ||
+        line.startsWith("diff --git ") ||
+        (line.startsWith("--- ") && lines[bodyIndex + 1]?.startsWith("+++ "))
+      ) break;
+      if (line.startsWith("\\ No newline at end of file")) continue;
+      if (line.startsWith(" ")) {
+        oldCount += 1;
+        newCount += 1;
+      } else if (line.startsWith("-")) {
+        oldCount += 1;
+      } else if (line.startsWith("+")) {
+        newCount += 1;
+      } else {
+        break;
+      }
+    }
+    lines[index] = `@@ -${header[1]},${oldCount} +${header[2]},${newCount} @@${header[3]}`;
+  }
+  return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
 export function buildBoundedIntegrationAgentContext(input: {
@@ -481,7 +512,7 @@ export async function validateCombinedPatchInTemporaryWorkspace(input: {
       await fsp.symlink(sourceNodeModules, targetNodeModules, process.platform === "win32" ? "junction" : "dir");
     }
     const patchPath = path.join(temporaryRoot, ".graphcode-integration.patch");
-    await fsp.writeFile(patchPath, input.combinedDiff, "utf8");
+    await fsp.writeFile(patchPath, normalizeUnifiedDiffFormatting(input.combinedDiff), "utf8");
     try {
       await execFileAsync("git", ["apply", "--whitespace=nowarn", patchPath], {
         cwd: temporaryRoot,
@@ -517,7 +548,7 @@ export async function applyCombinedPatchToWorkspace(input: {
   const temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-apply-"));
   const patchPath = path.join(temporaryDirectory, "layer.patch");
   try {
-    await fsp.writeFile(patchPath, input.combinedDiff, "utf8");
+    await fsp.writeFile(patchPath, normalizeUnifiedDiffFormatting(input.combinedDiff), "utf8");
     await execFileAsync("git", ["apply", "--check", "--whitespace=nowarn", patchPath], {
       cwd: workspaceRoot,
       timeout: input.timeoutMs ?? 60000,

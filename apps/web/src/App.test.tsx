@@ -955,6 +955,14 @@ describe("GraphCode app shell", () => {
           agentRuns[index] = updated;
           return json(updated);
         }
+        if (url === "/api/code-proposals/apply") {
+          const payload = JSON.parse(String(init?.body ?? "{}"));
+          const index = agentRuns.findIndex((run) => run.id === payload.runId);
+          if (index === -1) return new Response("not found", { status: 404 });
+          const updated = { ...agentRuns[index], implementedAt: "2026-07-22T12:00:00.000Z" };
+          agentRuns[index] = updated;
+          return json(updated);
+        }
         if (url === "/api/projects/graphcode-self/git-status") {
           return json({ status: "" });
         }
@@ -1068,6 +1076,7 @@ describe("GraphCode app shell", () => {
           const payload = JSON.parse(String(init?.body ?? "{}"));
           const agentKind = url.split("/").at(-1)?.replace("review", "review") ?? "planning";
           const id = url === "/api/agents/planning" ? `run-plan-${++planningRunCount}` : `run-${agentKind}`;
+          const directDiff = "diff --git a/src/render.ts b/src/render.ts\n--- a/src/render.ts\n+++ b/src/render.ts\n@@ -1 +1 @@\n-old\n+new";
           const run: AgentRun = {
             id,
             projectId: payload.projectId ?? project.id,
@@ -1077,11 +1086,12 @@ describe("GraphCode app shell", () => {
               status: "succeeded",
             baseGraphRevision: 7,
             appliedGraphRevision: null,
+            implementedAt: null,
             conflictReason: null,
             targetNodeId: payload.nodeId ?? payload.scopeNodeId ?? null,
-            prompt: payload.prompt ?? "",
-            response: "Agent completed",
-            diff: "diff --git",
+            prompt: url === "/api/agents/review" ? `Review ${payload.runId}` : payload.prompt ?? "",
+            response: url === "/api/agents/review" ? "No findings.\nGRAPHCODE_REVIEW_VERDICT: reviewed" : url === "/api/agents/coding" ? directDiff : "Agent completed",
+            diff: url === "/api/agents/coding" ? directDiff : "",
             graphPatch:
               url === "/api/agents/planning"
                 ? {
@@ -1258,7 +1268,7 @@ describe("GraphCode app shell", () => {
     const canvas = within(await screen.findByTestId("react-flow"));
     expect(await canvas.findByText("Web Workspace")).toBeInTheDocument();
     expect(canvas.queryByText("GraphCode Workspace")).not.toBeInTheDocument();
-    expect(screen.getByText("Index complete · 10/12")).toBeInTheDocument();
+    expect(screen.getByText("Index complete · 10/10")).toBeInTheDocument();
   });
 
   it("shows boundary groups and member labels in the hierarchy", async () => {
@@ -1932,6 +1942,34 @@ describe("GraphCode app shell", () => {
       );
       const codingCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === "/api/agents/coding");
       expect(JSON.parse(String(codingCall?.[1]?.body ?? "{}"))).toEqual(expect.objectContaining({ prompt: task }));
+    });
+  });
+
+  it("implements an approved direct coding proposal without duplicating its diff", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("renderWidget"));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Coding task" }), { target: { value: "Fix the renderer." } });
+    fireEvent.click(await screen.findByRole("button", { name: /Start coding/i }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/agents/coding", expect.objectContaining({ method: "POST" })));
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Planning" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/agents/review", expect.objectContaining({ method: "POST" })));
+
+    const codingRow = (await screen.findByText("Coding Small")).closest(".agent-activity-row") as HTMLElement;
+    expect(within(codingRow).getByText("Review attached")).toBeInTheDocument();
+    fireEvent.click(within(codingRow).getByText("Inspect proposal"));
+    expect(within(codingRow).queryByText("Agent response")).not.toBeInTheDocument();
+    expect(within(codingRow).getByText("Proposed diff")).toBeInTheDocument();
+
+    fireEvent.click(within(codingRow).getByRole("button", { name: "Implement proposal" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/code-proposals/apply",
+        expect.objectContaining({ method: "POST", body: expect.stringContaining('"runId":"run-coding"') })
+      );
+      expect(within(codingRow).getByText("Implemented")).toBeInTheDocument();
     });
   });
 

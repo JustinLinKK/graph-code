@@ -623,6 +623,7 @@ export function migrate(db: GraphDatabase): void {
         status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
       base_graph_revision INTEGER NOT NULL DEFAULT 0,
       applied_graph_revision INTEGER,
+      implemented_at TEXT,
       conflict_reason TEXT,
       target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
       prompt TEXT NOT NULL DEFAULT '',
@@ -824,6 +825,9 @@ function ensureAgentRunsTable(db: GraphDatabase): void {
   }
   if (!tableHasColumn(db, "agent_runs", "applied_graph_revision")) {
     db.exec("ALTER TABLE agent_runs ADD COLUMN applied_graph_revision INTEGER;");
+  }
+  if (!tableHasColumn(db, "agent_runs", "implemented_at")) {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN implemented_at TEXT;");
   }
   if (!tableHasColumn(db, "agent_runs", "conflict_reason")) {
     db.exec("ALTER TABLE agent_runs ADD COLUMN conflict_reason TEXT;");
@@ -1417,6 +1421,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
   const hasReviewMode = tableHasColumn(db, "agent_runs", "review_mode");
   const hasBaseGraphRevision = tableHasColumn(db, "agent_runs", "base_graph_revision");
   const hasAppliedGraphRevision = tableHasColumn(db, "agent_runs", "applied_graph_revision");
+  const hasImplementedAt = tableHasColumn(db, "agent_runs", "implemented_at");
   const hasConflictReason = tableHasColumn(db, "agent_runs", "conflict_reason");
   db.pragma("foreign_keys = OFF");
   db.exec(`
@@ -1430,6 +1435,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
         status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
       base_graph_revision INTEGER NOT NULL DEFAULT 0,
       applied_graph_revision INTEGER,
+      implemented_at TEXT,
       conflict_reason TEXT,
       target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
       prompt TEXT NOT NULL DEFAULT '',
@@ -1442,7 +1448,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
     );
       INSERT INTO agent_runs (
         id, project_id, agent_kind, coding_mode, review_mode, status,
-        base_graph_revision, applied_graph_revision, conflict_reason,
+        base_graph_revision, applied_graph_revision, implemented_at, conflict_reason,
         target_node_id, prompt, response, diff, graph_patch_json, error, created_at, updated_at
       )
       SELECT
@@ -1452,6 +1458,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
         CASE status WHEN 'queued' THEN 'queued' WHEN 'running' THEN 'running' WHEN 'succeeded' THEN 'succeeded' WHEN 'failed' THEN 'failed' WHEN 'conflicted' THEN 'conflicted' ELSE 'failed' END,
       ${hasBaseGraphRevision ? "base_graph_revision" : "0"},
       ${hasAppliedGraphRevision ? "applied_graph_revision" : "NULL"},
+      ${hasImplementedAt ? "implemented_at" : "NULL"},
       ${hasConflictReason ? "conflict_reason" : "NULL"},
       target_node_id, prompt, response, diff, graph_patch_json, error, created_at, updated_at
     FROM agent_runs_old;

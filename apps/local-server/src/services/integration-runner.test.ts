@@ -5,6 +5,8 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { CodingWorkflowOrchestration, ContractSnapshot, SourceWriteScope } from "@graphcode/graph-model";
 import {
+  applyCombinedPatchToWorkspace,
+  normalizeUnifiedDiffFormatting,
   parseUnifiedDiff,
   readCurrentSourceHashes,
   runIntegrationGate,
@@ -398,6 +400,60 @@ describe("MA-5 integration runner", () => {
 
       expect(result.passed).toBe(true);
       expect(await fsp.readFile(path.join(root, "src/a.ts"), "utf8")).toBe("export const a = 1;\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("accepts a model-generated patch without a terminal newline", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-no-newline-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      await fsp.writeFile(path.join(root, "src/a.ts"), "export const a = 1;\n", "utf8");
+      const diff = editDiff("src/a.ts", 1, "export const a = 1;", "export const a = 2;");
+      expect(diff.endsWith("\n")).toBe(false);
+
+      await expect(validateCombinedPatchInTemporaryWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        commands: [],
+        timeoutMs: 10000
+      })).resolves.toMatchObject({ passed: true });
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+      expect(await fsp.readFile(path.join(root, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("repairs model-generated hunk counts from the actual patch body", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-hunk-count-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      await fsp.writeFile(path.join(root, "src/a.ts"), "one\ntwo\nthree\n", "utf8");
+      const malformed = [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -1,9 +1,12 @@",
+        " one",
+        "-two",
+        "+TWO",
+        " three"
+      ].join("\n");
+      const normalized = normalizeUnifiedDiffFormatting(malformed);
+      expect(normalized).toContain("@@ -1,3 +1,3 @@");
+
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: malformed,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+      expect(await fsp.readFile(path.join(root, "src/a.ts"), "utf8")).toBe("one\nTWO\nthree\n");
     } finally {
       await fsp.rm(root, { recursive: true, force: true });
     }

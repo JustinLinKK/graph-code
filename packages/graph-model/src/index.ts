@@ -1002,6 +1002,11 @@ export const reviewAgentRequestSchema = z.object({
   mode: reviewAgentModeSchema.optional()
 });
 
+export const codeProposalApplyRequestSchema = z.object({
+  projectId: z.string().min(1),
+  runId: z.string().min(1)
+});
+
 export const workspaceInitializationSchema = z.object({
   projectName: z.string().trim().min(1),
   projectDescription: z.string().trim().min(1),
@@ -1045,6 +1050,7 @@ export const agentRunSchema = z.object({
   status: agentRunStatusSchema,
   baseGraphRevision: z.number().int().nonnegative().default(0),
   appliedGraphRevision: z.number().int().nonnegative().nullable().default(null),
+  implementedAt: z.string().nullable().default(null),
   conflictReason: z.string().nullable().default(null),
   targetNodeId: z.string().nullable(),
   prompt: z.string(),
@@ -1191,6 +1197,7 @@ export type CodingWorkflowStartRequest = z.input<typeof codingWorkflowStartReque
 export type CodingWorkflowApplyLayerRequest = z.input<typeof codingWorkflowApplyLayerRequestSchema>;
 export type CodingWorkflowControlRequest = z.input<typeof codingWorkflowControlRequestSchema>;
 export type ReviewAgentRequest = z.input<typeof reviewAgentRequestSchema>;
+export type CodeProposalApplyRequest = z.input<typeof codeProposalApplyRequestSchema>;
 export type ScanningAgentRequest = z.input<typeof scanningAgentRequestSchema>;
 export type GraphPatchOperation = z.infer<typeof graphPatchOperationSchema>;
 export type GraphPatch = z.infer<typeof graphPatchSchema>;

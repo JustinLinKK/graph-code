@@ -16,6 +16,16 @@ pnpm test:ui:report
 
 The agent-sidebar journey copies `examples/review-proposal-lab` into a temporary directory, scans it with the deterministic fake provider, and restores the original workspace afterward. Its evidence is saved under `.graphcode/ui-audit/agent-sidebar/`, including coding controls, proposal review, planning apply, the 980-pixel stacked layout, layered workflow preview, and successful integration checks.
 
+An opt-in account-backed journey verifies the same example with the real local Codex CLI. It configures custom Planning, Coding Small, and Review Small prompts through Settings, applies the graph plan, waits for automatic review, implements the reviewed diff, and confirms the source changed. It is gated so normal CI and local UI tests do not spend account-backed model calls:
+
+```bash
+GRAPHCODE_RUN_CODEX_E2E=1 \
+GRAPHCODE_CODEX_E2E_MODEL=gpt-5.6-luna \
+pnpm --filter @graphcode/web exec playwright test e2e/codex-workflow.spec.ts
+```
+
+The evidence is saved under `.graphcode/ui-audit/codex-workflow/`. Start the test without an older GraphCode dev server when validating backend route changes; Playwright intentionally reuses an existing healthy server during ordinary visual iteration.
+
 Use the interactive headed run when actively adjusting CSS:
 
 ```bash
@@ -40,5 +50,7 @@ The loaded-workspace checks use the first project already present in the local G
 - missing coding intent, duplicated review actions, opaque provider output, and ambiguous planning-patch actions;
 - raw workflow statuses, misleading retry actions on completed proposals, and integration failures shown outside the workflow;
 - layered fake-provider patches that fail the same isolated `git apply` gate used by real proposals.
+- reviewed proposal actions that disappear, apply the wrong diff, or fail on model output without a terminal newline;
+- complete index badges that misleadingly compare indexed files with unsupported discovered files.
 
 Component tests remain useful for behavior, but they cannot replace this suite: JSDOM does not calculate real layout, wrapping, clipping, browser theme media queries, or final component-library styles.

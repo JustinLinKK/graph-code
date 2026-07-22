@@ -165,6 +165,8 @@ describe("SQLite graph repository", () => {
       expect(repo.getScanningAgentConfig(project.id, "local").apiKeySource.value).toBe("scan-secret");
       expect(run.codingMode).toBe("medium");
       expect(run.reviewMode).toBeNull();
+      expect(run.implementedAt).toBeNull();
+      expect(repo.updateAgentRun(run.id, { implementedAt: "2026-07-22T12:00:00.000Z" }).implementedAt).toBe("2026-07-22T12:00:00.000Z");
     expect(history[0].status).toBe("coded");
     expect(repo.getNode("module-web").agentStatus).toBe("coded");
     });

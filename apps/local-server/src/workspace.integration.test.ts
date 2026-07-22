@@ -22,7 +22,8 @@ function diffFor(filePath: string, before: string, after: string): string {
     `+++ b/${filePath}`,
     "@@ -1,1 +1,1 @@",
     `-${before}`,
-    `+${after}`
+    `+${after}`,
+    ""
   ].join("\n");
 }
 
@@ -69,6 +70,78 @@ function setupWorkflow() {
 }
 
 describe("WorkspaceRuntime MA-5 integration gate", () => {
+  it("implements a reviewed direct coding proposal once and records the result", async () => {
+    const fixture = setupWorkflow();
+    try {
+      const diff = diffFor("src/value.ts", "export const value = 1;", "export const value = 2;");
+      const codingRun = fixture.repo.createAgentRun({
+        projectId: fixture.project.id,
+        agentKind: "coding",
+        codingMode: "small",
+        targetNodeId: fixture.functionId,
+        prompt: "Update the value.",
+        status: "succeeded",
+        response: diff,
+        diff
+      });
+      fixture.repo.storeCodeProposal({
+        projectId: fixture.project.id,
+        agentRunId: codingRun.id,
+        targetNodeId: fixture.functionId,
+        diff
+      });
+      fixture.repo.createAgentRun({
+        projectId: fixture.project.id,
+        agentKind: "review",
+        reviewMode: "small",
+        targetNodeId: fixture.functionId,
+        prompt: `Review ${codingRun.id}`,
+        status: "succeeded",
+        response: "No findings.\nGRAPHCODE_REVIEW_VERDICT: reviewed"
+      });
+
+      const implemented = await fixture.runtime.applyCodeProposal({ projectId: fixture.project.id, runId: codingRun.id });
+
+      expect(implemented.implementedAt).toBeTruthy();
+      expect(fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8")).toBe("export const value = 2;\n");
+      await expect(fixture.runtime.applyCodeProposal({ projectId: fixture.project.id, runId: codingRun.id })).resolves.toMatchObject({
+        id: codingRun.id,
+        implementedAt: implemented.implementedAt
+      });
+    } finally {
+      fixture.runtime.close();
+    }
+  }, 20000);
+
+  it("blocks implementation when the attached review requests changes", async () => {
+    const fixture = setupWorkflow();
+    try {
+      const diff = diffFor("src/value.ts", "export const value = 1;", "export const value = 2;");
+      const codingRun = fixture.repo.createAgentRun({
+        projectId: fixture.project.id,
+        agentKind: "coding",
+        targetNodeId: fixture.functionId,
+        status: "succeeded",
+        diff
+      });
+      fixture.repo.storeCodeProposal({ projectId: fixture.project.id, agentRunId: codingRun.id, targetNodeId: fixture.functionId, diff });
+      fixture.repo.createAgentRun({
+        projectId: fixture.project.id,
+        agentKind: "review",
+        targetNodeId: fixture.functionId,
+        prompt: `Review ${codingRun.id}`,
+        status: "succeeded",
+        response: "The patch is unsafe.\nGRAPHCODE_REVIEW_VERDICT: bugged"
+      });
+
+      await expect(fixture.runtime.applyCodeProposal({ projectId: fixture.project.id, runId: codingRun.id })).rejects.toThrow(/requested changes/i);
+      expect(fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8")).toBe(fixture.source);
+      expect(fixture.repo.getAgentRun(codingRun.id).implementedAt).toBeNull();
+    } finally {
+      fixture.runtime.close();
+    }
+  }, 20000);
+
   it("validates without mutation, then applies a clean layer only after checks pass", async () => {
     const fixture = setupWorkflow();
     try {

@@ -441,7 +441,7 @@ describe("GraphCode agent runtime", () => {
 
       expect(result.diff).toContain("src/module.ts");
       expect(normalizeNewlines(fs.readFileSync(argsLog, "utf8"))).toBe(
-        `--ask-for-approval\nnever\n-c\nmodel_reasoning_effort="medium"\n-c\ndeveloper_instructions="Test prompt"\nexec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--model\ngpt-5.4\n-\n`
+        `--ask-for-approval\nnever\n-c\nmodel_reasoning_effort="medium"\n-c\ndeveloper_instructions="Test prompt"\nexec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--skip-git-repo-check\n--model\ngpt-5.4\n-\n`
       );
       const stdin = fs.readFileSync(stdinLog, "utf8");
       expect(stdin).toContain("GraphCode Codex CLI account-plan invocation.");
@@ -723,6 +723,7 @@ describe("GraphCode agent runtime", () => {
             diff: "diff --git",
             graphPatch: null,
             error: null,
+            implementedAt: null,
             createdAt: "now",
             updatedAt: "now"
           }

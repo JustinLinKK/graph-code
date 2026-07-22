@@ -171,6 +171,8 @@ Use `pnpm seed` only when you intentionally want the optional self-repo demo/res
 
 GraphCode uses the local account-authenticated Codex CLI for Codex agents. Install and sign in to Codex from the same OS shell you use to start GraphCode, then open GraphCode settings and refresh **Integrations > Codex CLI**.
 
+GraphCode follows the environment that launched the server. A WSL launch uses the Linux Codex executable and the in-app workspace path field; it does not invoke the native Windows folder dialog. A native Windows launch uses the Windows Codex executable and may use the Windows folder picker.
+
 The model catalog command prints JSON and can be large, so the checks below redirect it to a temporary file.
 
 ### macOS
@@ -232,7 +234,7 @@ The planning panel converts intent into graph-scoped tickets. Planning results c
 
 ### Proposal-First Coding
 
-Coding agents run in small, medium, or large modes. The mode controls how much graph and workflow context is included, but it does not grant unlimited edit scope. Provider outputs are stored as proposals and diffs so the user can inspect them before applying anything.
+Coding agents run in small, medium, or large modes. The mode controls how much graph and workflow context is included, but it does not grant unlimited edit scope. Provider outputs are stored as proposals and diffs so the user can inspect them before applying anything. A direct proposal can be implemented only after its matching review succeeds; GraphCode then validates and applies the exact reviewed diff as an explicit user action.
 
 ### Review Agents
 

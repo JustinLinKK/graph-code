@@ -99,6 +99,7 @@ type AppShellProps = {
   onOpenSettings: () => void;
   onRunPlanning: (prompt: string) => void;
   onApplyPlanningPatch: (runId: string) => void;
+  onImplementCodeProposal: (runId: string) => void;
   onStartCode: (nodeId: string, mode: CodingAgentMode, prompt?: string) => void;
   onWorkflowModeChange: (nodeId: string, mode: CodingAgentMode) => void;
   onWorkflowExecutionPolicyChange: (policy: CodingWorkflowExecutionPolicy) => void;
@@ -176,6 +177,7 @@ export function AppShell({
   onOpenSettings,
   onRunPlanning,
   onApplyPlanningPatch,
+  onImplementCodeProposal,
   onStartCode,
   onWorkflowModeChange,
   onWorkflowExecutionPolicyChange,
@@ -621,6 +623,7 @@ export function AppShell({
               gitStatus={gitStatus}
               onRunPlanning={onRunPlanning}
               onApplyPlanningPatch={onApplyPlanningPatch}
+              onImplementCodeProposal={onImplementCodeProposal}
               onRunReview={onRunReview}
             />
           </div>
@@ -954,6 +957,7 @@ function PlanningPanel({
   gitStatus,
   onRunPlanning,
   onApplyPlanningPatch,
+  onImplementCodeProposal,
   onRunReview
 }: {
   selectedNodeName: string | null;
@@ -963,6 +967,7 @@ function PlanningPanel({
   gitStatus: string;
   onRunPlanning: (prompt: string) => void;
   onApplyPlanningPatch: (runId: string) => void;
+  onImplementCodeProposal: (runId: string) => void;
   onRunReview: (runId: string) => void;
 }) {
   const [draft, setDraft] = useState("");
@@ -1065,6 +1070,9 @@ function PlanningPanel({
         {activityRuns.length === 0 ? <p className="muted">No coding, review, or scanning runs yet.</p> : null}
         {activityRuns.slice(0, 6).map((run) => {
           const matchingReview = run.agentKind === "coding" ? reviewTargets.get(run.id) : null;
+          const verdict = matchingReview ? reviewVerdict(matchingReview.response) : null;
+          const implementing = applyingRunIds.includes(run.id);
+          const canImplement = run.agentKind === "coding" && run.status === "succeeded" && Boolean(run.diff.trim()) && !run.implementedAt && verdict === "reviewed";
           return (
           <article
             className={`agent-activity-row ${run.status}`}
@@ -1087,7 +1095,18 @@ function PlanningPanel({
                 Review
               </Button>
             ) : null}
-            {matchingReview ? <span className="agent-review-state"><CheckCircle2 size={14} /> Review attached</span> : null}
+            {matchingReview ? (
+              <span className={`agent-review-state ${verdict === "bugged" ? "bugged" : ""}`}>
+                {verdict === "bugged" ? <AlertTriangle size={14} /> : <CheckCircle2 size={14} />}
+                {verdict === "bugged" ? "Changes requested" : "Review attached"}
+              </span>
+            ) : null}
+            {canImplement ? (
+              <Button size="sm" variant="primary" isDisabled={implementing} onPress={() => onImplementCodeProposal(run.id)}>
+                <CheckCircle2 size={15} />
+                {implementing ? "Implementing proposal" : "Implement proposal"}
+              </Button>
+            ) : null}
           </article>
           );
         })}
@@ -1117,7 +1136,7 @@ function indexStateLabel(state: IndexState): string {
   }
   switch (state.completeness.status) {
     case "complete":
-      return `Index complete · ${counts.indexed}/${counts.discovered}`;
+      return `Index complete · ${counts.indexed}/${counts.supported}`;
     case "partial":
       return `Index partial · ${counts.indexed}/${counts.discovered}`;
     case "stale":
@@ -1149,6 +1168,9 @@ function ticketStatusLabel(run: AgentRun): string {
   if (run.appliedGraphRevision !== null) {
     return "Applied";
   }
+  if (run.implementedAt) {
+    return "Implemented";
+  }
   switch (run.status) {
     case "queued":
       return "Queued";
@@ -1177,7 +1199,10 @@ function agentRunSummary(run: AgentRun): string {
   if (run.error) return run.error;
   if (run.status === "queued" || run.status === "running") return run.status === "queued" ? "Queued." : "Running.";
   if (run.agentKind === "planning") return run.prompt ? `Plan prepared for: ${run.prompt}` : "Planning ticket prepared.";
-  if (run.agentKind === "coding") return run.prompt ? `Proposal created for: ${run.prompt}` : "Coding proposal created.";
+  if (run.agentKind === "coding") {
+    if (run.implementedAt) return run.prompt ? `Implemented: ${run.prompt}` : "Coding proposal implemented.";
+    return run.prompt ? `Proposal created for: ${run.prompt}` : "Coding proposal created.";
+  }
   if (run.agentKind === "review") {
     const verdict = run.response.match(/GRAPHCODE_REVIEW_VERDICT:\s*(reviewed|bugged)/i)?.[1]?.toLowerCase();
     return verdict === "bugged" ? "Review found a likely issue in the proposal." : "Review completed for the coding proposal.";
@@ -1187,10 +1212,11 @@ function agentRunSummary(run: AgentRun): string {
 
 function AgentRunDetails({ run }: { run: AgentRun }) {
   const label = run.agentKind === "coding" ? "Inspect proposal" : run.agentKind === "review" ? "Inspect review" : run.agentKind === "planning" ? "Inspect plan output" : "Inspect run output";
+  const showAgentResponse = Boolean(run.response && (!run.diff || run.response.trim() !== run.diff.trim()));
   return (
     <details className="agent-run-details">
       <summary>{label}</summary>
-      {run.response ? (
+      {showAgentResponse ? (
         <div>
           <strong>Agent response</strong>
           <pre>{run.response}</pre>
@@ -1223,6 +1249,9 @@ function ticketStatusClass(run: AgentRun): string {
   if (run.appliedGraphRevision !== null) {
     return "applied";
   }
+  if (run.implementedAt) {
+    return "applied";
+  }
   return run.status;
 }
 
@@ -1230,8 +1259,13 @@ function ticketStatusIcon(run: AgentRun) {
   if (run.status === "conflicted" || run.conflictReason || run.status === "failed") {
     return <AlertTriangle size={12} />;
   }
-  if (run.appliedGraphRevision !== null || run.status === "succeeded") {
+  if (run.appliedGraphRevision !== null || run.implementedAt || run.status === "succeeded") {
     return <CheckCircle2 size={12} />;
   }
   return <Clock3 size={12} />;
+}
+
+function reviewVerdict(response: string): "reviewed" | "bugged" | null {
+  const match = response.trim().match(/GRAPHCODE_REVIEW_VERDICT:\s*(reviewed|bugged)\s*$/i);
+  return match ? (match[1].toLowerCase() as "reviewed" | "bugged") : null;
 }

@@ -20,6 +20,7 @@ import {
   type ClaudeModelInfo,
   type CodingAgentRequest,
   type CodingAgentMode,
+  type CodeProposalApplyRequest,
   type CodingWorkflow,
   type CodingWorkflowApplyLayerRequest,
   type CodingWorkflowControlRequest,
@@ -1114,6 +1115,74 @@ export class WorkspaceRuntime {
 
   applyAgentGraphPatch(projectId: string, runId: string): AgentRun {
     return this.repository.applyAgentGraphPatch(projectId, runId);
+  }
+
+  async applyCodeProposal(input: CodeProposalApplyRequest): Promise<AgentRun> {
+    const run = this.repository.getAgentRun(input.runId);
+    if (run.projectId !== input.projectId) {
+      throw validationError("Coding run does not belong to the selected project.");
+    }
+    if (run.agentKind !== "coding" || run.status !== "succeeded") {
+      throw validationError("Only succeeded coding proposals can be implemented.");
+    }
+    if (run.implementedAt) {
+      return run;
+    }
+    const review = this.repository
+      .listAgentRuns(input.projectId, 200)
+      .find((candidate) => candidate.agentKind === "review" && candidate.prompt === `Review ${run.id}`);
+    if (!review || review.status !== "succeeded") {
+      throw validationError("A completed review is required before implementing this proposal.");
+    }
+    if (reviewVerdict(review.response) !== "reviewed") {
+      throw validationError("The attached review requested changes; implement is blocked until a reviewed proposal is available.");
+    }
+    const proposalReference = this.repository.getLatestCodeProposalForRun(run.id);
+    if (!proposalReference) {
+      throw validationError("The coding run does not have a stored proposal to implement.");
+    }
+    const proposal = this.repository.getCodeProposal(proposalReference.id);
+    const parsed = parseUnifiedDiff(proposal.diff);
+    const paths = [...new Set(parsed.files.flatMap((file) => [file.oldPath, file.newPath].filter((value): value is string => Boolean(value))))].sort();
+    const project = this.repository.getProject(input.projectId);
+    const expectedRevision = await this.integrationRevisionKey(input.projectId, project.rootPath, paths);
+    return this.revisionApplyLock.runExclusive({
+      workspaceId: input.projectId,
+      expectedRevision,
+      observeRevision: () => this.integrationRevisionKey(input.projectId, project.rootPath, paths),
+      apply: async () => {
+        const validation = await validateCombinedPatchInTemporaryWorkspace({
+          workspaceRoot: project.rootPath,
+          combinedDiff: proposal.diff,
+          commands: [],
+          timeoutMs: 120000
+        });
+        if (!validation.passed) {
+          throw validationError(`Code proposal validation failed: ${validation.diagnostics.join(" ")}`);
+        }
+        await applyCombinedPatchToWorkspace({
+          workspaceRoot: project.rootPath,
+          combinedDiff: proposal.diff,
+          timeoutMs: 60000
+        });
+        const implemented = this.repository.updateAgentRun(run.id, { implementedAt: new Date().toISOString() });
+        await Promise.resolve(this.refreshCodeGraph(input.projectId)).catch(() => undefined);
+        if (implemented.targetNodeId) {
+          try {
+            this.repository.setGraphStatuses(input.projectId, [{
+              entityType: "node",
+              entityId: implemented.targetNodeId,
+              status: "implemented",
+              note: `Implemented reviewed coding proposal ${proposal.id}.`,
+              agentRunId: implemented.id
+            }]);
+          } catch {
+            // The source patch remains authoritative if a scan replaced the selected node identity.
+          }
+        }
+        return this.repository.getAgentRun(run.id);
+      }
+    });
   }
 
   async runScanning(input: ScanningAgentRequest): Promise<AgentRun> {
@@ -2425,6 +2494,11 @@ function defaultCliCommand(provider: "codex" | "claudecode"): string {
 
 function cliProviderLabel(provider: "codex" | "claudecode"): string {
   return provider === "codex" ? "Codex CLI" : "Claude Code";
+}
+
+function reviewVerdict(response: string): "reviewed" | "bugged" | null {
+  const match = response.trim().match(/GRAPHCODE_REVIEW_VERDICT:\s*(reviewed|bugged)\s*$/i);
+  return match ? (match[1].toLowerCase() as "reviewed" | "bugged") : null;
 }
 
 async function validateCliProvider(provider: "codex" | "claudecode", command: string): Promise<string | null> {

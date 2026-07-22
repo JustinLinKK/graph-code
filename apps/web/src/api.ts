@@ -7,6 +7,7 @@ import type {
   CodingWorkflowApplyLayerRequest,
   CodingWorkflowControlRequest,
   CodingAgentRequest,
+  CodeProposalApplyRequest,
   CodingWorkflowPreviewRequest,
   CodingWorkflowStartRequest,
   ClaudeAuthStartResult,
@@ -259,6 +260,13 @@ export async function runPlanningAgent(input: PlanningChatRequest): Promise<Agen
 
 export async function runCodingAgent(input: CodingAgentRequest): Promise<AgentRun> {
   return request<AgentRun>("/api/agents/coding", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function applyCodeProposal(input: CodeProposalApplyRequest): Promise<AgentRun> {
+  return request<AgentRun>("/api/code-proposals/apply", {
     method: "POST",
     body: JSON.stringify(input)
   });

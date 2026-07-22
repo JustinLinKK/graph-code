@@ -1478,6 +1478,7 @@ async function invokeCodexCli(config: ProviderConfig, messages: PromptMessage[],
     cwd,
     "--sandbox",
     permission.sandboxMode,
+    "--skip-git-repo-check",
     ...(config.model.trim() ? ["--model", config.model.trim()] : []),
     "-"
   ];

@@ -8,6 +8,7 @@ import {
   codingWorkflowPreviewRequestSchema,
   codingWorkflowStartRequestSchema,
   codingAgentRequestSchema,
+  codeProposalApplyRequestSchema,
   createCustomBlockTypeSchema,
   customBlockTypeUpdateSchema,
   edgeMutationSchema,
@@ -241,6 +242,11 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
   app.post("/api/agents/review", async (request) => {
     const body = reviewAgentRequestSchema.parse(request.body);
     return runtime.runReview(body);
+  });
+
+  app.post("/api/code-proposals/apply", async (request) => {
+    const body = codeProposalApplyRequestSchema.parse(request.body);
+    return runtime.applyCodeProposal(body);
   });
 
   app.post("/api/agents/scanning", async (request) => {

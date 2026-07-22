@@ -2116,6 +2116,10 @@ select {
   font-weight: 800;
 }
 
+.agent-review-state.bugged {
+  color: #b91c1c;
+}
+
 .agent-ticket-meta {
   display: flex;
   flex-wrap: wrap;

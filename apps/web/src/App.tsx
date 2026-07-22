@@ -34,6 +34,7 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyAgentGraphPatch,
+  applyCodeProposal,
   applyCodingWorkflowLayer,
   autoLayoutCanvas,
   cancelCurrentIndexRun,
@@ -1404,6 +1405,24 @@ export default function App() {
     [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]
   );
 
+  const handleImplementCodeProposal = useCallback(
+    async (runId: string) => {
+      if (!selectedProjectId) return;
+      setApplyingRunIds((current) => [...current, runId]);
+      setError(null);
+      try {
+        const run = await applyCodeProposal({ projectId: selectedProjectId, runId });
+        setAgentRuns((current) => current.map((item) => (item.id === run.id ? run : item)));
+        await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId);
+      } catch (agentError) {
+        setError(agentError instanceof Error ? agentError.message : "Failed to implement coding proposal.");
+      } finally {
+        setApplyingRunIds((current) => current.filter((id) => id !== runId));
+      }
+    },
+    [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]
+  );
+
   const handleStartCode = useCallback(
     async (nodeId: string, mode: CodingAgentMode = "medium", prompt?: string) => {
       if (!selectedProjectId) {
@@ -1759,6 +1778,7 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onRunPlanning={handleRunPlanning}
         onApplyPlanningPatch={handleApplyPlanningPatch}
+        onImplementCodeProposal={handleImplementCodeProposal}
         onStartCode={handleStartCode}
         onWorkflowModeChange={handleWorkflowModeChange}
         onWorkflowExecutionPolicyChange={handleWorkflowExecutionPolicyChange}
