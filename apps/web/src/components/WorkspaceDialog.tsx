@@ -120,10 +120,16 @@ export function WorkspaceDialog({
 
   return (
     <div className="dialog-backdrop" role="presentation">
-      <form className={`dialog workspace-dialog${isInitializing ? " workspace-dialog-initialize" : ""}`} onSubmit={submit}>
+      <form
+        className={`dialog workspace-dialog${isInitializing ? " workspace-dialog-initialize" : ""}`}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workspace-dialog-title"
+        onSubmit={submit}
+      >
         <div className="dialog-title">
           <div>
-            <h2>{isInitializing ? "Initialize Workspace" : "Open Workspace"}</h2>
+            <h2 id="workspace-dialog-title">{isInitializing ? "Initialize Workspace" : "Open Workspace"}</h2>
             <p>{isInitializing ? statusCopy.detail : "Choose a repository directory that contains a .graphcode workspace."}</p>
           </div>
           <Button isIconOnly size="sm" variant="ghost" aria-label="Close workspace dialog" onPress={onClose}>
@@ -168,8 +174,8 @@ export function WorkspaceDialog({
             ) : null}
           </>
         ) : null}
-        {formError ? <div className="error-strip">{formError}</div> : null}
-        {error ? <div className="error-strip">{error}</div> : null}
+        {formError ? <div className="error-strip" role="alert">{formError}</div> : null}
+        {error ? <div className="error-strip" role="alert">{error}</div> : null}
 
         <div className="dialog-actions">
           {isInitializing ? (

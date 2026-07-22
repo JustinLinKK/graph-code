@@ -223,11 +223,11 @@ describe("MA-3 isolated work-unit context compiler", () => {
       context.projectId,
       "run-bounded",
       "owned",
-      expect.stringContaining("@@ -2,3 +2,3 @@"),
+      expect.stringContaining("@@ -2,2 +2,2 @@"),
       null,
       expect.objectContaining({
         workUnitId: context.workUnit.id,
-        actualWriteScopes: [expect.objectContaining({ path: "src/owned.ts", startLine: 2, endLine: 4 })],
+        actualWriteScopes: [expect.objectContaining({ path: "src/owned.ts", startLine: 2, endLine: 3 })],
         contractUpdates: []
       })
     );

@@ -713,11 +713,11 @@ export function SettingsPage({
   };
 
   return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
+    <div className="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
       <div className="settings-page">
         <div className="settings-title">
           <div>
-            <h2>Settings</h2>
+            <h2 id="settings-dialog-title">Settings</h2>
             <p>{project.rootPath}</p>
           </div>
           <Button isIconOnly size="sm" variant="ghost" aria-label="Close settings" onPress={onClose}>
@@ -726,30 +726,30 @@ export function SettingsPage({
         </div>
 
         <div className="settings-body">
-          <nav className="settings-nav" aria-label="Settings sections">
-            <button type="button" className={activeSection === "general" ? "active" : ""} onClick={() => setActiveSection("general")}>
+          <nav className="settings-nav" role="tablist" aria-label="Settings sections">
+            <button type="button" id="settings-tab-general" role="tab" aria-selected={activeSection === "general"} aria-controls="settings-panel" className={activeSection === "general" ? "active" : ""} onClick={() => setActiveSection("general")}>
               <Monitor size={16} />
               General
             </button>
-            <button type="button" className={activeSection === "agents" ? "active" : ""} onClick={() => setActiveSection("agents")}>
+            <button type="button" id="settings-tab-agents" role="tab" aria-selected={activeSection === "agents"} aria-controls="settings-panel" className={activeSection === "agents" ? "active" : ""} onClick={() => setActiveSection("agents")}>
               <Bot size={16} />
               Agents
             </button>
-            <button type="button" className={activeSection === "extensions" ? "active" : ""} onClick={() => setActiveSection("extensions")}>
+            <button type="button" id="settings-tab-extensions" role="tab" aria-selected={activeSection === "extensions"} aria-controls="settings-panel" className={activeSection === "extensions" ? "active" : ""} onClick={() => setActiveSection("extensions")}>
               <Boxes size={16} />
               Extensions
             </button>
-            <button type="button" className={activeSection === "integrations" ? "active" : ""} onClick={() => setActiveSection("integrations")}>
+            <button type="button" id="settings-tab-integrations" role="tab" aria-selected={activeSection === "integrations"} aria-controls="settings-panel" className={activeSection === "integrations" ? "active" : ""} onClick={() => setActiveSection("integrations")}>
               <Terminal size={16} />
               Integrations
             </button>
-            <button type="button" className={activeSection === "github" ? "active" : ""} onClick={() => setActiveSection("github")}>
+            <button type="button" id="settings-tab-github" role="tab" aria-selected={activeSection === "github"} aria-controls="settings-panel" className={activeSection === "github" ? "active" : ""} onClick={() => setActiveSection("github")}>
               <Github size={16} />
               GitHub
             </button>
           </nav>
 
-          <main className="settings-content">
+          <main id="settings-panel" className="settings-content" role="tabpanel" aria-labelledby={`settings-tab-${activeSection}`}>
             {activeSection === "general" ? (
               <section className="settings-section">
                 <h3>General</h3>

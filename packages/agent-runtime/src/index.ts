@@ -489,7 +489,7 @@ export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, optio
       const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMetadata);
       const diff =
         options.config.provider === "fake"
-          ? fakeWorkUnitDiff(context.workUnit, responseWithoutArtifacts)
+          ? fakeWorkUnitDiff(context, responseWithoutArtifacts)
           : normalizeDiff(responseWithoutArtifacts, context.allowedWrites[0]?.path);
       const actualWriteScopes = extractUnifiedDiffWriteScopes(diff);
       if (actualWriteScopes.length === 0) throw new Error("Work-unit coding response did not contain a parseable unified diff.");
@@ -1762,24 +1762,92 @@ function assertDiffInScope(diff: string, allowedPath: string | null | undefined)
   }
 }
 
-function fakeWorkUnitDiff(workUnit: CodingWorkUnit, response: string): string {
+function fakeWorkUnitDiff(context: WorkUnitContext, response: string): string {
+  const workUnit = context.workUnit;
   const scope = workUnit.plannedWriteScopes[0];
   if (!scope) throw new Error(`Work unit ${workUnit.id} has no write scope for the fake provider.`);
   if (scope.permission === "rename") throw new Error("The fake work-unit provider does not synthesize rename proposals.");
   const startLine = scope.startLine ?? 1;
-  const count = scope.startLine !== null && scope.endLine !== null ? scope.endLine - scope.startLine + 1 : 1;
-  const oldHeader = scope.permission === "create" ? "/dev/null" : `a/${scope.path}`;
-  const newHeader = scope.permission === "delete" ? "/dev/null" : `b/${scope.path}`;
-  const oldRange = scope.permission === "create" ? "0,0" : `${startLine},${count}`;
-  const newRange = scope.permission === "delete" ? `${startLine},0` : `${startLine},${count}`;
   const summary = response.replace(/\s+/g, " ").slice(0, 160);
+  if (scope.permission === "create") {
+    return [
+      `diff --git a/${scope.path} b/${scope.path}`,
+      "--- /dev/null",
+      `+++ b/${scope.path}`,
+      "@@ -0,0 +1,1 @@",
+      `+${fakeProposalLine(scope.path, "", summary)}`
+    ].join("\n");
+  }
+
+  const source = context.sources.find(
+    (candidate) => candidate.path === scope.path && candidate.availability === "present" && candidate.exact
+  );
+  const sourceLines = source?.content.split(/\r?\n/) ?? [];
+  const sourceStart = source?.startLine ?? 1;
+  const sourceEnd = source?.endLine ?? sourceStart + Math.max(0, sourceLines.length - 1);
+  const allowedEnd = scope.endLine ?? sourceEnd;
+  const firstAllowedIndex = Math.max(0, startLine - sourceStart);
+  let lineIndex = sourceLines.findIndex(
+    (line, index) => index >= firstAllowedIndex && sourceStart + index <= allowedEnd && line.trim().length > 0
+  );
+  if (lineIndex < 0) lineIndex = firstAllowedIndex;
+  const lineNumber = sourceStart + lineIndex;
+  const originalLine = sourceLines[lineIndex] ?? "";
+
+  if (scope.permission === "delete") {
+    return [
+      `diff --git a/${scope.path} b/${scope.path}`,
+      `--- a/${scope.path}`,
+      "+++ /dev/null",
+      `@@ -${lineNumber},1 +${lineNumber},0 @@`,
+      `-${originalLine}`
+    ].join("\n");
+  }
+
+  const nextLine = sourceStart + lineIndex + 1 <= allowedEnd ? sourceLines[lineIndex + 1] : undefined;
+  const previousLine = lineIndex > 0 && lineNumber - 1 >= startLine ? sourceLines[lineIndex - 1] : undefined;
+  const hunkStart = previousLine === undefined ? lineNumber : lineNumber - 1;
+  const hunkLines = previousLine === undefined
+    ? [
+        `-${originalLine}`,
+        `+${fakeProposalLine(scope.path, originalLine, summary)}`,
+        ...(nextLine === undefined ? [] : [` ${nextLine}`])
+      ]
+    : [
+        ` ${previousLine}`,
+        `-${originalLine}`,
+        `+${fakeProposalLine(scope.path, originalLine, summary)}`
+      ];
+  const hunkCount = nextLine === undefined && previousLine === undefined ? 1 : 2;
+
   return [
     `diff --git a/${scope.path} b/${scope.path}`,
-    `--- ${oldHeader}`,
-    `+++ ${newHeader}`,
-    `@@ -${oldRange} +${newRange} @@`,
-    scope.permission === "delete" ? `-${summary}` : `+${summary}`
+    `--- a/${scope.path}`,
+    `+++ b/${scope.path}`,
+    `@@ -${hunkStart},${hunkCount} +${hunkStart},${hunkCount} @@`,
+    ...hunkLines
   ].join("\n");
+}
+
+function fakeProposalLine(filePath: string, originalLine: string, summary: string): string {
+  const safeSummary = `GraphCode fake proposal: ${summary}`.replaceAll("*/", "* /");
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "c", "h", "cc", "cpp", "hpp", "java", "kt", "rs", "swift"].includes(extension)) {
+    return `${originalLine} // ${safeSummary}`;
+  }
+  if (["py", "rb", "sh", "bash", "zsh", "yml", "yaml", "toml"].includes(extension)) {
+    return `${originalLine} # ${safeSummary}`;
+  }
+  if (["sql", "lua"].includes(extension)) {
+    return `${originalLine} -- ${safeSummary}`;
+  }
+  if (["css", "scss", "less"].includes(extension)) {
+    return `${originalLine} /* ${safeSummary} */`;
+  }
+  if (["html", "xml", "md", "mdx"].includes(extension)) {
+    return `${originalLine} <!-- ${safeSummary} -->`;
+  }
+  return `${originalLine} `;
 }
 
 function normalizeDiffHeaderPath(value: string): string | null {

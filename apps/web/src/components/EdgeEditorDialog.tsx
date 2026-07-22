@@ -71,10 +71,10 @@ export function EdgeEditorDialog({ open, mode, edge, draft, canvas, loading, err
 
   return (
     <div className="dialog-backdrop" role="presentation">
-      <form className="dialog" onSubmit={submit}>
+      <form className="dialog" role="dialog" aria-modal="true" aria-labelledby="edge-editor-dialog-title" onSubmit={submit}>
         <div className="dialog-title">
           <div>
-            <h2>{mode === "create" ? "Add Edge" : "Edit Edge"}</h2>
+            <h2 id="edge-editor-dialog-title">{mode === "create" ? "Add Edge" : "Edit Edge"}</h2>
             <p>Use the description for the visible link label and code context for implementation detail.</p>
           </div>
           <Button isIconOnly size="sm" variant="ghost" aria-label="Close edge editor" onPress={onClose}>
@@ -154,7 +154,7 @@ export function EdgeEditorDialog({ open, mode, edge, draft, canvas, loading, err
           />
         </label>
 
-        {error ? <div className="error-strip">{error}</div> : null}
+        {error ? <div className="error-strip" role="alert">{error}</div> : null}
 
         <div className="dialog-actions">
           <Button type="submit" variant="primary" isDisabled={loading || nodes.length < 2 || sourceNodeId === targetNodeId}>

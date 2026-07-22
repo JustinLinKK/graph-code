@@ -71,10 +71,10 @@ export function BoundaryEditorDialog({ open, mode, boundary, draft, loading, err
 
   return (
     <div className="dialog-backdrop" role="presentation">
-      <form className="dialog" onSubmit={submit}>
+      <form className="dialog" role="dialog" aria-modal="true" aria-labelledby="boundary-editor-dialog-title" onSubmit={submit}>
         <div className="dialog-title">
           <div>
-            <h2>{mode === "create" ? "Add Boundary" : "Edit Boundary"}</h2>
+            <h2 id="boundary-editor-dialog-title">{mode === "create" ? "Add Boundary" : "Edit Boundary"}</h2>
             <p>Boundaries group visible blocks by canvas box and store description, context, and membership.</p>
           </div>
           <Button isIconOnly size="sm" variant="ghost" aria-label="Close boundary editor" onPress={onClose}>
@@ -121,7 +121,7 @@ export function BoundaryEditorDialog({ open, mode, boundary, draft, loading, err
           </label>
         </div>
 
-        {error ? <div className="error-strip">{error}</div> : null}
+        {error ? <div className="error-strip" role="alert">{error}</div> : null}
 
         <div className="dialog-actions">
           <Button type="submit" variant="primary" isDisabled={loading || !scopeNodeId}>

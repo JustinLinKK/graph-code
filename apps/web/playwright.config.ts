@@ -28,7 +28,8 @@ export default defineConfig({
     timeout: 180_000,
     env: {
       ...process.env,
-      ...mountedWslTemp
+      ...mountedWslTemp,
+      GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER: "1"
     }
   }
 });

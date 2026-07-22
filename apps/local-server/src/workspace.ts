@@ -411,13 +411,19 @@ export class WorkspaceRuntime {
         message: "Native folder picker is disabled. Paste the workspace path manually."
       };
     }
-    if (process.platform === "win32") {
+    const pickerEnvironment = detectFolderPickerEnvironment(process.platform, process.env, readProcessVersion());
+    if (pickerEnvironment === "windows") {
       return pickWindowsFolder();
     }
-    if (isWsl()) {
-      return pickWindowsFolder(windowsPathToWslPath);
+    if (pickerEnvironment === "wsl") {
+      return {
+        supported: false,
+        selected: false,
+        path: null,
+        message: "GraphCode is running in WSL. Paste a Linux workspace path manually (for example, /home/... or /mnt/c/...) so Windows and WSL paths are not mixed."
+      };
     }
-    if (process.platform === "darwin") {
+    if (pickerEnvironment === "macos") {
       return pickMacFolder();
     }
     return {
@@ -2473,7 +2479,7 @@ function outputText(value: unknown): string {
   return "";
 }
 
-async function pickWindowsFolder(transformPath: (selectedPath: string) => string = (selectedPath) => selectedPath): Promise<FolderPickerResult> {
+async function pickWindowsFolder(): Promise<FolderPickerResult> {
   const script = [
     "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
     "Add-Type -AssemblyName System.Windows.Forms",
@@ -2491,12 +2497,11 @@ async function pickWindowsFolder(transformPath: (selectedPath: string) => string
       maxBuffer: 1024 * 32
     });
     const selectedPath = firstOutputLine(stdout);
-    const normalizedPath = selectedPath ? transformPath(selectedPath) : null;
     return {
       supported: true,
-      selected: Boolean(normalizedPath),
-      path: normalizedPath,
-      message: normalizedPath ? null : "No folder was selected."
+      selected: Boolean(selectedPath),
+      path: selectedPath,
+      message: selectedPath ? null : "No folder was selected."
     };
   } catch (error) {
     if (exitCode(error) === 2) {
@@ -2603,28 +2608,23 @@ function exitCode(error: unknown): number | null {
   return typeof code === "number" ? code : null;
 }
 
-function isWsl(): boolean {
-  if (process.platform !== "linux") {
-    return false;
-  }
-  if (process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) {
-    return true;
-  }
-  try {
-    return fs.readFileSync("/proc/version", "utf8").toLowerCase().includes("microsoft");
-  } catch {
-    return false;
-  }
+export function detectFolderPickerEnvironment(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  processVersion: string
+): "windows" | "wsl" | "macos" | "unsupported" {
+  if (platform === "win32") return "windows";
+  if (platform === "darwin") return "macos";
+  if (platform === "linux" && (env.WSL_DISTRO_NAME || env.WSL_INTEROP || processVersion.toLowerCase().includes("microsoft"))) return "wsl";
+  return "unsupported";
 }
 
-function windowsPathToWslPath(selectedPath: string): string {
-  const drivePath = /^([a-zA-Z]):[\\/](.*)$/.exec(selectedPath);
-  if (!drivePath) {
-    return selectedPath;
+function readProcessVersion(): string {
+  try {
+    return fs.readFileSync("/proc/version", "utf8");
+  } catch {
+    return "";
   }
-  const drive = drivePath[1].toLowerCase();
-  const rest = drivePath[2].replace(/\\/g, "/");
-  return `/mnt/${drive}/${rest}`;
 }
 
 function parseCodexModels(raw: string): CodexModelInfo[] {

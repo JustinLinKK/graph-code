@@ -1405,7 +1405,7 @@ export default function App() {
   );
 
   const handleStartCode = useCallback(
-    async (nodeId: string, mode: CodingAgentMode = "medium") => {
+    async (nodeId: string, mode: CodingAgentMode = "medium", prompt?: string) => {
       if (!selectedProjectId) {
         return;
       }
@@ -1437,7 +1437,7 @@ export default function App() {
           projectId: selectedProjectId,
           nodeId,
           mode,
-          prompt: detail.node.code.context
+          prompt: prompt?.trim() || detail.node.code.context
         });
         await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, nodeId);
       } catch (agentError) {
@@ -1598,6 +1598,11 @@ export default function App() {
         await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId ?? undefined);
       } catch (workflowError) {
         setError(workflowError instanceof Error ? workflowError.message : "Applying coding workflow layer failed.");
+        try {
+          setCodingWorkflow(await getCodingWorkflow(selectedProjectId, workflowId));
+        } catch {
+          // Keep the existing workflow preview when refreshed integration evidence is unavailable.
+        }
       } finally {
         setAgentBusy(false);
       }

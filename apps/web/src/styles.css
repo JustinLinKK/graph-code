@@ -63,6 +63,11 @@ select {
   font: inherit;
 }
 
+:where(button, [role="button"], [role="tab"], [role="separator"]):focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 2px;
+}
+
 .app-shell {
   display: grid;
   grid-template-rows: 58px minmax(0, 1fr);
@@ -1353,6 +1358,44 @@ select {
   margin-top: 10px;
 }
 
+.coding-task-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.coding-task-field > span,
+.coding-mode-recommendation {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.coding-task-field textarea {
+  width: 100%;
+  min-height: 76px;
+  resize: vertical;
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.coding-workflow-hint {
+  margin: 12px 0 0;
+  padding: 9px 10px;
+  color: var(--muted);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .mode-control-label {
   color: #475467;
   font-size: 12px;
@@ -1660,6 +1703,15 @@ select {
   gap: 16px;
 }
 
+.dialog-title > div {
+  min-width: 0;
+}
+
+.dialog-title > [data-slot="button"] {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .dialog-title h2 {
   margin: 0;
   color: #111827;
@@ -1683,6 +1735,26 @@ select {
   display: grid;
   gap: 6px;
   min-width: 0;
+}
+
+.inline-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: fit-content;
+  min-height: 32px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.inline-control input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #2563eb;
 }
 
 .form-field span {
@@ -1938,10 +2010,12 @@ select {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
 }
 
 .agent-ticket-topline strong,
 .agent-activity-row strong {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   color: #111827;
@@ -1963,6 +2037,7 @@ select {
   border-radius: 999px;
   font-size: 11px;
   font-weight: 800;
+  white-space: nowrap;
 }
 
 .run-status-badge.running {
@@ -1995,6 +2070,50 @@ select {
   line-height: 1.4;
   -webkit-line-clamp: 4;
   -webkit-box-orient: vertical;
+}
+
+.agent-run-details {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.agent-run-details summary {
+  width: fit-content;
+  color: #2563eb;
+  cursor: pointer;
+  font-weight: 800;
+}
+
+.agent-run-details > div {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.agent-run-details pre {
+  max-height: 220px;
+  margin: 0;
+  overflow: auto;
+  padding: 9px;
+  color: var(--text);
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-review-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: fit-content;
+  color: #047857;
+  font-size: 12px;
+  font-weight: 800;
 }
 
 .agent-ticket-meta {
@@ -2343,9 +2462,37 @@ select {
   min-width: 0;
 }
 
-.coding-workflow-policy input {
+.coding-workflow-policy input,
+.coding-workflow-item select {
   width: 100%;
   min-width: 0;
+  min-height: 34px;
+  padding: 6px 8px;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.coding-workflow-next-step {
+  margin: 0;
+  padding: 8px 9px;
+  color: var(--muted);
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.coding-workflow-error {
+  padding: 8px 9px;
+  color: #b91c1c;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 7px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .coding-workflow-validation-warning,
@@ -2520,6 +2667,7 @@ select {
 
   .settings-body {
     grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .settings-nav {

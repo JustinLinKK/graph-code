@@ -164,10 +164,10 @@ export function BlockEditorDialog({ open, mode, node, detail, hierarchy, canvas,
 
   return (
     <div className="dialog-backdrop" role="presentation">
-      <form className="dialog block-dialog" onSubmit={submit}>
+      <form className="dialog block-dialog" role="dialog" aria-modal="true" aria-labelledby="block-editor-dialog-title" onSubmit={submit}>
         <div className="dialog-title">
           <div>
-            <h2>{mode === "create" ? "Add Block" : "Edit Block"}</h2>
+            <h2 id="block-editor-dialog-title">{mode === "create" ? "Add Block" : "Edit Block"}</h2>
             <p>Keep the canvas description short and put detailed coding-agent instructions in code context.</p>
           </div>
           <Button isIconOnly size="sm" variant="ghost" aria-label="Close block editor" onPress={onClose}>
@@ -358,7 +358,7 @@ export function BlockEditorDialog({ open, mode, node, detail, hierarchy, canvas,
           />
         ) : null}
 
-        {error ? <div className="error-strip">{error}</div> : null}
+        {error ? <div className="error-strip" role="alert">{error}</div> : null}
 
         <div className="dialog-actions">
           <Button type="submit" variant="primary" isDisabled={loading}>

@@ -1267,7 +1267,7 @@ describe("GraphCode app shell", () => {
     const hierarchyPanel = within(screen.getByLabelText("Project hierarchy"));
     expect((await hierarchyPanel.findAllByText("Frontend")).length).toBeGreaterThanOrEqual(1);
     expect(hierarchyPanel.getByText("Web Flow")).toBeInTheDocument();
-    expect(hierarchyPanel.getByText("1 blocks")).toBeInTheDocument();
+    expect(hierarchyPanel.getByText("1 block")).toBeInTheDocument();
   });
 
   it("adjusts the structure panel width from the splitter", async () => {
@@ -1295,7 +1295,7 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     fireEvent.click(await within(await screen.findByTestId("react-flow")).findByText("Web Workspace"));
-    const inspector = within(screen.getByLabelText("Node inspector"));
+    const inspector = within(screen.getByLabelText("Node details and coding"));
     await inspector.findByRole("heading", { name: "Web Workspace" });
     const tagInput = await inspector.findByLabelText("Tags label tags");
     fireEvent.input(tagInput, { target: { value: "frontend, ui" } });
@@ -1830,7 +1830,7 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     const tablist = await screen.findByRole("tablist", { name: /Details panel mode/i });
-    fireEvent.click(within(tablist).getByRole("button", { name: /Planning/i }));
+    fireEvent.click(within(tablist).getByRole("tab", { name: /Planning/i }));
     fireEvent.change(await screen.findByPlaceholderText("Plan graph changes"), {
       target: { value: "Add cache node" }
     });
@@ -1863,7 +1863,7 @@ describe("GraphCode app shell", () => {
 
     fireEvent.click(await screen.findByText("Web Workspace"));
     expect((await screen.findAllByText("Client app.")).length).toBeGreaterThan(0);
-    fireEvent.click(await screen.findByRole("button", { name: /Start code/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Preview workflow/i }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
@@ -1918,7 +1918,9 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByText("renderWidget"));
-    fireEvent.click(await screen.findByRole("button", { name: /Start code/i }));
+    const task = "Fix the renderer and add a focused test.";
+    fireEvent.change(await screen.findByRole("textbox", { name: "Coding task" }), { target: { value: task } });
+    fireEvent.click(await screen.findByRole("button", { name: /Start coding/i }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
@@ -1928,6 +1930,8 @@ describe("GraphCode app shell", () => {
           body: expect.stringContaining('"mode":"small"')
         })
       );
+      const codingCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === "/api/agents/coding");
+      expect(JSON.parse(String(codingCall?.[1]?.body ?? "{}"))).toEqual(expect.objectContaining({ prompt: task }));
     });
   });
 
@@ -1936,7 +1940,7 @@ describe("GraphCode app shell", () => {
 
     fireEvent.click(await screen.findByLabelText("Settings"));
       expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: /Agents/i }));
+      fireEvent.click(screen.getByRole("tab", { name: /Agents/i }));
       expect(screen.getByRole("heading", { name: "Planning" })).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "Review Small" })).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "Review Medium" })).toBeInTheDocument();
@@ -1951,13 +1955,13 @@ describe("GraphCode app shell", () => {
     fireEvent.change(screen.getAllByLabelText("Select Key File")[0], { target: { files: [keyFile] } });
     expect(await screen.findByText("API key read successfully")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Extensions/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /Extensions/i }));
     expect(screen.getByRole("heading", { name: "ML Pipeline" })).toBeInTheDocument();
     const mlPipelineEnabled = within(screen.getByRole("heading", { name: "ML Pipeline" }).closest(".agent-settings-card") as HTMLElement).getByLabelText("Enabled");
     fireEvent.click(mlPipelineEnabled);
     expect(mlPipelineEnabled).toBeChecked();
 
-    fireEvent.click(screen.getByRole("button", { name: /GitHub/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /GitHub/i }));
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
     expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
@@ -1986,7 +1990,7 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByLabelText("Settings"));
-    fireEvent.click(await screen.findByRole("button", { name: /Agents/i }));
+    fireEvent.click(await screen.findByRole("tab", { name: /Agents/i }));
     const planningCard = screen.getByRole("heading", { name: "Planning" }).closest(".agent-settings-card") as HTMLElement;
     const providerSelect = within(planningCard).getByLabelText("Provider");
 
@@ -2029,9 +2033,9 @@ describe("GraphCode app shell", () => {
       );
     });
     const tablist = await screen.findByRole("tablist", { name: /Details panel mode/i });
-    fireEvent.click(within(tablist).getByRole("button", { name: /Planning/i }));
+    fireEvent.click(within(tablist).getByRole("tab", { name: /Planning/i }));
     expect(await screen.findByText("Scanning")).toBeInTheDocument();
-    expect(screen.getByText("Agent completed")).toBeInTheDocument();
+    expect(screen.getByText("Agent completed", { selector: "p" })).toBeInTheDocument();
   });
 
   it("updates the canvas background when Night theme is saved", async () => {

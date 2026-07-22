@@ -22,7 +22,8 @@ import {
   Settings,
   Sparkles,
   Square,
-  Undo2
+  Undo2,
+  X
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
@@ -98,7 +99,7 @@ type AppShellProps = {
   onOpenSettings: () => void;
   onRunPlanning: (prompt: string) => void;
   onApplyPlanningPatch: (runId: string) => void;
-  onStartCode: (nodeId: string, mode: CodingAgentMode) => void;
+  onStartCode: (nodeId: string, mode: CodingAgentMode, prompt?: string) => void;
   onWorkflowModeChange: (nodeId: string, mode: CodingAgentMode) => void;
   onWorkflowExecutionPolicyChange: (policy: CodingWorkflowExecutionPolicy) => void;
   onRevalidateCodingWorkflow: () => void;
@@ -203,6 +204,7 @@ export function AppShell({
   const nodeCount = canvas?.nodes.length ?? 0;
   const edgeCount = canvas?.edges.length ?? 0;
   const filteredHierarchy = useMemo(() => filterHierarchy(hierarchy, query), [hierarchy, query]);
+  const showWorkflowError = Boolean(error && rightPanelMode === "details" && codingWorkflow);
   const indexActive = Boolean(indexState && ["discovering", "parsing", "linking", "persisting"].includes(indexState.progress.phase));
   const indexUnavailable = indexState?.completeness.status === "failed" && indexState.completeness.errorCode === "index_state_unavailable";
   const handleResizeStart = useCallback(
@@ -287,7 +289,7 @@ export function AppShell({
           </div>
           <div>
             <h1>{title}</h1>
-            <p>{selectedProject ? `${nodeCount} blocks · ${edgeCount} links` : "No project loaded"}</p>
+            <p>{selectedProject ? `${countLabel(nodeCount, "block")} · ${countLabel(edgeCount, "link")}` : "No project loaded"}</p>
           </div>
         </div>
 
@@ -326,16 +328,23 @@ export function AppShell({
             <>
               <div className="add-menu-wrap">
             <span title="Add a block, edge, or boundary">
-              <Button size="sm" variant="secondary" onPress={() => setAddMenuOpen((open) => !open)}>
+              <Button
+                size="sm"
+                variant="secondary"
+                aria-haspopup="menu"
+                aria-expanded={addMenuOpen}
+                onPress={() => setAddMenuOpen((open) => !open)}
+              >
                 <Plus size={16} />
                 <span className="toolbar-label">Add</span>
                 <ChevronDown size={14} />
               </Button>
             </span>
             {addMenuOpen ? (
-              <div className="add-menu">
+              <div className="add-menu" role="menu" aria-label="Add graph element">
                 <button
                   type="button"
+                  role="menuitem"
                   onClick={() => {
                     setAddMenuOpen(false);
                     onAddBlock();
@@ -346,6 +355,7 @@ export function AppShell({
                 </button>
                 <button
                   type="button"
+                  role="menuitem"
                   onClick={() => {
                     setAddMenuOpen(false);
                     onDrawEdge();
@@ -356,6 +366,7 @@ export function AppShell({
                 </button>
                 <button
                   type="button"
+                  role="menuitem"
                   onClick={() => {
                     setAddMenuOpen(false);
                     onDrawBoundary();
@@ -424,7 +435,7 @@ export function AppShell({
             onChange={(event) => setQuery(event.target.value)}
           />
         </label>
-        {error ? <div className="error-strip">{error}</div> : null}
+        {error && !showWorkflowError ? <div className="error-strip" role="alert">{error}</div> : null}
         <HierarchyTree
           nodes={filteredHierarchy}
           selectedNodeId={selectedNodeId}
@@ -532,21 +543,38 @@ export function AppShell({
         }}
       />
 
-      <aside className="right-panel" aria-label="Node inspector">
+      <aside className="right-panel" aria-label={rightPanelMode === "details" ? "Node details and coding" : "Agent planning and activity"}>
         <div className="right-panel-tabs" role="tablist" aria-label="Details panel mode">
-          <button type="button" className={rightPanelMode === "details" ? "active" : ""} onClick={() => setRightPanelMode("details")}>
+          <button
+            type="button"
+            role="tab"
+            id="right-panel-details-tab"
+            aria-controls="right-panel-details"
+            aria-selected={rightPanelMode === "details"}
+            className={rightPanelMode === "details" ? "active" : ""}
+            onClick={() => setRightPanelMode("details")}
+          >
             <Code2 size={15} />
             Details
           </button>
-          <button type="button" className={rightPanelMode === "planning" ? "active" : ""} onClick={() => setRightPanelMode("planning")}>
+          <button
+            type="button"
+            role="tab"
+            id="right-panel-planning-tab"
+            aria-controls="right-panel-planning"
+            aria-selected={rightPanelMode === "planning"}
+            className={rightPanelMode === "planning" ? "active" : ""}
+            onClick={() => setRightPanelMode("planning")}
+          >
             <MessageSquare size={15} />
             Planning
           </button>
         </div>
         {rightPanelMode === "details" ? (
-          <>
+          <div id="right-panel-details" role="tabpanel" aria-labelledby="right-panel-details-tab">
             <CodingWorkflowPanel
               workflow={codingWorkflow}
+              error={showWorkflowError ? error : null}
               modeOverrides={workflowModeOverrides}
               executionPolicy={workflowExecutionPolicy}
               previewDirty={workflowPreviewDirty}
@@ -582,18 +610,20 @@ export function AppShell({
               onUpdateEdgeTags={onUpdateEdgeTags}
               onUpdateBoundaryTags={onUpdateBoundaryTags}
             />
-          </>
+          </div>
         ) : (
-          <PlanningPanel
-            selectedNodeName={selectedDetail?.node.name ?? null}
-            agentRuns={agentRuns}
-            agentBusy={agentBusy}
-            applyingRunIds={applyingRunIds}
-            gitStatus={gitStatus}
-            onRunPlanning={onRunPlanning}
-            onApplyPlanningPatch={onApplyPlanningPatch}
-            onRunReview={onRunReview}
-          />
+          <div id="right-panel-planning" role="tabpanel" aria-labelledby="right-panel-planning-tab">
+            <PlanningPanel
+              selectedNodeName={selectedDetail?.node.name ?? null}
+              agentRuns={agentRuns}
+              agentBusy={agentBusy}
+              applyingRunIds={applyingRunIds}
+              gitStatus={gitStatus}
+              onRunPlanning={onRunPlanning}
+              onApplyPlanningPatch={onApplyPlanningPatch}
+              onRunReview={onRunReview}
+            />
+          </div>
         )}
       </aside>
     </div>
@@ -609,6 +639,7 @@ const MAX_RIGHT_PANEL_WIDTH = 640;
 
 type CodingWorkflowPanelProps = {
   workflow: CodingWorkflow | null;
+  error: string | null;
   modeOverrides: Record<string, CodingAgentMode>;
   executionPolicy: CodingWorkflowExecutionPolicy;
   previewDirty: boolean;
@@ -629,6 +660,7 @@ const WORKFLOW_PAGE_SIZE = 25;
 
 function CodingWorkflowPanel({
   workflow,
+  error,
   modeOverrides,
   executionPolicy,
   previewDirty,
@@ -672,16 +704,19 @@ function CodingWorkflowPanel({
       <div className="coding-workflow-header">
         <div>
           <strong>Layered coding</strong>
-          <span>{workflow.scopeName} · {workflow.status} · layer {workflow.currentLayer + 1}</span>
+          <span>{workflow.scopeName} · {codingWorkflowStatusLabel(workflow.status, canApplyCurrentLayer)} · layer {workflow.currentLayer + 1}</span>
         </div>
         <Button isIconOnly size="sm" variant="ghost" aria-label="Close coding workflow" onPress={onClose}>
-          <Square size={14} />
+          <X size={14} />
         </Button>
       </div>
+      {error ? <div className="coding-workflow-error" role="alert">{error}</div> : null}
       <p>{workflow.summary}</p>
       <div className="coding-workflow-progress" aria-live="polite">
         <progress max={Math.max(1, workflow.items.length)} value={completedItems} aria-label="Workflow completion" />
-        <span>{completedItems}/{workflow.items.length} units · {orchestration?.partitioning?.cutRelationshipEdges ?? 0} cut edges · {orchestration?.interfaceContracts.length ?? 0} contracts</span>
+        <span>
+          {completedItems}/{workflow.items.length} {workflow.items.length === 1 ? "unit" : "units"} · {countLabel(orchestration?.partitioning?.cutRelationshipEdges ?? 0, "cut edge")} · {countLabel(orchestration?.interfaceContracts.length ?? 0, "contract")}
+        </span>
       </div>
       {orchestration ? (
         <div className="coding-workflow-policy" aria-label="Workflow execution limits">
@@ -746,7 +781,7 @@ function CodingWorkflowPanel({
             ) : null}
             <div>
               <strong>{unit?.title ?? item.nodeName}</strong>
-              <span>Wave {item.layerIndex + 1} · {item.nodeKind} · <b>{item.status}</b></span>
+              <span>Wave {item.layerIndex + 1} · {item.nodeKind} · <b>{formatWorkflowStatus(item.status)}</b></span>
               <small>{unit?.objective ?? item.objective ?? item.modeReason}</small>
               {blockingDependencies.length > 0 ? <small className="workflow-blocker">Blocked by {blockingDependencies.join(", ")}</small> : null}
               <details>
@@ -775,7 +810,7 @@ function CodingWorkflowPanel({
                 </option>
               ))}
             </select>
-            {workflow.status !== "preview" && !["applied", "skipped", "cancelled"].includes(item.status) ? (
+            {workflow.status !== "preview" && ["blocked", "failed"].includes(item.status) ? (
               <div className="coding-workflow-item-actions">
                 <button type="button" disabled={agentBusy} onClick={() => onControl("retry", item.id)}>Retry</button>
                 <button type="button" disabled={agentBusy || item.selectedMode === "large"} onClick={() => onControl("escalate", item.id)}>Escalate</button>
@@ -798,7 +833,7 @@ function CodingWorkflowPanel({
           <summary>Interface contracts ({orchestration.interfaceContracts.length})</summary>
           {orchestration.interfaceContracts.map((contract) => (
             <div key={contract.id} className={`workflow-contract status-${contract.status}`}>
-              <strong>{contract.contractKind} · {contract.status}</strong>
+              <strong>{formatWorkflowStatus(contract.contractKind)} · {formatWorkflowStatus(contract.status)}</strong>
               <span>{contract.producerWorkUnitId} → {contract.consumerWorkUnitId}</span>
               <small>{contract.proposed?.summary ?? contract.baseline.summary}</small>
             </div>
@@ -821,12 +856,15 @@ function CodingWorkflowPanel({
           <summary>Integration checks ({workflow.integrationChecks.length})</summary>
           {workflow.integrationChecks.map((check) => (
             <div key={check.id} className={`workflow-check status-${check.status}`}>
-              <strong>{check.checkKind}</strong>
-              <span>{check.status}</span>
+              <strong>{integrationCheckLabel(check.checkKind)}</strong>
+              <span>{formatWorkflowStatus(check.status)}</span>
               {check.status !== "passed" ? <pre>{JSON.stringify(check.diagnostics, null, 2)}</pre> : null}
             </div>
           ))}
         </details>
+      ) : null}
+      {canApplyCurrentLayer ? (
+        <p className="coding-workflow-next-step">Proposals are ready. Inspect their evidence, then integrate to validate or apply the layer to validate and write it.</p>
       ) : null}
       <div className="coding-workflow-actions">
         {workflow.status === "preview" ? (
@@ -856,6 +894,32 @@ function CodingWorkflowPanel({
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+function codingWorkflowStatusLabel(status: CodingWorkflow["status"], readyForReview: boolean): string {
+  return readyForReview ? "ready for review" : formatWorkflowStatus(status);
+}
+
+function formatWorkflowStatus(status: string): string {
+  const label = status.replaceAll("_", " ");
+  return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+}
+
+function countLabel(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function integrationCheckLabel(checkKind: string): string {
+  const labels: Record<string, string> = {
+    actual_write_set: "Actual changes",
+    write_authorization: "Write authorization",
+    stale_revision: "Source freshness",
+    overlap_conflict: "Edit conflicts",
+    interface_contract: "Interface contracts",
+    combined_patch: "Combined patch",
+    targeted_checks: "Targeted checks"
+  };
+  return labels[checkKind] ?? formatWorkflowStatus(checkKind);
 }
 
 function filterHierarchy(nodes: HierarchyNode[], query: string): HierarchyNode[] {
@@ -904,7 +968,15 @@ function PlanningPanel({
   const [draft, setDraft] = useState("");
   const planningRuns = agentRuns.filter((run) => run.agentKind === "planning");
   const activityRuns = agentRuns.filter((run) => run.agentKind !== "planning");
-  const latestCodingRun = activityRuns.find((run) => run.agentKind === "coding" && run.status === "succeeded");
+  const reviewTargets = new Map(
+    activityRuns
+      .filter((run) => run.agentKind === "review")
+      .map((run) => [reviewTargetRunId(run), run] as const)
+      .filter((entry): entry is [string, AgentRun] => Boolean(entry[0]))
+  );
+  const latestCodingRun = activityRuns.find(
+    (run) => run.agentKind === "coding" && run.status === "succeeded" && !reviewTargets.has(run.id)
+  );
   const reviewRunning = activityRuns.some((run) => run.agentKind === "review" && (run.status === "queued" || run.status === "running"));
   const canSubmit = draft.trim().length > 0;
 
@@ -948,15 +1020,20 @@ function PlanningPanel({
           const applying = applyingRunIds.includes(run.id);
           const canApply = run.status === "succeeded" && operationCount > 0 && run.appliedGraphRevision === null;
           return (
-            <article className={`agent-ticket-card ${run.status} ${run.appliedGraphRevision !== null ? "applied" : ""}`} key={run.id}>
+            <article
+              className={`agent-ticket-card ${run.status} ${run.appliedGraphRevision !== null ? "applied" : ""}`}
+              aria-busy={run.status === "queued" || run.status === "running"}
+              aria-labelledby={`agent-run-${run.id}-title`}
+              key={run.id}
+            >
               <div className="agent-ticket-topline">
-                <strong>{run.prompt || "Planning ticket"}</strong>
+                <strong id={`agent-run-${run.id}-title`} title={run.prompt || "Planning ticket"}>{run.prompt || "Planning ticket"}</strong>
                 <span className={`run-status-badge ${ticketStatusClass(run)}`}>
                   {ticketStatusIcon(run)}
                   {ticketStatusLabel(run)}
                 </span>
               </div>
-              <p>{run.response || run.error || "Queued."}</p>
+              <p>{agentRunSummary(run)}</p>
               <div className="agent-ticket-meta">
                 <span>{operationCount} patch{operationCount === 1 ? "" : "es"}</span>
                 <span>base r{run.baseGraphRevision}</span>
@@ -968,10 +1045,11 @@ function PlanningPanel({
                   <span>{run.conflictReason}</span>
                 </div>
               ) : null}
+              {run.response || run.diff ? <AgentRunDetails run={run} /> : null}
               {canApply ? (
                 <Button size="sm" variant="secondary" isDisabled={applying} onPress={() => onApplyPlanningPatch(run.id)}>
                   <GitPullRequest size={15} />
-                  {applying ? "Applying" : "Apply"}
+                  {applying ? "Applying graph patch" : "Apply graph patch"}
                 </Button>
               ) : null}
             </article>
@@ -979,34 +1057,46 @@ function PlanningPanel({
         })}
       </div>
 
-      <section className="inspector-section agent-activity-section">
+      <section className="inspector-section agent-activity-section" aria-live="polite" aria-label="Agent activity">
         <h3>
           <Activity size={15} />
           Activity
         </h3>
         {activityRuns.length === 0 ? <p className="muted">No coding, review, or scanning runs yet.</p> : null}
-        {activityRuns.slice(0, 6).map((run) => (
-          <div className={`agent-activity-row ${run.status}`} key={run.id}>
+        {activityRuns.slice(0, 6).map((run) => {
+          const matchingReview = run.agentKind === "coding" ? reviewTargets.get(run.id) : null;
+          return (
+          <article
+            className={`agent-activity-row ${run.status}`}
+            aria-busy={run.status === "queued" || run.status === "running"}
+            aria-labelledby={`agent-run-${run.id}-title`}
+            key={run.id}
+          >
             <div>
-                <strong>{agentRunTitle(run)}</strong>
+              <strong id={`agent-run-${run.id}-title`}>{agentRunTitle(run)}</strong>
               <span className={`run-status-badge ${ticketStatusClass(run)}`}>
                 {ticketStatusIcon(run)}
                 {ticketStatusLabel(run)}
               </span>
             </div>
-            <p>{run.response || run.error || run.prompt || "Queued."}</p>
-            {run.agentKind === "coding" && run.status === "succeeded" ? (
+            <p>{agentRunSummary(run)}</p>
+            {run.response || run.diff ? <AgentRunDetails run={run} /> : null}
+            {run.agentKind === "coding" && run.status === "succeeded" && !matchingReview ? (
               <Button size="sm" variant="secondary" isDisabled={reviewRunning} onPress={() => onRunReview(run.id)}>
                 <GitBranch size={15} />
                 Review
               </Button>
             ) : null}
-          </div>
-        ))}
-        <Button variant="secondary" isDisabled={reviewRunning || !latestCodingRun} onPress={() => latestCodingRun && onRunReview(latestCodingRun.id)}>
-          <GitBranch size={16} />
-          Review latest
-        </Button>
+            {matchingReview ? <span className="agent-review-state"><CheckCircle2 size={14} /> Review attached</span> : null}
+          </article>
+          );
+        })}
+        {latestCodingRun ? (
+          <Button variant="secondary" isDisabled={reviewRunning} onPress={() => onRunReview(latestCodingRun.id)}>
+            <GitBranch size={16} />
+            Review latest unreviewed proposal
+          </Button>
+        ) : null}
       </section>
 
       <section className="inspector-section">
@@ -1065,12 +1155,55 @@ function ticketStatusLabel(run: AgentRun): string {
     case "running":
       return "Running";
     case "succeeded":
-      return "Ready";
+      if (run.agentKind === "planning") return "Ready to apply";
+      if (run.agentKind === "coding") return "Proposal ready";
+      if (run.agentKind === "review") return "Review complete";
+      if (run.agentKind === "scanning") return "Scan complete";
+      return "Complete";
     case "failed":
       return "Failed";
     default:
       return run.status;
   }
+}
+
+function reviewTargetRunId(run: AgentRun): string | null {
+  if (run.agentKind !== "review") return null;
+  const match = run.prompt.match(/^Review\s+(run-[^\s]+)$/);
+  return match?.[1] ?? null;
+}
+
+function agentRunSummary(run: AgentRun): string {
+  if (run.error) return run.error;
+  if (run.status === "queued" || run.status === "running") return run.status === "queued" ? "Queued." : "Running.";
+  if (run.agentKind === "planning") return run.prompt ? `Plan prepared for: ${run.prompt}` : "Planning ticket prepared.";
+  if (run.agentKind === "coding") return run.prompt ? `Proposal created for: ${run.prompt}` : "Coding proposal created.";
+  if (run.agentKind === "review") {
+    const verdict = run.response.match(/GRAPHCODE_REVIEW_VERDICT:\s*(reviewed|bugged)/i)?.[1]?.toLowerCase();
+    return verdict === "bugged" ? "Review found a likely issue in the proposal." : "Review completed for the coding proposal.";
+  }
+  return run.response || run.prompt || "Run completed.";
+}
+
+function AgentRunDetails({ run }: { run: AgentRun }) {
+  const label = run.agentKind === "coding" ? "Inspect proposal" : run.agentKind === "review" ? "Inspect review" : run.agentKind === "planning" ? "Inspect plan output" : "Inspect run output";
+  return (
+    <details className="agent-run-details">
+      <summary>{label}</summary>
+      {run.response ? (
+        <div>
+          <strong>Agent response</strong>
+          <pre>{run.response}</pre>
+        </div>
+      ) : null}
+      {run.diff ? (
+        <div>
+          <strong>Proposed diff</strong>
+          <pre>{run.diff}</pre>
+        </div>
+      ) : null}
+    </details>
+  );
 }
 
 function agentRunTitle(run: AgentRun): string {

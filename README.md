@@ -128,6 +128,8 @@ pnpm dev
 
 Open `http://127.0.0.1:5173`, click **Open workspace**, and enter the repository folder path.
 
+WSL is treated as a Linux runtime, not as native Windows. GraphCode does not launch a Windows folder picker from WSL because that can mix `C:\...` paths with Linux paths. Paste the workspace's WSL path manually instead, such as `/home/alex/project` or `/mnt/c/GitHub/project`.
+
 ### Windows PowerShell
 
 First-time setup:
@@ -308,6 +310,7 @@ Key implementation pieces:
 The same pnpm commands are intended to work on Linux, macOS, and Windows. The main differences are shell syntax, local paths, and optional native build tools for `better-sqlite3`.
 
 - Linux paths look like `/home/alex/project`.
+- WSL paths use Linux syntax, including mounted Windows folders such as `/mnt/c/GitHub/project`; only a GraphCode server started natively on Windows opens the Windows folder picker.
 - macOS paths look like `/Users/alex/project`.
 - Windows paths look like `C:\Users\Alex\project`.
 - Workspace source paths inside GraphCode are stored with forward slashes, even on Windows.

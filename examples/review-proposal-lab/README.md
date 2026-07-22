@@ -28,10 +28,12 @@ Select `calculateDiscount`, then ask:
 Fix the loyalty discount so orders under 50 never receive the discount. Keep the change scoped and update the nearby test.
 ```
 
-Then run the review agent on the resulting coding proposal.
+The coding task field is required for a function-level run. After the proposal finishes, open the Planning tab to inspect the proposed diff and its automatically attached review. You can also select the generated `Code Graph` module, preview a layered workflow, and apply the layer after its integration checks pass.
 
 ## What to Screenshot
 
 - The selected `calculateDiscount` function in the inspector.
 - The coding proposal activity row.
-- The review row showing whether the proposal was accepted or marked bugged.
+- The attached review and proposed-diff disclosure.
+- The planning ticket before and after applying its graph patch.
+- The layered workflow preview and successful integration checks.

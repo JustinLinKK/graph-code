@@ -532,26 +532,26 @@ function WorkspaceCanvasInner({
       <Panel position="top-left">
         <div className="canvas-status">
           <strong>{canvas.nodes.length}</strong>
-          <span>blocks</span>
+          <span>{canvas.nodes.length === 1 ? "block" : "blocks"}</span>
           <strong>{canvas.edges.length}</strong>
-          <span>links</span>
+          <span>{canvas.edges.length === 1 ? "link" : "links"}</span>
           <strong>{canvas.boundaries.length}</strong>
-          <span>boundaries</span>
+          <span>{canvas.boundaries.length === 1 ? "boundary" : "boundaries"}</span>
         </div>
       </Panel>
       {codingWorkflow?.orchestration ? (
         <Panel position="top-right">
           <div className="workflow-canvas-legend" aria-label="Workflow overlay legend">
             <strong>Workflow overlay</strong>
-            <span>{codingWorkflow.orchestration.workUnits.length} partitions</span>
-            <span>{codingWorkflow.orchestration.interfaceContracts.length} contracts</span>
+            <span>{codingWorkflow.orchestration.workUnits.length} {codingWorkflow.orchestration.workUnits.length === 1 ? "partition" : "partitions"}</span>
+            <span>{codingWorkflow.orchestration.interfaceContracts.length} {codingWorkflow.orchestration.interfaceContracts.length === 1 ? "contract" : "contracts"}</span>
             <span>Wave {codingWorkflow.currentLayer + 1}</span>
           </div>
         </Panel>
       ) : null}
       {drawBoundaryMode ? (
         <Panel position="top-center">
-          <div className="canvas-draw-status">
+          <div className="canvas-draw-status" role="status" aria-live="polite">
             <span>{draftRect ? "Click to finish boundary" : "Click to start boundary"}</span>
             <button type="button" className="canvas-draw-cancel" onClick={handleCancelDrawClick}>
               Cancel
@@ -561,7 +561,7 @@ function WorkspaceCanvasInner({
       ) : null}
       {drawEdgeMode ? (
         <Panel position="top-center">
-          <div className="canvas-draw-status">
+          <div className="canvas-draw-status" role="status" aria-live="polite">
             <span>{edgeDraftSourceId ? "Select target block" : "Select source block"}</span>
             <button type="button" className="canvas-draw-cancel" onClick={handleCancelDrawClick}>
               Cancel
