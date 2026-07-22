@@ -1,12 +1,16 @@
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
-import { resolveDbPath, resolveRepoRoot, resolveServerHost, resolveServerPort } from "./config";
+import { resolveAgentFeatureFlags, resolveDbPath, resolveRepoRoot, resolveServerHost, resolveServerPort, type AgentFeatureFlags } from "./config";
 import { registerApiRoutes } from "./routes";
 import { WorkspaceRuntime } from "./workspace";
 
-export async function buildServer(options: { dbPath?: string; seedSelf?: boolean; selfRootPath?: string } = {}) {
-  const runtime = new WorkspaceRuntime(options.dbPath ?? resolveDbPath(), options.selfRootPath ?? resolveRepoRoot());
+export async function buildServer(options: { dbPath?: string; seedSelf?: boolean; selfRootPath?: string; agentFeatureFlags?: AgentFeatureFlags } = {}) {
+  const runtime = new WorkspaceRuntime(
+    options.dbPath ?? resolveDbPath(),
+    options.selfRootPath ?? resolveRepoRoot(),
+    options.agentFeatureFlags ?? resolveAgentFeatureFlags()
+  );
   if (options.seedSelf) {
     runtime.seedSelfGraph();
   }

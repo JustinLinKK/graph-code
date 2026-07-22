@@ -5,6 +5,8 @@ import type {
   CanvasGraph,
   CodingAgentMode,
   CodingWorkflow,
+  CodingWorkflowExecutionPolicy,
+  CodingWorkflowPartitionConstraints,
   CreateCustomBlockType,
   CustomBlockType,
   EdgeMutation,
@@ -15,6 +17,7 @@ import type {
   GraphNodeKind,
   GraphTag,
   HierarchyNode,
+  IndexState,
   NodeDetail,
   NodeTypeStyle,
   NodeMutation,
@@ -31,8 +34,11 @@ import type {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   applyAgentGraphPatch,
+  applyCodeProposal,
   applyCodingWorkflowLayer,
   autoLayoutCanvas,
+  cancelCurrentIndexRun,
+  controlCodingWorkflow,
   createBoundary,
   createCustomBlockType,
   createEdge,
@@ -40,13 +46,16 @@ import {
   deleteBoundary,
   deleteEdge,
   getCanvasGraph,
+  getCodingWorkflow,
   getHierarchy,
+  getIndexState,
   getGitStatus,
   getNodeDetail,
   getWorkspaceSettings,
   listAgentRuns,
   listProjects,
   openWorkspace,
+  pickWorkspaceFolder,
   previewCodingWorkflow,
   disconnectGithub,
   pollGithubDeviceFlow,
@@ -90,6 +99,7 @@ export default function App() {
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [hierarchy, setHierarchy] = useState<HierarchyNode[]>([]);
   const [canvas, setCanvas] = useState<CanvasGraph | null>(null);
+  const [indexState, setIndexState] = useState<IndexState | null>(null);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
   const [selectedBoundaryId, setSelectedBoundaryId] = useState<string | null>(null);
@@ -100,6 +110,7 @@ export default function App() {
   const [workspaceMissingPath, setWorkspaceMissingPath] = useState<string | null>(null);
   const [workspaceInitializationStatus, setWorkspaceInitializationStatus] = useState<"missing_graphcode" | "empty_graphcode" | null>(null);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  const [workspacePicking, setWorkspacePicking] = useState(false);
   const [blockDialogOpen, setBlockDialogOpen] = useState(false);
   const [blockDialogMode, setBlockDialogMode] = useState<"create" | "edit">("create");
   const [editingDetail, setEditingDetail] = useState<NodeDetail | null>(null);
@@ -124,6 +135,17 @@ export default function App() {
   const [applyingRunIds, setApplyingRunIds] = useState<string[]>([]);
   const [codingWorkflow, setCodingWorkflow] = useState<CodingWorkflow | null>(null);
   const [workflowModeOverrides, setWorkflowModeOverrides] = useState<Record<string, CodingAgentMode>>({});
+  const [workflowPartitionConstraints, setWorkflowPartitionConstraints] = useState<CodingWorkflowPartitionConstraints>({
+    keepTogetherNodeGroups: [],
+    separateNodePairs: [],
+    approvedIgnoredEdges: []
+  });
+  const [workflowExecutionPolicy, setWorkflowExecutionPolicy] = useState<CodingWorkflowExecutionPolicy>({
+    maximumConcurrency: 4,
+    maxEstimatedCost: null,
+    currency: "USD"
+  });
+  const [workflowPreviewDirty, setWorkflowPreviewDirty] = useState(false);
   const [gitStatus, setGitStatus] = useState("");
   const [restoreViewport, setRestoreViewport] = useState<CanvasViewport | null | undefined>(undefined);
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
@@ -134,6 +156,14 @@ export default function App() {
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
     [projects, selectedProjectId]
+  );
+  const scanUsesCodexProvider = useMemo(
+    () =>
+      Boolean(
+        settings?.agents.some((agent) => agent.agentKind === "scanning" && agent.provider === "codex") ||
+          settings?.scanningAgents?.some((agent) => agent.provider === "codex")
+      ),
+    [settings]
   );
   const selectedEdge = useMemo(() => canvas?.edges.find((edge) => edge.id === selectedEdgeId) ?? null, [canvas?.edges, selectedEdgeId]);
   const selectedBoundary = useMemo(
@@ -154,15 +184,17 @@ export default function App() {
     setError(null);
     setRestoreViewport(undefined);
     try {
-      const [nextHierarchy, nextCanvas] = await Promise.all([
+      const [nextHierarchy, nextCanvas, nextIndexState] = await Promise.all([
         getHierarchy(projectId),
         getCanvasGraph(projectId, {
           rootNodeId,
           includeAttachments: true
-        })
+        }),
+        getIndexState(projectId)
       ]);
       setHierarchy(nextHierarchy);
       setCanvas(nextCanvas);
+      setIndexState(nextIndexState);
       rememberCanvasScope(projectId, nextCanvas.scopeNodeId);
       setRestoreViewport(getStoredCanvasViewport(projectId, nextCanvas.scopeNodeId));
       const fallbackSelected = selectedNodeOverride !== undefined ? selectedNodeOverride : nextCanvas.scopeNodeId ?? nextCanvas.nodes[0]?.id ?? null;
@@ -193,6 +225,23 @@ export default function App() {
     }
   }, []);
 
+  const clearLoadedProject = useCallback(() => {
+    setSelectedProjectId(null);
+    setHierarchy([]);
+    setCanvas(null);
+    setIndexState(null);
+    setSelectedNodeId(null);
+    setSelectedEdgeId(null);
+    setSelectedBoundaryId(null);
+    setSelectedDetail(null);
+    setSettings(null);
+    setAgentRuns([]);
+    setGitStatus("");
+    setRestoreViewport(null);
+    undoStackRef.current = [];
+    setUndoStack([]);
+  }, []);
+
   const bootstrap = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -200,34 +249,25 @@ export default function App() {
       let nextProjects = await listProjects();
       setProjects(nextProjects);
       const storedProjectId = getStoredCanvasProjectId();
-      const firstProject = nextProjects.find((project) => project.id === storedProjectId) ?? nextProjects[0] ?? null;
-      setSelectedProjectId(firstProject?.id ?? null);
+      const firstProject = storedProjectId ? nextProjects.find((project) => project.id === storedProjectId) ?? null : null;
       undoStackRef.current = [];
       setUndoStack([]);
       if (firstProject) {
+        setSelectedProjectId(firstProject.id);
         const storedScopeNodeId = getStoredCanvasScope(firstProject.id);
         const loaded = await loadProject(firstProject.id, storedScopeNodeId ?? undefined);
         if (!loaded && storedScopeNodeId) {
           await loadProject(firstProject.id);
         }
       } else {
-        setHierarchy([]);
-        setCanvas(null);
-        setSelectedNodeId(null);
-        setSelectedEdgeId(null);
-        setSelectedBoundaryId(null);
-        setSelectedDetail(null);
-        setSettings(null);
-        setAgentRuns([]);
-        setGitStatus("");
-        setRestoreViewport(null);
+        clearLoadedProject();
       }
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : "Failed to connect to the local server.");
     } finally {
       setLoading(false);
     }
-  }, [loadProject]);
+  }, [clearLoadedProject, loadProject]);
 
   useEffect(() => {
     void bootstrap();
@@ -327,10 +367,14 @@ export default function App() {
         setWorkspaceDialogOpen(false);
         setProjects([result.project]);
         setSelectedProjectId(result.project.id);
-        rememberCanvasScope(result.project.id, null);
+        const storedScopeNodeId = getStoredCanvasScope(result.project.id);
+        rememberCanvasScope(result.project.id, storedScopeNodeId ?? null);
         undoStackRef.current = [];
         setUndoStack([]);
-        await loadProject(result.project.id);
+        const loaded = await loadProject(result.project.id, storedScopeNodeId ?? undefined);
+        if (!loaded && storedScopeNodeId) {
+          await loadProject(result.project.id);
+        }
       } catch (loadError) {
         setWorkspaceError(loadError instanceof Error ? loadError.message : "Failed to open workspace.");
       } finally {
@@ -339,6 +383,37 @@ export default function App() {
     },
     [loadProject]
   );
+
+  const handlePickWorkspaceFolder = useCallback(async (): Promise<string | null> => {
+    setWorkspacePicking(true);
+    setWorkspaceError(null);
+    try {
+      const result = await pickWorkspaceFolder();
+      if (result.selected && result.path) {
+        return result.path;
+      }
+      if (!result.supported && result.message) {
+        setWorkspaceError(result.message);
+      }
+      return null;
+    } catch (pickError) {
+      setWorkspaceError(pickError instanceof Error ? pickError.message : "Failed to open the folder picker.");
+      return null;
+    } finally {
+      setWorkspacePicking(false);
+    }
+  }, []);
+
+  const handleOpenWorkspacePicker = useCallback(async () => {
+    setWorkspaceDialogOpen(true);
+    setWorkspaceMissingPath(null);
+    setWorkspaceInitializationStatus(null);
+    setWorkspaceError(null);
+    const rootPath = await handlePickWorkspaceFolder();
+    if (rootPath) {
+      await handleOpenWorkspaceRequest(rootPath, false);
+    }
+  }, [handleOpenWorkspaceRequest, handlePickWorkspaceFolder]);
 
   const handleAddNode = useCallback(() => {
     setBlockDialogMode("create");
@@ -1205,9 +1280,14 @@ export default function App() {
     if (!selectedProjectId) {
       return;
     }
-    const [nextRuns, nextGitStatus] = await Promise.all([listAgentRuns(selectedProjectId), getGitStatus(selectedProjectId).catch(() => ({ status: "" }))]);
+    const [nextRuns, nextGitStatus, nextIndexState] = await Promise.all([
+      listAgentRuns(selectedProjectId),
+      getGitStatus(selectedProjectId).catch(() => ({ status: "" })),
+      getIndexState(selectedProjectId)
+    ]);
     setAgentRuns(nextRuns);
     setGitStatus(nextGitStatus.status);
+    setIndexState(nextIndexState);
 
     // Auto-refresh canvas when a background scanning agent completes,
     // so newly scanned nodes appear without a manual refresh.
@@ -1325,8 +1405,26 @@ export default function App() {
     [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]
   );
 
+  const handleImplementCodeProposal = useCallback(
+    async (runId: string) => {
+      if (!selectedProjectId) return;
+      setApplyingRunIds((current) => [...current, runId]);
+      setError(null);
+      try {
+        const run = await applyCodeProposal({ projectId: selectedProjectId, runId });
+        setAgentRuns((current) => current.map((item) => (item.id === run.id ? run : item)));
+        await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId);
+      } catch (agentError) {
+        setError(agentError instanceof Error ? agentError.message : "Failed to implement coding proposal.");
+      } finally {
+        setApplyingRunIds((current) => current.filter((id) => id !== runId));
+      }
+    },
+    [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProjectId]
+  );
+
   const handleStartCode = useCallback(
-    async (nodeId: string, mode: CodingAgentMode = "medium") => {
+    async (nodeId: string, mode: CodingAgentMode = "medium", prompt?: string) => {
       if (!selectedProjectId) {
         return;
       }
@@ -1341,13 +1439,24 @@ export default function App() {
           });
           setCodingWorkflow(workflow);
           setWorkflowModeOverrides(Object.fromEntries(workflow.items.map((item) => [item.nodeId, item.selectedMode])));
+          setWorkflowPartitionConstraints(workflow.orchestration?.partitionConstraints ?? {
+            keepTogetherNodeGroups: [],
+            separateNodePairs: [],
+            approvedIgnoredEdges: []
+          });
+          setWorkflowExecutionPolicy(workflow.orchestration?.executionPolicy ?? {
+            maximumConcurrency: 4,
+            maxEstimatedCost: null,
+            currency: "USD"
+          });
+          setWorkflowPreviewDirty(false);
           return;
         }
         await runCodingAgent({
           projectId: selectedProjectId,
           nodeId,
           mode,
-          prompt: detail.node.code.context
+          prompt: prompt?.trim() || detail.node.code.context
         });
         await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, nodeId);
       } catch (agentError) {
@@ -1369,6 +1478,83 @@ export default function App() {
           }
         : current
     );
+    setWorkflowPreviewDirty(true);
+  }, []);
+
+  const revalidateCodingWorkflow = useCallback(
+    async (
+      partitionConstraints = workflowPartitionConstraints,
+      executionPolicy = workflowExecutionPolicy
+    ) => {
+      if (!selectedProjectId || !codingWorkflow) return;
+      setAgentBusy(true);
+      setError(null);
+      try {
+        const workflow = await previewCodingWorkflow({
+          projectId: selectedProjectId,
+          scopeNodeId: codingWorkflow.scopeNodeId,
+          modeOverrides: Object.entries(workflowModeOverrides).map(([nodeId, mode]) => ({ nodeId, mode })),
+          partitionConstraints,
+          executionPolicy
+        });
+        setCodingWorkflow(workflow);
+        setWorkflowModeOverrides(Object.fromEntries(workflow.items.map((item) => [item.nodeId, item.selectedMode])));
+        setWorkflowPartitionConstraints(workflow.orchestration?.partitionConstraints ?? partitionConstraints);
+        setWorkflowExecutionPolicy(workflow.orchestration?.executionPolicy ?? executionPolicy);
+        setWorkflowPreviewDirty(false);
+      } catch (workflowError) {
+        setError(workflowError instanceof Error ? workflowError.message : "Workflow preview validation failed.");
+      } finally {
+        setAgentBusy(false);
+      }
+    }, [codingWorkflow, selectedProjectId, workflowExecutionPolicy, workflowModeOverrides, workflowPartitionConstraints]
+  );
+
+  const handleMergeWorkflowUnits = useCallback(
+    (workUnitIds: string[]) => {
+      if (!codingWorkflow?.orchestration || workUnitIds.length < 2) return;
+      const selected = codingWorkflow.orchestration.workUnits.filter((unit) => workUnitIds.includes(unit.id));
+      const nodeGroup = [...new Set(selected.flatMap((unit) => unit.ownedNodeIds))];
+      if (nodeGroup.length < 2) return;
+      const next = {
+        ...workflowPartitionConstraints,
+        keepTogetherNodeGroups: [...workflowPartitionConstraints.keepTogetherNodeGroups, nodeGroup]
+      };
+      setWorkflowPartitionConstraints(next);
+      void revalidateCodingWorkflow(next, workflowExecutionPolicy);
+    }, [codingWorkflow, revalidateCodingWorkflow, workflowExecutionPolicy, workflowPartitionConstraints]
+  );
+
+  const handleSplitWorkflowUnit = useCallback(
+    (workUnitId: string) => {
+      const unit = codingWorkflow?.orchestration?.workUnits.find((candidate) => candidate.id === workUnitId);
+      if (!unit || unit.ownedNodeIds.length < 2) return;
+      const next = {
+        ...workflowPartitionConstraints,
+        separateNodePairs: [...workflowPartitionConstraints.separateNodePairs, [unit.ownedNodeIds[0], unit.ownedNodeIds[1]] as [string, string]]
+      };
+      setWorkflowPartitionConstraints(next);
+      void revalidateCodingWorkflow(next, workflowExecutionPolicy);
+    }, [codingWorkflow, revalidateCodingWorkflow, workflowExecutionPolicy, workflowPartitionConstraints]
+  );
+
+  const handleApproveIgnoredWorkflowEdge = useCallback(
+    (edgeId: string) => {
+      const next = {
+        ...workflowPartitionConstraints,
+        approvedIgnoredEdges: [
+          ...workflowPartitionConstraints.approvedIgnoredEdges.filter((edge) => edge.edgeId !== edgeId),
+          { edgeId, reason: "User approved this informational boundary omission in the workflow preview.", approvedBy: "user" as const, approvalReference: `ui:${Date.now()}` }
+        ]
+      };
+      setWorkflowPartitionConstraints(next);
+      void revalidateCodingWorkflow(next, workflowExecutionPolicy);
+    }, [revalidateCodingWorkflow, workflowExecutionPolicy, workflowPartitionConstraints]
+  );
+
+  const handleWorkflowExecutionPolicyChange = useCallback((policy: CodingWorkflowExecutionPolicy) => {
+    setWorkflowExecutionPolicy(policy);
+    setWorkflowPreviewDirty(true);
   }, []);
 
   const handleStartCodingWorkflow = useCallback(async () => {
@@ -1381,9 +1567,13 @@ export default function App() {
       const workflow = await startCodingWorkflow({
         projectId: selectedProjectId,
         scopeNodeId: codingWorkflow.scopeNodeId,
-        modeOverrides: Object.entries(workflowModeOverrides).map(([nodeId, mode]) => ({ nodeId, mode }))
+        modeOverrides: Object.entries(workflowModeOverrides).map(([nodeId, mode]) => ({ nodeId, mode })),
+        partitionConstraints: workflowPartitionConstraints,
+        executionPolicy: workflowExecutionPolicy,
+        background: true
       });
       setCodingWorkflow(workflow);
+      setWorkflowPreviewDirty(false);
       const [nextRuns, nextGitStatus] = await Promise.all([listAgentRuns(selectedProjectId), getGitStatus(selectedProjectId).catch(() => ({ status: "" }))]);
       setAgentRuns(nextRuns);
       setGitStatus(nextGitStatus.status);
@@ -1393,7 +1583,23 @@ export default function App() {
     } finally {
       setAgentBusy(false);
     }
-  }, [canvas?.scopeNodeId, codingWorkflow, loadProject, selectedNodeId, selectedProjectId, workflowModeOverrides]);
+  }, [canvas?.scopeNodeId, codingWorkflow, loadProject, selectedNodeId, selectedProjectId, workflowExecutionPolicy, workflowModeOverrides, workflowPartitionConstraints]);
+
+  const handleCodingWorkflowControl = useCallback(
+    async (action: "pause" | "resume" | "cancel" | "retry" | "escalate" | "skip" | "integrate", itemId?: string) => {
+      if (!selectedProjectId || !codingWorkflow) return;
+      setAgentBusy(true);
+      setError(null);
+      try {
+        const workflow = await controlCodingWorkflow({ projectId: selectedProjectId, workflowId: codingWorkflow.id, action, itemId });
+        setCodingWorkflow(workflow);
+      } catch (workflowError) {
+        setError(workflowError instanceof Error ? workflowError.message : `Workflow ${action} failed.`);
+      } finally {
+        setAgentBusy(false);
+      }
+    }, [codingWorkflow, selectedProjectId]
+  );
 
   const handleApplyCodingWorkflowLayer = useCallback(
     async (workflowId: string, layerIndex: number) => {
@@ -1411,6 +1617,11 @@ export default function App() {
         await loadProject(selectedProjectId, canvas?.scopeNodeId ?? null, selectedNodeId ?? undefined);
       } catch (workflowError) {
         setError(workflowError instanceof Error ? workflowError.message : "Applying coding workflow layer failed.");
+        try {
+          setCodingWorkflow(await getCodingWorkflow(selectedProjectId, workflowId));
+        } catch {
+          // Keep the existing workflow preview when refreshed integration evidence is unavailable.
+        }
       } finally {
         setAgentBusy(false);
       }
@@ -1455,6 +1666,17 @@ export default function App() {
     }
   }, [canvas?.scopeNodeId, loadProject, selectedNodeId, selectedProject?.description, selectedProject?.scanningInstructions, selectedProjectId]);
 
+  const handleCancelIndex = useCallback(async () => {
+    if (!selectedProjectId) {
+      return;
+    }
+    try {
+      setIndexState(await cancelCurrentIndexRun(selectedProjectId));
+    } catch (cancelError) {
+      setError(cancelError instanceof Error ? cancelError.message : "Failed to cancel indexing.");
+    }
+  }, [selectedProjectId]);
+
   useEffect(() => {
     void refreshAgentState();
   }, [refreshAgentState]);
@@ -1470,14 +1692,34 @@ export default function App() {
   }, [agentRuns, refreshAgentState]);
 
   useEffect(() => {
+    if (!selectedProjectId || !codingWorkflow || codingWorkflow.status !== "running") {
+      return;
+    }
+    let active = true;
+    const refreshWorkflow = async () => {
+      try {
+        const workflow = await getCodingWorkflow(selectedProjectId, codingWorkflow.id);
+        if (active) setCodingWorkflow(workflow);
+      } catch (workflowError) {
+        if (active) setError(workflowError instanceof Error ? workflowError.message : "Failed to refresh coding workflow progress.");
+      }
+    };
+    const timer = window.setInterval(() => void refreshWorkflow(), 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [codingWorkflow?.id, codingWorkflow?.status, selectedProjectId]);
+
+  useEffect(() => {
     document.documentElement.dataset.theme = settings?.general.theme ?? "system";
   }, [settings?.general.theme]);
 
   return (
     <>
       <AppShell
-        projects={projects}
         selectedProject={selectedProject}
+        indexState={indexState}
         hierarchy={hierarchy}
         canvas={canvas}
         theme={settings?.general.theme ?? "system"}
@@ -1498,6 +1740,8 @@ export default function App() {
         applyingRunIds={applyingRunIds}
         codingWorkflow={codingWorkflow}
         workflowModeOverrides={workflowModeOverrides}
+        workflowExecutionPolicy={workflowExecutionPolicy}
+        workflowPreviewDirty={workflowPreviewDirty}
         gitStatus={gitStatus}
         onSelectNode={handleInspectNode}
         onOpenNode={handleOpenNode}
@@ -1512,10 +1756,7 @@ export default function App() {
         onBoundaryDraft={handleBoundaryDraft}
         onEdgeDraft={handleEdgeDraft}
         onCancelDraw={handleCancelDraw}
-        onOpenWorkspace={() => {
-          setWorkspaceDialogOpen(true);
-          setWorkspaceError(null);
-        }}
+        onOpenWorkspace={() => void handleOpenWorkspacePicker()}
         onAddBlock={handleAddNode}
         onDrawEdge={handleAddEdge}
         onDrawBoundary={handleDrawBoundary}
@@ -1537,13 +1778,21 @@ export default function App() {
         onOpenSettings={() => setSettingsOpen(true)}
         onRunPlanning={handleRunPlanning}
         onApplyPlanningPatch={handleApplyPlanningPatch}
+        onImplementCodeProposal={handleImplementCodeProposal}
         onStartCode={handleStartCode}
         onWorkflowModeChange={handleWorkflowModeChange}
+        onWorkflowExecutionPolicyChange={handleWorkflowExecutionPolicyChange}
+        onRevalidateCodingWorkflow={() => void revalidateCodingWorkflow()}
+        onMergeWorkflowUnits={handleMergeWorkflowUnits}
+        onSplitWorkflowUnit={handleSplitWorkflowUnit}
+        onApproveIgnoredWorkflowEdge={handleApproveIgnoredWorkflowEdge}
+        onCodingWorkflowControl={(action, itemId) => void handleCodingWorkflowControl(action, itemId)}
         onStartCodingWorkflow={() => void handleStartCodingWorkflow()}
         onApplyCodingWorkflowLayer={(workflowId, layerIndex) => void handleApplyCodingWorkflowLayer(workflowId, layerIndex)}
         onCloseCodingWorkflow={() => setCodingWorkflow(null)}
         onRunReview={handleRunReview}
         onRunScanning={handleRunScanning}
+        onCancelIndex={() => void handleCancelIndex()}
       />
       {settingsOpen && selectedProject && settings ? (
         <SettingsPage
@@ -1561,6 +1810,7 @@ export default function App() {
       <WorkspaceDialog
         open={workspaceDialogOpen}
         loading={loading}
+        picking={workspacePicking}
         missingPath={workspaceMissingPath}
         error={workspaceError}
         onClose={() => {
@@ -1569,10 +1819,12 @@ export default function App() {
           setWorkspaceInitializationStatus(null);
           setWorkspaceError(null);
         }}
+        onPickFolder={handlePickWorkspaceFolder}
         onOpen={(rootPath) => void handleOpenWorkspaceRequest(rootPath, false)}
         initializationStatus={workspaceInitializationStatus}
         onCreateBlank={(rootPath, initialization) => void handleOpenWorkspaceRequest(rootPath, true, initialization, "blank")}
         onCreateAndScan={(rootPath, initialization) => void handleOpenWorkspaceRequest(rootPath, true, initialization, "scan")}
+        showCodexScanPromptOption={scanUsesCodexProvider}
       />
       <BlockEditorDialog
         open={blockDialogOpen}

@@ -141,7 +141,7 @@ function BoundaryGroupRow({
         </span>
         <span className="tree-text">
           <span>{boundary.name}</span>
-          <small>{boundary.memberNodeIds.length} blocks</small>
+          <small>{boundary.memberNodeIds.length} {boundary.memberNodeIds.length === 1 ? "block" : "blocks"}</small>
         </span>
       </button>
     </div>

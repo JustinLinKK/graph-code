@@ -100,7 +100,9 @@ The current prototype emphasizes three ideas:
 
 ## Quick Start
 
-GraphCode is a local pnpm workspace. Use Node.js 24 or newer with Corepack available.
+GraphCode is a local pnpm workspace. Use Node.js 22 LTS or newer with Corepack available, and run Node, pnpm, Git, and GraphCode from the same OS shell. A normal first launch starts blank; click **Open workspace** in the app and choose the repository folder you want GraphCode to manage.
+
+### macOS
 
 ```bash
 git clone <repository-url>
@@ -108,21 +110,113 @@ cd graph-code
 corepack enable
 corepack prepare pnpm@10.33.0 --activate
 pnpm install
-pnpm seed
 pnpm dev
 ```
 
-Open:
+Open `http://127.0.0.1:5173`, click **Open workspace**, and choose a repository folder. The web app runs through Vite on port `5173`; the local Fastify API runs on `127.0.0.1:3010`, and Vite proxies `/api` requests to the server.
 
-```text
-http://127.0.0.1:5173
+### Linux
+
+```bash
+git clone <repository-url>
+cd graph-code
+corepack enable
+corepack prepare pnpm@10.33.0 --activate
+pnpm install
+pnpm dev
 ```
 
-The web app runs through Vite on port `5173`. The local Fastify API runs on `127.0.0.1:3010`, and Vite proxies `/api` requests to the server.
+Open `http://127.0.0.1:5173`, click **Open workspace**, and enter the repository folder path.
 
-For daily development after the database exists, run `pnpm dev` directly. Normal startup and code graph refreshes preserve saved placements for stable nodes.
+WSL is treated as a Linux runtime, not as native Windows. GraphCode does not launch a Windows folder picker from WSL because that can mix `C:\...` paths with Linux paths. Paste the workspace's WSL path manually instead, such as `/home/alex/project` or `/mnt/c/GitHub/project`.
 
-Use `pnpm seed` only for first-time setup or an intentional reset. It rebuilds the local self-repo fixture at `.graphcode/graphcode.sqlite` and erases local graph edits, saved placements, agent runs, and settings in that database.
+### Windows PowerShell
+
+First-time setup:
+
+1. Install Git for Windows.
+2. Install Node.js 22 LTS for Windows.
+3. Open a new Windows PowerShell or Windows Terminal window so the Node.js PATH update is loaded.
+4. Clone the repository and start GraphCode:
+
+```powershell
+git clone <repository-url>
+cd graph-code
+node -v
+corepack --version
+corepack enable
+corepack prepare pnpm@10.33.0 --activate
+cmd /c pnpm install
+cmd /c pnpm dev
+```
+
+Open `http://127.0.0.1:5173`, click **Open workspace**, and choose the repository folder in the folder picker.
+
+The `cmd /c pnpm ...` form intentionally uses the Corepack `pnpm.cmd` shim. It avoids Windows PowerShell's script-execution policy blocking the generated `pnpm.ps1` shim.
+
+For later runs:
+
+```powershell
+cd graph-code
+cmd /c pnpm dev
+```
+
+On every OS, keep `pnpm dev` running while using the app.
+
+For daily development after dependencies are installed, run `pnpm dev` directly on macOS/Linux or `cmd /c pnpm dev` in Windows PowerShell. Normal startup opens to a blank state until you choose a workspace; code graph refreshes preserve saved placements for stable nodes after a workspace is loaded.
+
+Use `pnpm seed` only when you intentionally want the optional self-repo demo/reset fixture. It rebuilds the local self-repo fixture at `.graphcode/graphcode.sqlite` and erases local graph edits, saved placements, agent runs, and settings in that database.
+
+## Codex Integration
+
+GraphCode uses the local account-authenticated Codex CLI for Codex agents. Install and sign in to Codex from the same OS shell you use to start GraphCode, then open GraphCode settings and refresh **Integrations > Codex CLI**.
+
+GraphCode follows the environment that launched the server. A WSL launch uses the Linux Codex executable and the in-app workspace path field; it does not invoke the native Windows folder dialog. A native Windows launch uses the Windows Codex executable and may use the Windows folder picker.
+
+The model catalog command prints JSON and can be large, so the checks below redirect it to a temporary file.
+
+### macOS
+
+```bash
+npm install -g @openai/codex
+codex --version
+codex login --device-auth
+codex login status
+codex doctor
+codex debug models > /tmp/codex-models.json
+ls -lh /tmp/codex-models.json
+```
+
+### Linux
+
+```bash
+npm install -g @openai/codex
+codex --version
+codex login --device-auth
+codex login status
+codex doctor
+codex debug models > /tmp/codex-models.json
+ls -lh /tmp/codex-models.json
+```
+
+If `codex` is not found after install, open a new terminal or add your npm global binary directory to `PATH`.
+
+### Windows PowerShell
+
+Use the `cmd /c` form from PowerShell so Windows runs the `.cmd` shims and avoids PowerShell script-execution policy blocks.
+
+```powershell
+cd C:\GitHub\graph-code
+cmd /c npm install -g @openai/codex
+cmd /c codex --version
+cmd /c codex login --device-auth
+cmd /c codex login status
+cmd /c codex doctor
+cmd /c "codex debug models > %TEMP%\codex-models.json"
+Get-Item "$env:TEMP\codex-models.json"
+```
+
+If Windows cannot find `codex` after install, close and reopen PowerShell so the Node.js install directory is loaded into `PATH`, then rerun `cmd /c codex --version`.
 
 ## Feature Tour
 
@@ -140,7 +234,7 @@ The planning panel converts intent into graph-scoped tickets. Planning results c
 
 ### Proposal-First Coding
 
-Coding agents run in small, medium, or large modes. The mode controls how much graph and workflow context is included, but it does not grant unlimited edit scope. Provider outputs are stored as proposals and diffs so the user can inspect them before applying anything.
+Coding agents run in small, medium, or large modes. The mode controls how much graph and workflow context is included, but it does not grant unlimited edit scope. Provider outputs are stored as proposals and diffs so the user can inspect them before applying anything. A direct proposal can be implemented only after its matching review succeeds; GraphCode then validates and applies the exact reviewed diff as an explicit user action.
 
 ### Review Agents
 
@@ -218,10 +312,10 @@ Key implementation pieces:
 The same pnpm commands are intended to work on Linux, macOS, and Windows. The main differences are shell syntax, local paths, and optional native build tools for `better-sqlite3`.
 
 - Linux paths look like `/home/alex/project`.
+- WSL paths use Linux syntax, including mounted Windows folders such as `/mnt/c/GitHub/project`; only a GraphCode server started natively on Windows opens the Windows folder picker.
 - macOS paths look like `/Users/alex/project`.
 - Windows paths look like `C:\Users\Alex\project`.
 - Workspace source paths inside GraphCode are stored with forward slashes, even on Windows.
-- If you use WSL, run Node, pnpm, Git, and GraphCode inside the same WSL distro and open WSL paths such as `/home/alex/project`, not `C:\...` paths.
 
 Change ports on Linux or macOS:
 
@@ -234,7 +328,7 @@ Change ports in Windows PowerShell:
 ```powershell
 $env:GRAPHCODE_SERVER_PORT = "4010"
 $env:GRAPHCODE_WEB_PORT = "5174"
-pnpm dev
+cmd /c pnpm dev
 ```
 
 The Vite proxy reads `GRAPHCODE_SERVER_HOST`, `GRAPHCODE_SERVER_PORT`, and `GRAPHCODE_API_PROXY_TARGET`. The local API defaults to `127.0.0.1:3010`; the web app defaults to `127.0.0.1:5173`.

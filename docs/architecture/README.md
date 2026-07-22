@@ -15,4 +15,6 @@ Current notes:
 
 - [Agent System Prompts](agent-system-prompts.md)
 - [Function Hierarchy and CFG Workflows](function-hierarchy-and-cfg.md)
+- [Parallel Multi-Scale Agent Orchestration](parallel-multiscale-agent-orchestration.md)
+- [Parallel Multi-Scale Agent Rollback and Compatibility](parallel-multiscale-agent-rollback-compatibility.md)
 - [Three-Mode Scanning Pipeline](three-mode-scanning-pipeline.md)

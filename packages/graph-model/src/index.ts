@@ -1,4 +1,14 @@
 import { z } from "zod";
+import {
+  codingWorkflowOrchestrationSchema,
+  codingWorkflowExecutionPolicySchema,
+  codingWorkflowPartitionConstraintsSchema,
+  contextBudgetSchema,
+  integrationCheckSchema,
+  sourceWriteScopeSchema
+} from "./work-units";
+
+export * from "./work-units";
 
 export const CORE_DOMAIN_NODE_KINDS = ["framework", "module", "website", "ui_component", "function", "object"] as const;
 export const EMBEDDED_SYSTEMS_DOMAIN_NODE_KINDS = ["embedded_system", "embedded_device", "ros_node", "firmware_task"] as const;
@@ -98,14 +108,117 @@ export const LANGUAGE_TYPES = [
 export const AGENT_STATUSES = ["none", "planning", "coded", "reviewed", "implemented", "bugged"] as const;
 export const GIT_WORKTREE_STATUSES = ["untracked", "pending", "staged", "committed"] as const;
 export const GIT_CHANGE_STATUSES = ["new", "modified", "deleted"] as const;
+export const INDEX_PROGRESS_PHASES = ["idle", "discovering", "parsing", "linking", "persisting", "complete", "failed", "cancelled"] as const;
+
+export const indexCompletenessSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("complete") }),
+  z.object({
+    status: z.literal("partial"),
+    indexedFiles: z.number().int().nonnegative(),
+    discoveredFiles: z.number().int().nonnegative(),
+    reasons: z.array(z.string().min(1))
+  }),
+  z.object({
+    status: z.literal("stale"),
+    changedFiles: z.array(z.string().min(1)),
+    sinceRevision: z.string().min(1)
+  }),
+  z.object({
+    status: z.literal("failed"),
+    lastCompleteRevision: z.string().min(1).nullable(),
+    errorCode: z.string().min(1)
+  })
+]);
+
+export const indexFileCountsSchema = z
+  .object({
+    discovered: z.number().int().nonnegative(),
+    supported: z.number().int().nonnegative(),
+    indexed: z.number().int().nonnegative(),
+    unsupported: z.number().int().nonnegative(),
+    excluded: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative()
+  })
+  .superRefine((counts, context) => {
+    if (counts.supported + counts.unsupported + counts.excluded !== counts.discovered) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Discovered files must reconcile to supported, unsupported, and excluded counts."
+      });
+    }
+    if (counts.indexed + counts.failed > counts.supported) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Indexed and failed files cannot exceed the supported file count."
+      });
+    }
+  });
+
+export const indexProgressSchema = z.object({
+  phase: z.enum(INDEX_PROGRESS_PHASES),
+  completed: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  message: z.string(),
+  updatedAt: z.string().datetime()
+});
+
+export const indexTelemetrySchema = z.object({
+  discoveryMs: z.number().nonnegative(),
+  parseMs: z.number().nonnegative(),
+  linkMs: z.number().nonnegative(),
+  persistMs: z.number().nonnegative(),
+  peakRssBytes: z.number().int().nonnegative()
+});
+
+export const indexStateSchema = z
+  .object({
+    projectId: z.string().min(1),
+    providerId: z.string().min(1),
+    indexRevision: z.string().min(1).nullable(),
+    workspaceRevision: z.string().min(1).nullable(),
+    generatedAt: z.string().datetime(),
+    completeness: indexCompletenessSchema,
+    counts: indexFileCountsSchema,
+    progress: indexProgressSchema,
+    telemetry: indexTelemetrySchema
+  })
+  .superRefine((state, context) => {
+    if (state.completeness.status === "complete" && (state.counts.indexed !== state.counts.supported || state.counts.failed > 0 || state.counts.excluded > 0)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "A complete index must account for every supported file without failures or exclusions."
+      });
+    }
+    if (
+      state.completeness.status === "partial" &&
+      (state.completeness.indexedFiles !== state.counts.indexed || state.completeness.discoveredFiles !== state.counts.discovered)
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Partial completeness counts must match the index state counts."
+      });
+    }
+  });
+
+export type IndexCompleteness = z.infer<typeof indexCompletenessSchema>;
+export type IndexFileCounts = z.infer<typeof indexFileCountsSchema>;
+export type IndexProgress = z.infer<typeof indexProgressSchema>;
+export type IndexTelemetry = z.infer<typeof indexTelemetrySchema>;
+export type IndexState = z.infer<typeof indexStateSchema>;
 export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const;
 export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "conflicted"] as const;
 export const AGENT_PROVIDERS = ["fake", "codex", "claudecode", "openai", "gemini", "openrouter", "deepseek"] as const;
+export const CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
+export const CODEX_SPEED_TIERS = ["standard", "fast"] as const;
+export const CODEX_PERMISSION_MODES = ["ask_for_permission", "approve_for_me", "full_access"] as const;
+export const CODEX_SYSTEM_PROMPT_MODES = ["default", "custom"] as const;
+export const CLAUDE_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+export const CLAUDE_SYSTEM_PROMPT_MODES = ["default", "custom"] as const;
 export const CODING_AGENT_MODES = ["small", "medium", "large"] as const;
 export const REVIEW_AGENT_MODES = ["small", "medium", "large"] as const;
 export const SCANNING_AGENT_MODES = ["local", "medium", "global"] as const;
-export const CODING_WORKFLOW_STATUSES = ["preview", "running", "blocked", "succeeded", "failed"] as const;
-export const CODING_WORKFLOW_ITEM_STATUSES = ["pending", "running", "proposed", "applied", "skipped", "failed", "blocked"] as const;
+export const CODING_WORKFLOW_STATUSES = ["preview", "running", "blocked", "succeeded", "failed", "cancelled"] as const;
+export const CODING_WORKFLOW_ITEM_STATUSES = ["pending", "running", "proposed", "applied", "skipped", "failed", "blocked", "cancelled"] as const;
 export const SETTINGS_THEME_MODES = ["light", "dark", "system"] as const;
 export const SECRET_SOURCE_TYPES = ["manual", "file", "env"] as const;
 export const PROMPT_SOURCE_TYPES = ["manual", "file"] as const;
@@ -130,6 +243,12 @@ export const gitChangeStatusSchema = z.enum(GIT_CHANGE_STATUSES);
 export const agentKindSchema = z.enum(AGENT_KINDS);
 export const agentRunStatusSchema = z.enum(AGENT_RUN_STATUSES);
 export const agentProviderSchema = z.enum(AGENT_PROVIDERS);
+export const codexReasoningEffortSchema = z.enum(CODEX_REASONING_EFFORTS);
+export const codexSpeedTierSchema = z.enum(CODEX_SPEED_TIERS);
+export const codexPermissionModeSchema = z.enum(CODEX_PERMISSION_MODES);
+export const codexSystemPromptModeSchema = z.enum(CODEX_SYSTEM_PROMPT_MODES);
+export const claudeReasoningEffortSchema = z.enum(CLAUDE_REASONING_EFFORTS);
+export const claudeSystemPromptModeSchema = z.enum(CLAUDE_SYSTEM_PROMPT_MODES);
 export const codingAgentModeSchema = z.enum(CODING_AGENT_MODES);
 export const reviewAgentModeSchema = z.enum(REVIEW_AGENT_MODES);
 export const scanningAgentModeSchema = z.enum(SCANNING_AGENT_MODES);
@@ -161,6 +280,12 @@ export type GitChangeStatus = z.infer<typeof gitChangeStatusSchema>;
 export type AgentKind = z.infer<typeof agentKindSchema>;
 export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
 export type AgentProvider = z.infer<typeof agentProviderSchema>;
+export type CodexReasoningEffort = z.infer<typeof codexReasoningEffortSchema>;
+export type CodexSpeedTier = z.infer<typeof codexSpeedTierSchema>;
+export type CodexPermissionMode = z.infer<typeof codexPermissionModeSchema>;
+export type CodexSystemPromptMode = z.infer<typeof codexSystemPromptModeSchema>;
+export type ClaudeReasoningEffort = z.infer<typeof claudeReasoningEffortSchema>;
+export type ClaudeSystemPromptMode = z.infer<typeof claudeSystemPromptModeSchema>;
 export type CodingAgentMode = z.infer<typeof codingAgentModeSchema>;
 export type ReviewAgentMode = z.infer<typeof reviewAgentModeSchema>;
 export type ScanningAgentMode = z.infer<typeof scanningAgentModeSchema>;
@@ -543,6 +668,12 @@ export const promptSourceSchema = z.object({
 const agentConfigBaseSchema = z.object({
   provider: agentProviderSchema,
   model: z.string(),
+  cliCommand: z.string().optional().default(""),
+  reasoningEffort: codexReasoningEffortSchema.optional().default("medium"),
+  speedTier: codexSpeedTierSchema.optional().default("standard"),
+  permissionMode: codexPermissionModeSchema.optional().default("ask_for_permission"),
+  codexSystemPromptMode: codexSystemPromptModeSchema.optional().default("custom"),
+  claudeSystemPromptMode: claudeSystemPromptModeSchema.optional().default("custom"),
   parallelLimit: z.number().int().min(1).max(64),
   apiKeySource: secretSourceSchema,
   systemPromptSource: promptSourceSchema
@@ -665,6 +796,93 @@ export const settingsValidationResultSchema = z.object({
   fieldErrors: z.record(z.string())
 });
 
+export const codexCliStatusSchema = z.object({
+  installed: z.boolean(),
+  command: z.string(),
+  resolvedPath: z.string().nullable(),
+  version: z.string().nullable(),
+  authenticated: z.boolean(),
+  authStatus: z.string().nullable(),
+  modelsAvailable: z.boolean(),
+  error: z.string().nullable(),
+  checkedAt: z.string()
+});
+
+export const codexInstallResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: codexCliStatusSchema.optional()
+});
+
+export const codexAuthStartResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: codexCliStatusSchema.optional()
+});
+
+export const codexReasoningLevelSchema = z.object({
+  effort: codexReasoningEffortSchema,
+  description: z.string().default("")
+});
+
+export const codexModelInfoSchema = z.object({
+  slug: z.string(),
+  displayName: z.string(),
+  description: z.string().default(""),
+  defaultReasoningLevel: codexReasoningEffortSchema.default("medium"),
+  supportedReasoningLevels: z.array(codexReasoningLevelSchema).default([]),
+  speedTiers: z.array(codexSpeedTierSchema).default(["standard"])
+});
+
+export const claudeCliStatusSchema = z.object({
+  installed: z.boolean(),
+  command: z.string(),
+  resolvedPath: z.string().nullable(),
+  version: z.string().nullable(),
+  authenticated: z.boolean(),
+  authStatus: z.string().nullable(),
+  modelsAvailable: z.boolean(),
+  error: z.string().nullable(),
+  checkedAt: z.string()
+});
+
+export const claudeInstallResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: claudeCliStatusSchema.optional()
+});
+
+export const claudeAuthStartResultSchema = z.object({
+  ok: z.boolean(),
+  command: z.string(),
+  message: z.string(),
+  status: claudeCliStatusSchema.optional()
+});
+
+export const claudeReasoningLevelSchema = z.object({
+  effort: claudeReasoningEffortSchema,
+  description: z.string().default("")
+});
+
+export const claudeModelInfoSchema = z.object({
+  slug: z.string(),
+  displayName: z.string(),
+  description: z.string().default(""),
+  defaultReasoningLevel: claudeReasoningEffortSchema.default("medium"),
+  supportedReasoningLevels: z.array(claudeReasoningLevelSchema).default([]),
+  speedTiers: z.array(codexSpeedTierSchema).default(["standard"])
+});
+
+export const folderPickerResultSchema = z.object({
+  supported: z.boolean(),
+  selected: z.boolean(),
+  path: z.string().nullable(),
+  message: z.string().nullable().default(null)
+});
+
 export const planningChatRequestSchema = z.object({
   projectId: z.string().min(1),
   prompt: z.string().min(1),
@@ -700,7 +918,18 @@ export const codingWorkflowItemSchema = z.object({
   nodeId: z.string(),
   nodeName: z.string(),
   nodeKind: graphNodeKindSchema,
+  parentItemId: z.string().nullable().optional(),
   layerIndex: z.number().int().nonnegative(),
+  objective: z.string().optional(),
+  baseIndexRevision: z.string().nullable().optional(),
+  baseWorkspaceRevision: z.string().nullable().optional(),
+  baseGraphRevision: z.number().int().nonnegative().optional(),
+  routingDecisionId: z.string().nullable().optional(),
+  contextBudget: contextBudgetSchema.optional(),
+  plannedWriteScopes: z.array(sourceWriteScopeSchema).optional(),
+  actualWriteScopes: z.array(sourceWriteScopeSchema).optional(),
+  contextDiagnostics: z.record(z.unknown()).optional(),
+  proposalRevision: z.number().int().nonnegative().nullable().optional(),
   recommendedMode: codingAgentModeSchema,
   selectedMode: codingAgentModeSchema,
   modeReason: z.string(),
@@ -723,7 +952,9 @@ export const codingWorkflowSchema = z.object({
   summary: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),
-  items: z.array(codingWorkflowItemSchema).default([])
+  items: z.array(codingWorkflowItemSchema).default([]),
+  integrationChecks: z.array(integrationCheckSchema).optional(),
+  orchestration: codingWorkflowOrchestrationSchema.optional()
 });
 
 export const codingWorkflowModeOverrideSchema = z.object({
@@ -733,13 +964,30 @@ export const codingWorkflowModeOverrideSchema = z.object({
 
 export const codingWorkflowPreviewRequestSchema = z.object({
   projectId: z.string().min(1),
-  scopeNodeId: z.string().min(1)
+  scopeNodeId: z.string().min(1),
+  modeOverrides: z.array(codingWorkflowModeOverrideSchema).optional().default([]),
+  partitionConstraints: codingWorkflowPartitionConstraintsSchema.optional().default({}),
+  executionPolicy: codingWorkflowExecutionPolicySchema.optional().default({})
 });
 
 export const codingWorkflowStartRequestSchema = z.object({
   projectId: z.string().min(1),
   scopeNodeId: z.string().min(1),
-  modeOverrides: z.array(codingWorkflowModeOverrideSchema).optional().default([])
+  modeOverrides: z.array(codingWorkflowModeOverrideSchema).optional().default([]),
+  partitionConstraints: codingWorkflowPartitionConstraintsSchema.optional().default({}),
+  executionPolicy: codingWorkflowExecutionPolicySchema.optional().default({}),
+  background: z.boolean().optional().default(false)
+});
+
+export const codingWorkflowControlRequestSchema = z.object({
+  projectId: z.string().min(1),
+  workflowId: z.string().min(1),
+  action: z.enum(["pause", "resume", "cancel", "retry", "escalate", "skip", "integrate"]),
+  itemId: z.string().min(1).optional()
+}).superRefine((input, context) => {
+  if (["retry", "escalate", "skip"].includes(input.action) && !input.itemId) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["itemId"], message: `${input.action} requires an itemId.` });
+  }
 });
 
 export const codingWorkflowApplyLayerRequestSchema = z.object({
@@ -754,10 +1002,16 @@ export const reviewAgentRequestSchema = z.object({
   mode: reviewAgentModeSchema.optional()
 });
 
+export const codeProposalApplyRequestSchema = z.object({
+  projectId: z.string().min(1),
+  runId: z.string().min(1)
+});
+
 export const workspaceInitializationSchema = z.object({
   projectName: z.string().trim().min(1),
   projectDescription: z.string().trim().min(1),
-  scanningInstructions: z.string().trim().min(1)
+  scanningInstructions: z.string().trim().min(1),
+  skipCodexDefaultSystemPrompt: z.boolean().optional().default(false)
 });
 
 export const blankWorkspaceInitializationSchema = z.object({
@@ -770,6 +1024,7 @@ export const scanningAgentRequestSchema = z.object({
   rootPath: z.string().optional(),
   projectDescription: z.string().optional(),
   scanningInstructions: z.string().optional(),
+  skipCodexDefaultSystemPrompt: z.boolean().optional().default(false),
   enabledExtensionPackageIds: z.array(extensionPackageIdSchema).optional().default([]),
   background: z.boolean().optional().default(false)
 });
@@ -795,6 +1050,7 @@ export const agentRunSchema = z.object({
   status: agentRunStatusSchema,
   baseGraphRevision: z.number().int().nonnegative().default(0),
   appliedGraphRevision: z.number().int().nonnegative().nullable().default(null),
+  implementedAt: z.string().nullable().default(null),
   conflictReason: z.string().nullable().default(null),
   targetNodeId: z.string().nullable(),
   prompt: z.string(),
@@ -916,8 +1172,19 @@ export type GithubIntegrationSettingsMutation = z.infer<typeof githubIntegration
 export type GithubIntegrationSettings = z.infer<typeof githubIntegrationSettingsSchema>;
 export type AgentAutomationSettings = z.infer<typeof agentAutomationSettingsSchema>;
 export type WorkspaceSettings = z.infer<typeof workspaceSettingsSchema>;
-export type WorkspaceSettingsMutation = z.input<typeof workspaceSettingsMutationSchema>;
+export type WorkspaceSettingsMutation = z.infer<typeof workspaceSettingsMutationSchema>;
 export type SettingsValidationResult = z.infer<typeof settingsValidationResultSchema>;
+export type CodexCliStatus = z.infer<typeof codexCliStatusSchema>;
+export type CodexInstallResult = z.infer<typeof codexInstallResultSchema>;
+export type CodexAuthStartResult = z.infer<typeof codexAuthStartResultSchema>;
+export type CodexReasoningLevel = z.infer<typeof codexReasoningLevelSchema>;
+export type CodexModelInfo = z.infer<typeof codexModelInfoSchema>;
+export type ClaudeCliStatus = z.infer<typeof claudeCliStatusSchema>;
+export type ClaudeInstallResult = z.infer<typeof claudeInstallResultSchema>;
+export type ClaudeAuthStartResult = z.infer<typeof claudeAuthStartResultSchema>;
+export type ClaudeReasoningLevel = z.infer<typeof claudeReasoningLevelSchema>;
+export type ClaudeModelInfo = z.infer<typeof claudeModelInfoSchema>;
+export type FolderPickerResult = z.infer<typeof folderPickerResultSchema>;
 export type PlanningChatRequest = z.input<typeof planningChatRequestSchema>;
 export type CodingAgentRequest = z.input<typeof codingAgentRequestSchema>;
 export type CodeProposalTestScript = z.infer<typeof codeProposalTestScriptSchema>;
@@ -928,7 +1195,9 @@ export type CodingWorkflowModeOverride = z.infer<typeof codingWorkflowModeOverri
 export type CodingWorkflowPreviewRequest = z.input<typeof codingWorkflowPreviewRequestSchema>;
 export type CodingWorkflowStartRequest = z.input<typeof codingWorkflowStartRequestSchema>;
 export type CodingWorkflowApplyLayerRequest = z.input<typeof codingWorkflowApplyLayerRequestSchema>;
+export type CodingWorkflowControlRequest = z.input<typeof codingWorkflowControlRequestSchema>;
 export type ReviewAgentRequest = z.input<typeof reviewAgentRequestSchema>;
+export type CodeProposalApplyRequest = z.input<typeof codeProposalApplyRequestSchema>;
 export type ScanningAgentRequest = z.input<typeof scanningAgentRequestSchema>;
 export type GraphPatchOperation = z.infer<typeof graphPatchOperationSchema>;
 export type GraphPatch = z.infer<typeof graphPatchSchema>;

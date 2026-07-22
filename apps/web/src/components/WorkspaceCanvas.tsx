@@ -1,4 +1,4 @@
-import type { CanvasGraph, GraphBoundary, GraphNode, GraphNodeReuse, WorkspaceSettings } from "@graphcode/graph-model";
+import type { CanvasGraph, CodingWorkflow, GraphBoundary, GraphNode, GraphNodeReuse, WorkspaceSettings } from "@graphcode/graph-model";
 import {
   applyNodeChanges,
   Background,
@@ -29,6 +29,7 @@ import { GraphNodeCard } from "./GraphNodeCard";
 
 type WorkspaceCanvasProps = {
   canvas: CanvasGraph | null;
+  codingWorkflow?: CodingWorkflow | null;
   theme: WorkspaceSettings["general"]["theme"];
   selectedNodeId: string | null;
   selectedEdgeId: string | null;
@@ -72,6 +73,7 @@ export function WorkspaceCanvas(props: WorkspaceCanvasProps) {
 
 function WorkspaceCanvasInner({
   canvas,
+  codingWorkflow,
   theme,
   selectedNodeId,
   selectedEdgeId,
@@ -104,18 +106,19 @@ function WorkspaceCanvasInner({
     () =>
       toFlowNodes(
         canvas,
+        codingWorkflow,
         selectedNodeId,
         selectedBoundaryId,
         null,
         (nodeId, size) => handleResizeEndRef.current(nodeId, size),
         (boundaryId, size) => handleBoundaryResizeEndRef.current(boundaryId, size)
       ),
-    [canvas, selectedBoundaryId, selectedNodeId]
+    [canvas, codingWorkflow, selectedBoundaryId, selectedNodeId]
   );
   const [nodes, setNodes] = useState<Node[]>(initialNodes);
   const [draftRect, setDraftRect] = useState<BoundaryDraftRect | null>(null);
   const [edgeDraftSourceId, setEdgeDraftSourceId] = useState<string | null>(null);
-  const edges = useMemo(() => toFlowEdges(canvas, selectedEdgeId, resolvedTheme), [canvas, resolvedTheme, selectedEdgeId]);
+  const edges = useMemo(() => toFlowEdges(canvas, selectedEdgeId, resolvedTheme, codingWorkflow), [canvas, codingWorkflow, resolvedTheme, selectedEdgeId]);
   const flowNodes = useMemo(() => (draftRect ? [...nodes, toDraftBoundaryNode(draftRect)] : nodes), [draftRect, nodes]);
 
   const persistLayout = useCallback(
@@ -191,6 +194,7 @@ function WorkspaceCanvasInner({
   useEffect(() => {
     const nextNodes = toFlowNodes(
       canvas,
+      codingWorkflow,
       selectedNodeId,
       selectedBoundaryId,
       edgeDraftSourceId,
@@ -199,7 +203,7 @@ function WorkspaceCanvasInner({
     );
     setNodes(nextNodes);
     nodesRef.current = nextNodes;
-  }, [canvas, edgeDraftSourceId, selectedBoundaryId, selectedNodeId]);
+  }, [canvas, codingWorkflow, edgeDraftSourceId, selectedBoundaryId, selectedNodeId]);
 
   useEffect(() => {
     setEdgeDraftSourceId(null);
@@ -528,16 +532,26 @@ function WorkspaceCanvasInner({
       <Panel position="top-left">
         <div className="canvas-status">
           <strong>{canvas.nodes.length}</strong>
-          <span>blocks</span>
+          <span>{canvas.nodes.length === 1 ? "block" : "blocks"}</span>
           <strong>{canvas.edges.length}</strong>
-          <span>links</span>
+          <span>{canvas.edges.length === 1 ? "link" : "links"}</span>
           <strong>{canvas.boundaries.length}</strong>
-          <span>boundaries</span>
+          <span>{canvas.boundaries.length === 1 ? "boundary" : "boundaries"}</span>
         </div>
       </Panel>
+      {codingWorkflow?.orchestration ? (
+        <Panel position="top-right">
+          <div className="workflow-canvas-legend" aria-label="Workflow overlay legend">
+            <strong>Workflow overlay</strong>
+            <span>{codingWorkflow.orchestration.workUnits.length} {codingWorkflow.orchestration.workUnits.length === 1 ? "partition" : "partitions"}</span>
+            <span>{codingWorkflow.orchestration.interfaceContracts.length} {codingWorkflow.orchestration.interfaceContracts.length === 1 ? "contract" : "contracts"}</span>
+            <span>Wave {codingWorkflow.currentLayer + 1}</span>
+          </div>
+        </Panel>
+      ) : null}
       {drawBoundaryMode ? (
         <Panel position="top-center">
-          <div className="canvas-draw-status">
+          <div className="canvas-draw-status" role="status" aria-live="polite">
             <span>{draftRect ? "Click to finish boundary" : "Click to start boundary"}</span>
             <button type="button" className="canvas-draw-cancel" onClick={handleCancelDrawClick}>
               Cancel
@@ -547,7 +561,7 @@ function WorkspaceCanvasInner({
       ) : null}
       {drawEdgeMode ? (
         <Panel position="top-center">
-          <div className="canvas-draw-status">
+          <div className="canvas-draw-status" role="status" aria-live="polite">
             <span>{edgeDraftSourceId ? "Select target block" : "Select source block"}</span>
             <button type="button" className="canvas-draw-cancel" onClick={handleCancelDrawClick}>
               Cancel
@@ -582,6 +596,7 @@ type Rect = Point & Size;
 
 function toFlowNodes(
   canvas: CanvasGraph | null,
+  codingWorkflow: CodingWorkflow | null | undefined,
   selectedNodeId: string | null,
   selectedBoundaryId: string | null,
   edgeDraftSourceId: string | null,
@@ -619,7 +634,7 @@ function toFlowNodes(
   });
 
   const graphNodes: Node[] = canvas.nodes.map((node) => ({
-    ...toFlowGraphNode(node, canvas, selectedNodeId, edgeDraftSourceId, reuseByNodeId, onResizeEnd)
+    ...toFlowGraphNode(node, canvas, codingWorkflow, selectedNodeId, edgeDraftSourceId, reuseByNodeId, onResizeEnd)
   }));
 
   return [...boundaryNodes, ...graphNodes];
@@ -628,6 +643,7 @@ function toFlowNodes(
 function toFlowGraphNode(
   node: GraphNode,
   canvas: CanvasGraph,
+  codingWorkflow: CodingWorkflow | null | undefined,
   selectedNodeId: string | null,
   edgeDraftSourceId: string | null,
   reuseByNodeId: Map<string, CanvasGraph["reuses"][number]>,
@@ -655,6 +671,7 @@ function toFlowGraphNode(
       customType,
       reuse: reuseByNodeId.get(node.id),
       selected: isSelected,
+      workflowOverlay: workflowNodeOverlay(node.id, codingWorkflow),
       onResizeEnd
     }
   };
@@ -690,7 +707,7 @@ export function buildEdgeRenderSummaries(canvas: CanvasGraph | null, selectedEdg
   }));
 }
 
-function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, theme: "light" | "dark"): Edge[] {
+function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, theme: "light" | "dark", codingWorkflow?: CodingWorkflow | null): Edge[] {
   if (!canvas) {
     return [];
   }
@@ -703,10 +720,13 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
   const reuseByNodeId = new Map((canvas.reuses ?? []).map((reuse) => [reuse.nodeId, reuse]));
   const nodeRects = new Map(canvas.nodes.map((node) => [node.id, nodeRectForLabelPlacement(node, reuseByNodeId.get(node.id))]));
   const blockingRects = [...nodeRects.values()];
+  const contractByEdgeId = new Map(codingWorkflow?.orchestration?.interfaceContracts.map((contract) => [contract.edgeId, contract]) ?? []);
 
   const semanticEdges: Edge[] = canvas.edges.map((edge) => {
-    const edgeColor = edge.id === selectedEdgeId ? "#2563eb" : edge.color;
-    const label = formatEdgeLabel(edge);
+    const contract = contractByEdgeId.get(edge.id);
+    const contractColor = contract?.status === "conflicted" || contract?.status === "invalid" ? "#dc2626" : contract?.status === "proposed_change" ? "#d97706" : contract ? "#7c3aed" : null;
+    const edgeColor = edge.id === selectedEdgeId ? "#2563eb" : contractColor ?? edge.color;
+    const label = `${formatEdgeLabel(edge)}${contract ? ` · ${contract.contractKind}/${contract.status}` : ""}`;
     const offset = laneOffsets.get(edge.id) ?? 0;
     const data = edgeRenderData({
       label,
@@ -734,7 +754,8 @@ function toFlowEdges(canvas: CanvasGraph | null, selectedEdgeId: string | null, 
       ...edgeMarkerProps(edge, edgeColor),
       style: {
         stroke: edgeColor,
-        strokeWidth: edge.id === selectedEdgeId ? 2.4 : 1.7
+        strokeWidth: edge.id === selectedEdgeId ? 2.4 : contract ? 2.2 : 1.7,
+        ...(contract ? { strokeDasharray: "8 4" } : {})
       }
     };
   });
@@ -1299,6 +1320,41 @@ function colorForNode(node: GraphNode, canvas: CanvasGraph): string {
     }
   }
   return canvas.nodeTypeStyles.find((style) => style.nodeKind === node.kind)?.color ?? nodePalette[node.kind].accent;
+}
+
+const WORKFLOW_PARTITION_COLORS = ["#2563eb", "#7c3aed", "#db2777", "#dc2626", "#d97706", "#059669", "#0891b2", "#4f46e5"] as const;
+
+function workflowNodeOverlay(nodeId: string, workflow: CodingWorkflow | null | undefined) {
+  const orchestration = workflow?.orchestration;
+  if (!orchestration) {
+    return null;
+  }
+
+  const ownedUnit = orchestration.workUnits.find((unit) => unit.ownedNodeIds.includes(nodeId));
+  const unit = ownedUnit ?? orchestration.workUnits.find((candidate) => candidate.readHaloNodeIds.includes(nodeId));
+  if (!unit) {
+    return null;
+  }
+
+  const itemStatus = workflow.items.find((item) => item.id === unit.id)?.status;
+  return {
+    workUnitId: unit.id,
+    title: unit.title,
+    wave: unit.layerIndex + 1,
+    status: itemStatus ?? unit.status,
+    scale: unit.selectedScale,
+    role: ownedUnit ? ("owned" as const) : ("read_halo" as const),
+    color: workflowPartitionColor(unit.id)
+  };
+}
+
+function workflowPartitionColor(workUnitId: string): string {
+  let hash = 2166136261;
+  for (let index = 0; index < workUnitId.length; index += 1) {
+    hash ^= workUnitId.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return WORKFLOW_PARTITION_COLORS[(hash >>> 0) % WORKFLOW_PARTITION_COLORS.length];
 }
 
 function updateGraphNodeLayout(node: Node, layout: MemberLayout): Node {

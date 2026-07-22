@@ -174,6 +174,12 @@ const CODING_AGENT_SETTINGS_SQL = `
     coding_mode TEXT NOT NULL CHECK (coding_mode IN ('small', 'medium', 'large')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -191,6 +197,12 @@ const REVIEW_AGENT_SETTINGS_SQL = `
     review_mode TEXT NOT NULL CHECK (review_mode IN ('small', 'medium', 'large')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -208,6 +220,12 @@ const SCANNING_AGENT_SETTINGS_SQL = `
     scanning_mode TEXT NOT NULL CHECK (scanning_mode IN ('local', 'medium', 'global')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -225,6 +243,12 @@ const AGENT_SETTINGS_SQL = `
     agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
     provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
+    cli_command TEXT NOT NULL DEFAULT '',
+    reasoning_effort TEXT NOT NULL DEFAULT 'medium' CHECK (reasoning_effort IN ('low', 'medium', 'high', 'xhigh', 'max', 'ultra')),
+    speed_tier TEXT NOT NULL DEFAULT 'standard' CHECK (speed_tier IN ('standard', 'fast')),
+    permission_mode TEXT NOT NULL DEFAULT 'ask_for_permission' CHECK (permission_mode IN ('ask_for_permission', 'approve_for_me', 'full_access')),
+    codex_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (codex_system_prompt_mode IN ('default', 'custom')),
+    claude_system_prompt_mode TEXT NOT NULL DEFAULT 'custom' CHECK (claude_system_prompt_mode IN ('default', 'custom')),
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
     api_key_source_value TEXT NOT NULL DEFAULT '',
@@ -275,9 +299,11 @@ const CODING_WORKFLOWS_SQL = `
     id TEXT PRIMARY KEY,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     scope_node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
-    status TEXT NOT NULL DEFAULT 'preview' CHECK (status IN ('preview', 'running', 'blocked', 'succeeded', 'failed')),
+    status TEXT NOT NULL DEFAULT 'preview' CHECK (status IN ('preview', 'running', 'blocked', 'succeeded', 'failed', 'cancelled')),
     current_layer INTEGER NOT NULL DEFAULT 0,
     summary TEXT NOT NULL DEFAULT '',
+    orchestration_version TEXT,
+    orchestration_diagnostics_json TEXT NOT NULL DEFAULT '{}',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
   );
@@ -289,11 +315,27 @@ const CODING_WORKFLOW_ITEMS_SQL = `
     workflow_id TEXT NOT NULL REFERENCES coding_workflows(id) ON DELETE CASCADE,
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    parent_item_id TEXT REFERENCES coding_workflow_items(id) ON DELETE SET NULL,
     layer_index INTEGER NOT NULL DEFAULT 0,
+    work_unit_title TEXT NOT NULL DEFAULT '',
+    objective TEXT NOT NULL DEFAULT '',
+    base_index_revision TEXT,
+    base_workspace_revision TEXT,
+    base_graph_revision INTEGER NOT NULL DEFAULT 0,
+    base_revision_json TEXT NOT NULL DEFAULT '{}',
+    routing_decision_id TEXT,
+    context_budget_json TEXT NOT NULL DEFAULT '{}',
+    planned_write_scopes_json TEXT NOT NULL DEFAULT '[]',
+    actual_write_scopes_json TEXT NOT NULL DEFAULT '[]',
+    expected_outputs_json TEXT NOT NULL DEFAULT '[]',
+    context_diagnostics_json TEXT NOT NULL DEFAULT '{}',
+    context_compiler_version TEXT NOT NULL DEFAULT 'legacy',
+    routing_feature_version TEXT NOT NULL DEFAULT 'legacy-v1',
+    proposal_revision INTEGER,
     recommended_mode TEXT NOT NULL CHECK (recommended_mode IN ('small', 'medium', 'large')),
     selected_mode TEXT NOT NULL CHECK (selected_mode IN ('small', 'medium', 'large')),
     mode_reason TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'proposed', 'applied', 'skipped', 'failed', 'blocked')),
+    status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'running', 'proposed', 'applied', 'skipped', 'failed', 'blocked', 'cancelled')),
     conflict_group TEXT NOT NULL DEFAULT '',
     agent_run_id TEXT REFERENCES agent_runs(id) ON DELETE SET NULL,
     proposal_id TEXT REFERENCES code_proposals(id) ON DELETE SET NULL,
@@ -304,11 +346,110 @@ const CODING_WORKFLOW_ITEMS_SQL = `
   );
 `;
 
+const CODING_WORK_UNIT_NODES_SQL = `
+  CREATE TABLE coding_work_unit_nodes (
+    item_id TEXT NOT NULL REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('owned', 'read_halo', 'upstream', 'summary')),
+    score REAL,
+    reason TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (item_id, node_id, role)
+  );
+`;
+
+const CODING_WORK_UNIT_EDGES_SQL = `
+  CREATE TABLE coding_work_unit_edges (
+    item_id TEXT NOT NULL REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    edge_id TEXT NOT NULL REFERENCES graph_edges(id) ON DELETE CASCADE,
+    role TEXT NOT NULL CHECK (role IN ('internal', 'boundary', 'dependency', 'evidence')),
+    reason TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (item_id, edge_id, role)
+  );
+`;
+
+const CODING_WORK_UNIT_DEPENDENCIES_SQL = `
+  CREATE TABLE coding_work_unit_dependencies (
+    id TEXT PRIMARY KEY,
+    source_item_id TEXT NOT NULL REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    target_item_id TEXT NOT NULL REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('requires_before', 'coordinates_with', 'read_context', 'write_conflict', 'informational')),
+    edge_id TEXT REFERENCES graph_edges(id) ON DELETE SET NULL,
+    status TEXT NOT NULL DEFAULT 'planned' CHECK (status IN ('planned', 'satisfied', 'blocked', 'ignored')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (source_item_id, target_item_id, kind, edge_id)
+  );
+`;
+
+const INTERFACE_CONTRACTS_SQL = `
+  CREATE TABLE interface_contracts (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL REFERENCES coding_workflows(id) ON DELETE CASCADE,
+    edge_id TEXT NOT NULL REFERENCES graph_edges(id) ON DELETE CASCADE,
+    edge_kind TEXT NOT NULL CHECK (edge_kind IN ('calls', 'imports', 'uses', 'owns', 'impacts', 'flows', 'describes_format')),
+    producer_item_id TEXT NOT NULL REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    consumer_item_id TEXT NOT NULL REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    direction TEXT NOT NULL CHECK (direction IN ('producer_to_consumer', 'bidirectional')),
+    contract_kind TEXT NOT NULL CHECK (contract_kind IN ('signature', 'schema', 'protocol', 'data_flow', 'side_effect', 'error_behavior', 'ordering', 'other')),
+    subject_node_ids_json TEXT NOT NULL DEFAULT '[]',
+    baseline_json TEXT NOT NULL,
+    proposed_json TEXT,
+    status TEXT NOT NULL CHECK (status IN ('stable', 'proposed_change', 'accepted', 'conflicted', 'invalid')),
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    revision INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`;
+
+const MODEL_ROUTING_DECISIONS_SQL = `
+  CREATE TABLE model_routing_decisions (
+    id TEXT PRIMARY KEY,
+    item_id TEXT NOT NULL UNIQUE REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    feature_version TEXT NOT NULL,
+    features_json TEXT NOT NULL,
+    recommended_scale TEXT NOT NULL CHECK (recommended_scale IN ('small', 'medium', 'large')),
+    selected_scale TEXT NOT NULL CHECK (selected_scale IN ('small', 'medium', 'large')),
+    reasons_json TEXT NOT NULL DEFAULT '[]',
+    token_estimates_json TEXT NOT NULL DEFAULT '{}',
+    cost_estimate REAL,
+    provider_id TEXT,
+    model_id TEXT,
+    assignment_json TEXT,
+    metrics_json TEXT,
+    override_json TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`;
+
+const INTEGRATION_CHECKS_SQL = `
+  CREATE TABLE integration_checks (
+    id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL REFERENCES coding_workflows(id) ON DELETE CASCADE,
+    layer_index INTEGER NOT NULL,
+    item_id TEXT REFERENCES coding_workflow_items(id) ON DELETE CASCADE,
+    check_kind TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'running', 'passed', 'failed', 'blocked', 'cancelled')),
+    diagnostics_json TEXT NOT NULL DEFAULT '{}',
+    started_at TEXT,
+    completed_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`;
+
 const GRAPH_TABLES = [
   "graph_boundary_tags",
   "graph_edge_tags",
   "graph_node_tags",
   "graph_node_reuses",
+  "integration_checks",
+  "model_routing_decisions",
+  "interface_contracts",
+  "coding_work_unit_dependencies",
+  "coding_work_unit_edges",
+  "coding_work_unit_nodes",
   "coding_workflow_items",
   "coding_workflows",
   "graph_tags",
@@ -482,6 +623,7 @@ export function migrate(db: GraphDatabase): void {
         status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
       base_graph_revision INTEGER NOT NULL DEFAULT 0,
       applied_graph_revision INTEGER,
+      implemented_at TEXT,
       conflict_reason TEXT,
       target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
       prompt TEXT NOT NULL DEFAULT '',
@@ -519,11 +661,18 @@ export function migrate(db: GraphDatabase): void {
         target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
         diff TEXT NOT NULL,
         artifact_manifest_json TEXT,
+        work_unit_proposal_json TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
 
       ${CODING_WORKFLOWS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
       ${CODING_WORKFLOW_ITEMS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${CODING_WORK_UNIT_NODES_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${CODING_WORK_UNIT_EDGES_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${CODING_WORK_UNIT_DEPENDENCIES_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${INTERFACE_CONTRACTS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${MODEL_ROUTING_DECISIONS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+      ${INTEGRATION_CHECKS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
 
       CREATE INDEX IF NOT EXISTS idx_graph_nodes_project ON graph_nodes(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_nodes_parent ON graph_nodes(parent_id);
@@ -636,7 +785,14 @@ function ensureProviderSettingsTable(db: GraphDatabase, tableName: string, creat
     db.exec(createSql);
     return;
   }
-  if (!sql.includes("'codex'")) {
+  const hasCodexSettingsColumns =
+    tableHasColumn(db, tableName, "cli_command") &&
+    tableHasColumn(db, tableName, "reasoning_effort") &&
+    tableHasColumn(db, tableName, "speed_tier") &&
+    tableHasColumn(db, tableName, "permission_mode") &&
+    tableHasColumn(db, tableName, "codex_system_prompt_mode") &&
+    tableHasColumn(db, tableName, "claude_system_prompt_mode");
+  if (!sql.includes("'codex'") || !hasCodexSettingsColumns) {
     rebuildProviderSettingsTable(db, tableName, createSql);
   }
 }
@@ -670,6 +826,9 @@ function ensureAgentRunsTable(db: GraphDatabase): void {
   if (!tableHasColumn(db, "agent_runs", "applied_graph_revision")) {
     db.exec("ALTER TABLE agent_runs ADD COLUMN applied_graph_revision INTEGER;");
   }
+  if (!tableHasColumn(db, "agent_runs", "implemented_at")) {
+    db.exec("ALTER TABLE agent_runs ADD COLUMN implemented_at TEXT;");
+  }
   if (!tableHasColumn(db, "agent_runs", "conflict_reason")) {
     db.exec("ALTER TABLE agent_runs ADD COLUMN conflict_reason TEXT;");
   }
@@ -697,6 +856,7 @@ function ensureAgentReferenceTables(db: GraphDatabase): void {
   const codeProposalSql = getTableSql(db, "code_proposals");
   if (codeProposalSql?.includes("agent_runs_old")) {
     const hasArtifactManifest = tableHasColumn(db, "code_proposals", "artifact_manifest_json");
+    const hasWorkUnitProposal = tableHasColumn(db, "code_proposals", "work_unit_proposal_json");
     db.pragma("foreign_keys = OFF");
     db.exec(`
       ALTER TABLE code_proposals RENAME TO code_proposals_old;
@@ -707,16 +867,18 @@ function ensureAgentReferenceTables(db: GraphDatabase): void {
         target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
         diff TEXT NOT NULL,
         artifact_manifest_json TEXT,
+        work_unit_proposal_json TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
-      INSERT INTO code_proposals (id, project_id, agent_run_id, target_node_id, diff, artifact_manifest_json, created_at)
-      SELECT id, project_id, agent_run_id, target_node_id, diff, ${hasArtifactManifest ? "artifact_manifest_json" : "NULL"}, created_at FROM code_proposals_old;
+      INSERT INTO code_proposals (id, project_id, agent_run_id, target_node_id, diff, artifact_manifest_json, work_unit_proposal_json, created_at)
+      SELECT id, project_id, agent_run_id, target_node_id, diff, ${hasArtifactManifest ? "artifact_manifest_json" : "NULL"}, ${hasWorkUnitProposal ? "work_unit_proposal_json" : "NULL"}, created_at FROM code_proposals_old;
       DROP TABLE code_proposals_old;
     `);
     db.pragma("foreign_keys = ON");
   } else if (codeProposalSql && !tableHasColumn(db, "code_proposals", "artifact_manifest_json")) {
     db.exec("ALTER TABLE code_proposals ADD COLUMN artifact_manifest_json TEXT;");
   }
+  addColumnIfMissing(db, "code_proposals", "work_unit_proposal_json", "TEXT");
 }
 
 function ensureCodingWorkflowTables(db: GraphDatabase): void {
@@ -725,6 +887,106 @@ function ensureCodingWorkflowTables(db: GraphDatabase): void {
   }
   if (!getTableSql(db, "coding_workflow_items")) {
     db.exec(CODING_WORKFLOW_ITEMS_SQL);
+  }
+  addColumnIfMissing(db, "coding_workflows", "orchestration_version", "TEXT");
+  addColumnIfMissing(db, "coding_workflows", "orchestration_diagnostics_json", "TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, "coding_workflow_items", "parent_item_id", "TEXT REFERENCES coding_workflow_items(id) ON DELETE SET NULL");
+  addColumnIfMissing(db, "coding_workflow_items", "work_unit_title", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "coding_workflow_items", "objective", "TEXT NOT NULL DEFAULT ''");
+  addColumnIfMissing(db, "coding_workflow_items", "base_index_revision", "TEXT");
+  addColumnIfMissing(db, "coding_workflow_items", "base_workspace_revision", "TEXT");
+  addColumnIfMissing(db, "coding_workflow_items", "base_graph_revision", "INTEGER NOT NULL DEFAULT 0");
+  addColumnIfMissing(db, "coding_workflow_items", "base_revision_json", "TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, "coding_workflow_items", "routing_decision_id", "TEXT");
+  addColumnIfMissing(db, "coding_workflow_items", "context_budget_json", "TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, "coding_workflow_items", "planned_write_scopes_json", "TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing(db, "coding_workflow_items", "actual_write_scopes_json", "TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing(db, "coding_workflow_items", "expected_outputs_json", "TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing(db, "coding_workflow_items", "context_diagnostics_json", "TEXT NOT NULL DEFAULT '{}'");
+  addColumnIfMissing(db, "coding_workflow_items", "context_compiler_version", "TEXT NOT NULL DEFAULT 'legacy'");
+  addColumnIfMissing(db, "coding_workflow_items", "routing_feature_version", "TEXT NOT NULL DEFAULT 'legacy-v1'");
+  addColumnIfMissing(db, "coding_workflow_items", "proposal_revision", "INTEGER");
+  ensureCodingWorkflowStatusEnums(db);
+  db.exec(`
+    ${CODING_WORK_UNIT_NODES_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${CODING_WORK_UNIT_EDGES_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${CODING_WORK_UNIT_DEPENDENCIES_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${INTERFACE_CONTRACTS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${MODEL_ROUTING_DECISIONS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    ${INTEGRATION_CHECKS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+    CREATE INDEX IF NOT EXISTS idx_coding_workflow_items_parent ON coding_workflow_items(parent_item_id);
+    CREATE INDEX IF NOT EXISTS idx_coding_work_unit_nodes_node ON coding_work_unit_nodes(node_id, role);
+    CREATE INDEX IF NOT EXISTS idx_coding_work_unit_edges_edge ON coding_work_unit_edges(edge_id, role);
+    CREATE INDEX IF NOT EXISTS idx_coding_work_unit_dependencies_source ON coding_work_unit_dependencies(source_item_id, status);
+    CREATE INDEX IF NOT EXISTS idx_coding_work_unit_dependencies_target ON coding_work_unit_dependencies(target_item_id, status);
+    CREATE INDEX IF NOT EXISTS idx_interface_contracts_workflow ON interface_contracts(workflow_id, status);
+    CREATE INDEX IF NOT EXISTS idx_interface_contracts_producer ON interface_contracts(producer_item_id, status);
+    CREATE INDEX IF NOT EXISTS idx_interface_contracts_consumer ON interface_contracts(consumer_item_id, status);
+    CREATE INDEX IF NOT EXISTS idx_model_routing_decisions_scale ON model_routing_decisions(selected_scale, feature_version);
+    CREATE INDEX IF NOT EXISTS idx_integration_checks_workflow ON integration_checks(workflow_id, layer_index, status);
+    CREATE INDEX IF NOT EXISTS idx_integration_checks_item ON integration_checks(item_id, status);
+  `);
+  addColumnIfMissing(db, "model_routing_decisions", "provider_id", "TEXT");
+  addColumnIfMissing(db, "model_routing_decisions", "model_id", "TEXT");
+  addColumnIfMissing(db, "model_routing_decisions", "assignment_json", "TEXT");
+  addColumnIfMissing(db, "model_routing_decisions", "metrics_json", "TEXT");
+  db.exec("CREATE INDEX IF NOT EXISTS idx_model_routing_decisions_assignment ON model_routing_decisions(provider_id, model_id);");
+}
+
+function ensureCodingWorkflowStatusEnums(db: GraphDatabase): void {
+  const workflowSql = getTableSql(db, "coding_workflows");
+  const itemSql = getTableSql(db, "coding_workflow_items");
+  if (!workflowSql || !itemSql || (workflowSql.includes("'cancelled'") && itemSql.includes("'cancelled'"))) {
+    return;
+  }
+  db.pragma("foreign_keys = OFF");
+  db.pragma("legacy_alter_table = ON");
+  try {
+    db.exec(`
+      ALTER TABLE coding_workflow_items RENAME TO coding_workflow_items_status_old;
+      ALTER TABLE coding_workflows RENAME TO coding_workflows_status_old;
+      ${CODING_WORKFLOWS_SQL}
+      ${CODING_WORKFLOW_ITEMS_SQL}
+      INSERT INTO coding_workflows (
+        id, project_id, scope_node_id, status, current_layer, summary,
+        orchestration_version, orchestration_diagnostics_json, created_at, updated_at
+      )
+      SELECT
+        id, project_id, scope_node_id, status, current_layer, summary,
+        orchestration_version, orchestration_diagnostics_json, created_at, updated_at
+      FROM coding_workflows_status_old;
+      INSERT INTO coding_workflow_items (
+        id, workflow_id, project_id, node_id, parent_item_id, layer_index,
+        work_unit_title, objective, base_index_revision, base_workspace_revision,
+        base_graph_revision, base_revision_json, routing_decision_id,
+        context_budget_json, planned_write_scopes_json, actual_write_scopes_json,
+        expected_outputs_json, context_diagnostics_json, context_compiler_version,
+        routing_feature_version, proposal_revision, recommended_mode, selected_mode,
+        mode_reason, status, conflict_group, agent_run_id, proposal_id, applied_at,
+        created_at, updated_at
+      )
+      SELECT
+        id, workflow_id, project_id, node_id, parent_item_id, layer_index,
+        work_unit_title, objective, base_index_revision, base_workspace_revision,
+        base_graph_revision, base_revision_json, routing_decision_id,
+        context_budget_json, planned_write_scopes_json, actual_write_scopes_json,
+        expected_outputs_json, context_diagnostics_json, context_compiler_version,
+        routing_feature_version, proposal_revision, recommended_mode, selected_mode,
+        mode_reason, status, conflict_group, agent_run_id, proposal_id, applied_at,
+        created_at, updated_at
+      FROM coding_workflow_items_status_old;
+      DROP TABLE coding_workflow_items_status_old;
+      DROP TABLE coding_workflows_status_old;
+    `);
+  } finally {
+    db.pragma("legacy_alter_table = OFF");
+    db.pragma("foreign_keys = ON");
+  }
+}
+
+function addColumnIfMissing(db: GraphDatabase, tableName: string, columnName: string, definition: string): void {
+  if (!tableHasColumn(db, tableName, columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition};`);
   }
 }
 
@@ -960,6 +1222,12 @@ function resetGraphStorage(db: GraphDatabase): void {
       DROP TABLE IF EXISTS scan_file_state;
       DROP TABLE IF EXISTS graph_edges;
       DROP TABLE IF EXISTS graph_revisions;
+      DROP TABLE IF EXISTS integration_checks;
+      DROP TABLE IF EXISTS model_routing_decisions;
+      DROP TABLE IF EXISTS interface_contracts;
+      DROP TABLE IF EXISTS coding_work_unit_dependencies;
+      DROP TABLE IF EXISTS coding_work_unit_edges;
+      DROP TABLE IF EXISTS coding_work_unit_nodes;
       DROP TABLE IF EXISTS coding_workflow_items;
       DROP TABLE IF EXISTS coding_workflows;
       DROP TABLE IF EXISTS code_proposals;
@@ -1011,19 +1279,69 @@ function rebuildProviderSettingsTable(db: GraphDatabase, tableName: string, crea
   if (!keyColumn) {
     return;
   }
+  const hasCliCommand = tableHasColumn(db, tableName, "cli_command");
+  const hasReasoningEffort = tableHasColumn(db, tableName, "reasoning_effort");
+  const hasSpeedTier = tableHasColumn(db, tableName, "speed_tier");
+  const hasPermissionMode = tableHasColumn(db, tableName, "permission_mode");
+  const hasCodexSystemPromptMode = tableHasColumn(db, tableName, "codex_system_prompt_mode");
+  const hasClaudeSystemPromptMode = tableHasColumn(db, tableName, "claude_system_prompt_mode");
+  const codexLegacyCommandPredicate = [
+    "provider = 'codex' AND",
+    "(",
+    "trim(model) IN ('codex', 'codex.cmd', 'codex.exe')",
+    "OR trim(model) LIKE 'codex %'",
+    "OR trim(model) LIKE '%/codex'",
+    "OR trim(model) LIKE '%/codex.exe'",
+    "OR trim(model) LIKE '%\\\\codex'",
+    "OR trim(model) LIKE '%\\\\codex.exe'",
+    "OR trim(model) LIKE 'npx %codex%'",
+    "OR trim(model) LIKE 'pnpm %codex%'",
+    "OR trim(model) LIKE 'bunx %codex%'",
+    "OR trim(model) LIKE 'npm exec %codex%'",
+    "OR trim(model) LIKE 'node %codex%'",
+    ")"
+  ].join(" ");
+  const claudeLegacyCommandPredicate = [
+    "provider = 'claudecode' AND",
+    "(",
+    "trim(model) IN ('claude', 'claude.cmd', 'claude.exe')",
+    "OR trim(model) LIKE 'claude %'",
+    "OR trim(model) LIKE '%/claude'",
+    "OR trim(model) LIKE '%/claude.exe'",
+    "OR trim(model) LIKE '%\\\\claude'",
+    "OR trim(model) LIKE '%\\\\claude.exe'",
+    "OR trim(model) LIKE 'npx %claude%'",
+    "OR trim(model) LIKE 'pnpm %claude%'",
+    "OR trim(model) LIKE 'bunx %claude%'",
+    "OR trim(model) LIKE 'npm exec %claude%'",
+    "OR trim(model) LIKE 'node %claude%'",
+    ")"
+  ].join(" ");
+  const modelExpression = `CASE WHEN ${codexLegacyCommandPredicate} OR ${claudeLegacyCommandPredicate} THEN '' ELSE model END`;
+  const cliCommandExpression = hasCliCommand
+    ? `CASE WHEN trim(cli_command) <> '' THEN cli_command WHEN ${codexLegacyCommandPredicate} OR ${claudeLegacyCommandPredicate} THEN model ELSE '' END`
+    : `CASE WHEN ${codexLegacyCommandPredicate} OR ${claudeLegacyCommandPredicate} THEN model ELSE '' END`;
   const oldTableName = `${tableName}_old`;
   db.pragma("foreign_keys = OFF");
   db.exec(`
     ALTER TABLE ${tableName} RENAME TO ${oldTableName};
     ${createSql}
     INSERT INTO ${tableName} (
-      project_id, ${keyColumn}, provider, model, parallel_limit,
+      project_id, ${keyColumn}, provider, model, cli_command,
+      reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+      parallel_limit,
       api_key_source_type, api_key_source_value,
       system_prompt_source_type, system_prompt_source_value,
       created_at, updated_at
     )
     SELECT
-      project_id, ${keyColumn}, provider, model, parallel_limit,
+      project_id, ${keyColumn}, provider, ${modelExpression}, ${cliCommandExpression},
+      ${hasReasoningEffort ? "reasoning_effort" : "'medium'"},
+      ${hasSpeedTier ? "speed_tier" : "'standard'"},
+      ${hasPermissionMode ? "permission_mode" : "'ask_for_permission'"},
+      ${hasCodexSystemPromptMode ? "codex_system_prompt_mode" : "'custom'"},
+      ${hasClaudeSystemPromptMode ? "claude_system_prompt_mode" : "'custom'"},
+      parallel_limit,
       api_key_source_type, api_key_source_value,
       system_prompt_source_type, system_prompt_source_value,
       created_at, updated_at
@@ -1103,6 +1421,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
   const hasReviewMode = tableHasColumn(db, "agent_runs", "review_mode");
   const hasBaseGraphRevision = tableHasColumn(db, "agent_runs", "base_graph_revision");
   const hasAppliedGraphRevision = tableHasColumn(db, "agent_runs", "applied_graph_revision");
+  const hasImplementedAt = tableHasColumn(db, "agent_runs", "implemented_at");
   const hasConflictReason = tableHasColumn(db, "agent_runs", "conflict_reason");
   db.pragma("foreign_keys = OFF");
   db.exec(`
@@ -1116,6 +1435,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
         status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'conflicted')),
       base_graph_revision INTEGER NOT NULL DEFAULT 0,
       applied_graph_revision INTEGER,
+      implemented_at TEXT,
       conflict_reason TEXT,
       target_node_id TEXT REFERENCES graph_nodes(id) ON DELETE SET NULL,
       prompt TEXT NOT NULL DEFAULT '',
@@ -1128,7 +1448,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
     );
       INSERT INTO agent_runs (
         id, project_id, agent_kind, coding_mode, review_mode, status,
-        base_graph_revision, applied_graph_revision, conflict_reason,
+        base_graph_revision, applied_graph_revision, implemented_at, conflict_reason,
         target_node_id, prompt, response, diff, graph_patch_json, error, created_at, updated_at
       )
       SELECT
@@ -1138,6 +1458,7 @@ function rebuildAgentRunsTable(db: GraphDatabase): void {
         CASE status WHEN 'queued' THEN 'queued' WHEN 'running' THEN 'running' WHEN 'succeeded' THEN 'succeeded' WHEN 'failed' THEN 'failed' WHEN 'conflicted' THEN 'conflicted' ELSE 'failed' END,
       ${hasBaseGraphRevision ? "base_graph_revision" : "0"},
       ${hasAppliedGraphRevision ? "applied_graph_revision" : "NULL"},
+      ${hasImplementedAt ? "implemented_at" : "NULL"},
       ${hasConflictReason ? "conflict_reason" : "NULL"},
       target_node_id, prompt, response, diff, graph_patch_json, error, created_at, updated_at
     FROM agent_runs_old;

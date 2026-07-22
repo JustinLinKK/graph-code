@@ -1,23 +1,36 @@
-import { spawn } from "node:child_process";
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
+import crossSpawn from "cross-spawn";
+import {
+  buildLegacyRoundRobinPlanningChunks,
+  estimateLegacyInputTokens,
+  inspectLegacyRoundRobinPlanningChunks,
+  type LegacyPlanningGraph
+} from "./orchestration/legacy-baseline";
 import {
   AVAILABLE_EXTENSION_PACKAGES,
-    type AgentConfig,
-    type AgentKind,
-    type AgentRun,
-    type AgentStatus,
+  type AgentConfig,
+  type AgentKind,
+  type AgentRun,
+  type AgentStatus,
   type BlockExecutionMetadata,
   type CanvasGraph,
+  CLAUDE_REASONING_EFFORTS,
   type CodingAgentRequest,
+  type CodingWorkUnit,
   type CodeProposalArtifactManifest,
+  type ContractUpdate,
   type GraphEdge,
   type GraphNode,
   type GraphPatch,
   type GraphStatusPatch,
+  type IndexState,
+  type InterfaceContract,
   type NodeDetail,
+  type WorkUnitProposal,
+  workUnitProposalSchema,
     type PlanningChatRequest,
     type ReviewAgentRequest,
     type ReviewAgentMode,
@@ -39,9 +52,41 @@ import {
   isDomainNodeKind
 } from "@graphcode/graph-model";
 import { z } from "zod";
+import {
+  renderedWorkUnitContextSchema,
+  workUnitContextSchema,
+  type RenderedWorkUnitContext,
+  type WorkUnitContext
+} from "./context/contracts";
+import { validateActualWriteScopes } from "./context/render";
+
+export * from "./context/compiler";
+export * from "./context/contracts";
+export * from "./context/render";
+export * from "./context/retrieval";
+
+export {
+  benchmarkLegacyConflictSchedule,
+  buildLegacyRoundRobinPlanningChunks,
+  createDelayedFakeProvider,
+  estimateLegacyInputTokens,
+  fixtureToLegacyPlanningGraph,
+  inspectLegacyRoundRobinPlanningChunks,
+  legacyWorkflowFixtureSchema
+} from "./orchestration/legacy-baseline";
+export type {
+  DelayedFakeProvider,
+  LegacyPlanningChunkDiagnostic,
+  LegacyPlanningChunkInspection,
+  LegacyPlanningGraph,
+  LegacyScheduleBenchmark,
+  LegacyScheduleItem,
+  LegacyWorkflowFixture
+} from "./orchestration/legacy-baseline";
 
 export type GraphCodeToolbox = {
   readGraph: (projectId: string) => Promise<{ nodes: GraphNode[]; edges: GraphEdge[] }>;
+  getIndexState: (projectId: string) => Promise<IndexState>;
   getNodeDetail: (nodeId: string) => Promise<NodeDetail>;
   getCanvasGraph: (projectId: string, rootNodeId: string, includeAttachments?: boolean) => Promise<CanvasGraph>;
   resolveExecutionMetadata: (nodeId: string) => Promise<BlockExecutionMetadata>;
@@ -52,8 +97,16 @@ export type GraphCodeToolbox = {
   buildFakeLocalScanOutput: (projectId: string, file: ScannableFile) => Promise<ScanLocalOutput>;
   applyScanResult: (projectId: string, result: ScanPipelineResult, runId?: string | null) => Promise<CodeGraphRefreshResult>;
   readSourceFile: (relativePath: string) => Promise<string>;
-  writeCodeProposal: (projectId: string, runId: string | null, targetNodeId: string | null, diff: string, artifactManifest?: CodeProposalArtifactManifest | null) => Promise<void>;
+  writeCodeProposal: (
+    projectId: string,
+    runId: string | null,
+    targetNodeId: string | null,
+    diff: string,
+    artifactManifest?: CodeProposalArtifactManifest | null,
+    workUnitProposal?: WorkUnitProposal | null
+  ) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
+  readGitDiff?: (projectId: string) => Promise<string>;
   refreshCodeGraph: (
     projectId: string,
     rootPath?: string
@@ -66,14 +119,40 @@ export type GraphCodeToolbox = {
   }>;
 };
 
-type PlanningGraph = Awaited<ReturnType<GraphCodeToolbox["readGraph"]>>;
+type PlanningGraph = LegacyPlanningGraph;
+
+export type AgentContextBenchmark = {
+  durationMs: number;
+  promptCharacters: number;
+  estimatedInputTokens: number;
+  chunks: number;
+  nodes: number;
+  edges: number;
+  orphanEdges: number;
+};
+
+export function benchmarkAgentContext(graph: PlanningGraph, parallelLimit = 4): AgentContextBenchmark {
+  const startedAt = performance.now();
+  const inspection = inspectLegacyRoundRobinPlanningChunks(graph, parallelLimit);
+  const promptCharacters = inspection.chunks.reduce((total, chunk) => total + chunk.promptCharacters, 0);
+  return {
+    durationMs: performance.now() - startedAt,
+    promptCharacters,
+    estimatedInputTokens: estimateLegacyInputTokens(promptCharacters),
+    chunks: inspection.chunks.length,
+    nodes: graph.nodes.length,
+    edges: graph.edges.length,
+    orphanEdges: inspection.orphanEdgeIds.length
+  };
+}
 
 export type AgentRuntimeOptions = {
   config: AgentConfig;
-  scanningConfigs?: Partial<Record<ScanningAgentMode, ScanningAgentConfig>>;
+  scanningConfigs?: Partial<Record<ScanningAgentMode, ScanningAgentConfig & { skipCodexDefaultSystemPrompt?: boolean }>>;
   runId?: string;
   workspaceRoot?: string;
   toolbox: GraphCodeToolbox;
+  signal?: AbortSignal;
 };
 
 export type AgentResult = {
@@ -81,6 +160,29 @@ export type AgentResult = {
   diff?: string;
   graphPatch?: GraphPatch | null;
   touched?: GraphStatusPatch[];
+};
+
+export type IntegrationAgentContext = {
+  schemaVersion: 1;
+  workflowId: string;
+  layerIndex: number;
+  parent: { workUnitId: string | null; objective: string };
+  children: Array<{
+    workUnitId: string;
+    objective: string;
+    outputSummary: string;
+    diff: string;
+    contractUpdates: ContractUpdate[];
+  }>;
+  contracts: InterfaceContract[];
+  failures: Array<{
+    kind: string;
+    status: "passed" | "failed" | "blocked";
+    itemId: string | null;
+    diagnostics: Record<string, unknown>;
+  }>;
+  relevantSource: Array<{ path: string; startLine: number | null; endLine: number | null; content: string }>;
+  authority: "propose_reconciliation_only";
 };
 
 type PromptMessage = {
@@ -207,24 +309,16 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
     prompt: input.prompt,
     execute: async () => {
       const provider = createProvider(options.config, options.workspaceRoot);
-      const graph = await options.toolbox.readGraph(input.projectId);
+      const [fallbackGraph, scopedCanvas, indexState] = await Promise.all([
+        input.scopeNodeId ? Promise.resolve(null) : options.toolbox.readGraph(input.projectId),
+        input.scopeNodeId ? options.toolbox.getCanvasGraph(input.projectId, input.scopeNodeId, true).catch(() => null) : Promise.resolve(null),
+        options.toolbox.getIndexState(input.projectId)
+      ]);
+      const graph = scopedCanvas
+        ? { nodes: scopedCanvas.nodes, edges: scopedCanvas.edges }
+        : fallbackGraph ?? { nodes: [], edges: [] };
+      const coverageNotice = formatIndexCoverageForPrompt(indexState);
       const scope = input.scopeNodeId ? graph.nodes.find((node) => node.id === input.scopeNodeId) ?? null : null;
-      const planningChunks = buildPlanningContextChunks(graph, options.config.parallelLimit);
-      const chunkNotes = await boundedMap(planningChunks, options.config.parallelLimit, async (chunk, index) =>
-        provider.invoke([
-          { role: "system", content: resolveSystemPrompt(options.config, "Analyze one GraphCode graph slice for a planning agent.") },
-          {
-            role: "user",
-            content: [
-              `Planning prompt: ${input.prompt}`,
-              scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
-              `Slice ${index + 1} of ${planningChunks.length}`,
-              `Nodes: ${chunk.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}`,
-              `Edges: ${chunk.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
-            ].join("\n")
-          }
-        ])
-      );
       const response = await provider.invoke([
         {
           role: "system",
@@ -237,6 +331,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
           role: "user",
           content: [
             `Prompt: ${input.prompt}`,
+            coverageNotice,
             scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
             `Writable node ids:\n${graph.nodes.slice(0, 120).map((node) => `${node.id}: ${node.name} (${node.kind})`).join("\n")}`,
             `Writable edge ids:\n${graph.edges.slice(0, 160).map((edge) => `${edge.id}: ${edge.sourceNodeId}->${edge.targetNodeId} (${edge.kind})`).join("\n")}`,
@@ -251,7 +346,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
   }
 }`,
             "Emit at least one graphPatch operation when a scoped or root node can represent the plan. Prefer updating existing node summaries or codeContext over creating speculative new nodes.",
-            `Parallel graph slice notes:\n${chunkNotes.map((note, index) => `Slice ${index + 1}: ${note}`).join("\n\n")}`
+            `Topology-scoped planning evidence:\nNodes:\n${graph.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}\nEdges:\n${graph.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
           ].join("\n")
         }
       ]);
@@ -295,10 +390,14 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
       const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const detail = await options.toolbox.getNodeDetail(input.nodeId);
-      const graph = await options.toolbox.readGraph(input.projectId);
+      const scopeRootNodeId = detail.node.parentId ?? detail.node.id;
+      const [boundedCanvas, indexState] = await Promise.all([
+        options.toolbox.getCanvasGraph(input.projectId, scopeRootNodeId, true),
+        options.toolbox.getIndexState(input.projectId)
+      ]);
+      const graph = { nodes: boundedCanvas.nodes, edges: boundedCanvas.edges };
       const organizationScope = resolveCodingOrganizationScope(detail.node, graph.nodes);
-      const scopeCanvas =
-        organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
+      const scopeCanvas = mode !== "small" ? boundedCanvas : null;
         const allowedPath = detail.node.source.path ?? detail.node.code.directory;
         const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
         const gitStatus = await options.toolbox.readGitStatus(input.projectId);
@@ -314,22 +413,30 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
           gitStatus,
           execution,
           recommendedModeReason: input.recommendedModeReason,
-          prompt: input.prompt
+          prompt: input.prompt,
+          coverageNotice: formatIndexCoverageForPrompt(indexState)
         });
         const response = await provider.invoke([
           { role: "system", content: resolveSystemPrompt(options.config, "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest.") },
           { role: "user", content: context }
         ]);
         const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(response);
-        const diff = normalizeDiff(responseWithoutArtifacts, allowedPath);
-        assertDiffInScope(diff, allowedPath);
+        const directEditMode = usesCliDirectEditMode(options.config);
+        const directDiff = directEditMode ? await (options.toolbox.readGitDiff?.(input.projectId) ?? Promise.resolve("")) : "";
+        if (directEditMode && directDiff.trim()) {
+          await options.toolbox.refreshCodeGraph(input.projectId).catch(() => undefined);
+        }
+        const diff = directDiff.trim() ? directDiff : normalizeDiff(responseWithoutArtifacts, allowedPath);
+        if (!directEditMode) {
+          assertDiffInScope(diff, allowedPath);
+        }
         await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
       const touched: GraphStatusPatch[] = [
         {
           entityType: "node",
           entityId: input.nodeId,
           status: "coded",
-          note: "Coding agent produced a patch proposal.",
+          note: usesCliDirectEditMode(options.config) ? "Coding agent applied or captured direct workspace edits." : "Coding agent produced a patch proposal.",
           agentRunId: options.runId ?? null
         }
       ];
@@ -337,6 +444,138 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
       return { response, diff, touched };
     }
   });
+}
+
+export type WorkUnitCodingRequest = {
+  projectId: string;
+  targetNodeId: string;
+  context: WorkUnitContext;
+  rendered: RenderedWorkUnitContext;
+  allowContractUpdates?: boolean;
+};
+
+export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, options: AgentRuntimeOptions): Promise<AgentResult> {
+  return runLangGraphTask({
+    kind: "coding",
+    prompt: input.context.task,
+    execute: async () => {
+      const context = workUnitContextSchema.parse(input.context);
+      const rendered = renderedWorkUnitContextSchema.parse(input.rendered);
+      if (rendered.purpose !== "coding") throw new Error("Work-unit coding execution requires a coding context render.");
+      if (context.projectId !== input.projectId || !context.workUnit.ownedNodeIds.includes(input.targetNodeId)) {
+        throw new Error("Work-unit coding request identity does not match its compiled context.");
+      }
+      if (usesCliDirectEditMode(options.config)) {
+        throw new Error("Parallel work-unit execution is proposal-only; direct-edit CLI permission modes are not allowed.");
+      }
+      throwIfAgentCancelled(options.signal);
+      const provider = createProvider(options.config, options.workspaceRoot);
+      const customSystemPrompt =
+        (options.config.systemPromptSource.type === "manual" || options.config.systemPromptSource.type === "file") &&
+        options.config.systemPromptSource.value?.trim()
+          ? `\n\nAdditional workspace policy:\n${options.config.systemPromptSource.value.trim()}`
+          : "";
+      const response = await provider.invoke([
+        {
+          role: "system",
+          content: `${rendered.systemPrompt}${customSystemPrompt}\n\nReturn a unified diff. Append GRAPHCODE_WORK_UNIT_METADATA_JSON followed by JSON containing ${
+            input.allowContractUpdates === false ? "discoveredDependencies, assumptions, unresolvedIssues, and confidence" : "contractUpdates, discoveredDependencies, assumptions, unresolvedIssues, and confidence"
+          }.`
+        },
+        { role: "user", content: rendered.userPrompt }
+      ]);
+      throwIfAgentCancelled(options.signal);
+      const { content: responseWithoutMetadata, metadata } = extractWorkUnitProposalMetadata(response);
+      const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMetadata);
+      const diff =
+        options.config.provider === "fake"
+          ? fakeWorkUnitDiff(context, responseWithoutArtifacts)
+          : normalizeDiff(responseWithoutArtifacts, context.allowedWrites[0]?.path);
+      const actualWriteScopes = extractUnifiedDiffWriteScopes(diff);
+      if (actualWriteScopes.length === 0) throw new Error("Work-unit coding response did not contain a parseable unified diff.");
+      validateActualWriteScopes(context.workUnit, actualWriteScopes);
+      const workUnitProposal = workUnitProposalSchema.parse({
+        workUnitId: context.workUnit.id,
+        baseRevision: context.workUnit.baseRevision,
+        diff,
+        actualWriteScopes,
+        contractUpdates: input.allowContractUpdates === false ? [] : metadata?.contractUpdates ?? [],
+        discoveredDependencies: metadata?.discoveredDependencies ?? [],
+        testsProposed: [],
+        assumptions: metadata?.assumptions ?? [],
+        unresolvedIssues: metadata?.unresolvedIssues ?? [],
+        confidence: metadata?.confidence ?? "medium"
+      });
+      await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.targetNodeId, diff, artifactManifest, workUnitProposal);
+      const touched = context.workUnit.ownedNodeIds.map((nodeId) => ({
+        entityType: "node" as const,
+        entityId: nodeId,
+        status: "coded" as const,
+        note: `Work unit ${context.workUnit.id} produced a bounded proposal.`,
+        agentRunId: options.runId ?? null
+      }));
+      await options.toolbox.setStatuses(input.projectId, touched);
+      return { response, diff, touched };
+    }
+  });
+}
+
+export async function runIntegrationAgent(
+  input: { scale: "medium" | "large"; context: IntegrationAgentContext },
+  options: AgentRuntimeOptions
+): Promise<string> {
+  if (usesCliDirectEditMode(options.config)) {
+    throw new Error("Integration agents are proposal-only; direct-edit CLI permission modes are not allowed.");
+  }
+  throwIfAgentCancelled(options.signal);
+  const provider = createProvider(options.config, options.workspaceRoot);
+  const response = await provider.invoke([
+    {
+      role: "system",
+      content: [
+        "Reconcile only the bounded child proposals, interface contracts, failures, and exact source in the supplied integration capsule.",
+        "Do not request or infer a complete repository graph.",
+        "Return a reconciliation proposal only. Never apply workspace edits.",
+        `Integration scale: ${input.scale}.`
+      ].join(" ")
+    },
+    { role: "user", content: `GRAPHCODE_BOUNDED_INTEGRATION_CONTEXT_JSON\n${JSON.stringify(input.context)}` }
+  ]);
+  throwIfAgentCancelled(options.signal);
+  return response;
+}
+
+export function extractUnifiedDiffWriteScopes(diff: string): CodingWorkUnit["plannedWriteScopes"] {
+  const scopes: CodingWorkUnit["plannedWriteScopes"] = [];
+  const lines = diff.split(/\r?\n/);
+  let oldPath: string | null = null;
+  let newPath: string | null = null;
+  let currentPath: string | null = null;
+  let permission: "edit" | "create" | "delete" = "edit";
+  for (const line of lines) {
+    if (line.startsWith("--- ")) {
+      oldPath = normalizeDiffHeaderPath(line.slice(4));
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      newPath = normalizeDiffHeaderPath(line.slice(4));
+      currentPath = newPath ?? oldPath;
+      permission = oldPath === null ? "create" : newPath === null ? "delete" : "edit";
+      continue;
+    }
+    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    if (!hunk || !currentPath) continue;
+    const startLine = Number.parseInt(hunk[1], 10);
+    const count = hunk[2] === undefined ? 1 : Number.parseInt(hunk[2], 10);
+    scopes.push({
+      path: currentPath,
+      startLine: permission === "edit" ? startLine : null,
+      endLine: permission === "edit" ? startLine + Math.max(1, count) - 1 : null,
+      symbolId: null,
+      permission
+    });
+  }
+  return scopes;
 }
 
 export async function runReviewAgent(
@@ -350,11 +589,14 @@ export async function runReviewAgent(
       const provider = createProvider(options.config, options.workspaceRoot);
       const mode = input.mode ?? "medium";
       const diff = input.diff ?? "";
-      const graph = await options.toolbox.readGraph(input.projectId);
       const detail = input.targetNodeId ? await options.toolbox.getNodeDetail(input.targetNodeId) : null;
+      const [boundedCanvas, indexState] = await Promise.all([
+        detail ? options.toolbox.getCanvasGraph(input.projectId, detail.node.parentId ?? detail.node.id, true).catch(() => null) : Promise.resolve(null),
+        options.toolbox.getIndexState(input.projectId)
+      ]);
+      const graph = { nodes: boundedCanvas?.nodes ?? (detail ? [detail.node] : []), edges: boundedCanvas?.edges ?? [] };
       const organizationScope = detail ? resolveCodingOrganizationScope(detail.node, graph.nodes) : null;
-      const scopeCanvas =
-        detail && organizationScope && mode !== "small" ? await options.toolbox.getCanvasGraph(input.projectId, organizationScope.id, true).catch(() => null) : null;
+      const scopeCanvas = detail && mode !== "small" ? boundedCanvas : null;
       const allowedPath = detail?.node.source.path ?? detail?.node.code.directory ?? null;
       const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath).catch(() => "") : "";
       const gitStatus = await options.toolbox.readGitStatus(input.projectId);
@@ -370,7 +612,8 @@ export async function runReviewAgent(
         source,
         gitStatus,
         execution,
-        diff
+        diff,
+        coverageNotice: formatIndexCoverageForPrompt(indexState)
       });
       const response = await provider.invoke([
         {
@@ -409,8 +652,12 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
     kind: "scanning",
     prompt: scanningPrompt(input),
     execute: async () => {
+      throwIfAgentCancelled(options.signal);
       const scanConfigs = resolveScanningConfigs(options);
       const inventory = await options.toolbox.listScannableFiles(input.projectId);
+      const indexState = await options.toolbox.getIndexState(input.projectId);
+      const coverageNotice = formatIndexCoverageForPrompt(indexState);
+      throwIfAgentCancelled(options.signal);
       const previousStates = await options.toolbox.getScanFileStates(input.projectId);
       const previousByPath = new Map(previousStates.map((state) => [state.filePath, state.contentHash]));
       const inventoryByPath = new Map(inventory.map((file) => [file.path, file]));
@@ -418,12 +665,18 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
       const deletedFiles = previousStates.filter((state) => !inventoryByPath.has(state.filePath));
       const initial = previousStates.length === 0;
       const localTargets = initial ? inventory : changedFiles;
-      const localOutputs = await boundedMap(localTargets, scanConfigs.local.parallelLimit, (file) =>
-        runLocalScan(input, file, scanConfigs.local, options.toolbox, options.workspaceRoot)
+      const localOutputs = await boundedMap(
+        localTargets,
+        scanConfigs.local.parallelLimit,
+        (file) => runLocalScan(input, file, scanConfigs.local, options.toolbox, coverageNotice, options.workspaceRoot),
+        options.signal
       );
       const mediumScopes = directoriesForScan(initial ? inventory : [...changedFiles, ...deletedFiles.map((file) => ({ path: file.filePath, contentHash: file.contentHash, size: 0, language: "unknown" }))]);
-      const mediumOutputs = await boundedMap(mediumScopes, scanConfigs.medium.parallelLimit, (scopePath) =>
-        runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium, options.workspaceRoot)
+      const mediumOutputs = await boundedMap(
+        mediumScopes,
+        scanConfigs.medium.parallelLimit,
+        (scopePath) => runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium, coverageNotice, options.workspaceRoot),
+        options.signal
       );
       const unchangedGraphSummary = initial
         ? { nodes: [], edges: [] }
@@ -431,7 +684,8 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
             ...changedFiles.map((file) => file.path),
             ...deletedFiles.map((file) => file.filePath)
           ]);
-      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global, options.workspaceRoot);
+      throwIfAgentCancelled(options.signal);
+      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global, coverageNotice, options.workspaceRoot);
       const pipeline = scanPipelineResultSchema.parse({
         initial,
         inventory,
@@ -442,11 +696,15 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
         globalOutput
       });
       const result = await options.toolbox.applyScanResult(input.projectId, pipeline, options.runId ?? null);
+      const finalIndexState = await options.toolbox.getIndexState(input.projectId);
       return {
         response: [
           `Scanned ${result.fileCount} files into ${result.nodeCount} Code Graph nodes.`,
           `Changed ${changedFiles.length} files, removed ${deletedFiles.length} files, ran ${localOutputs.length} local, ${mediumOutputs.length} medium, and 1 global scan pass.`,
-          `Extracted ${result.symbolCount} symbols, ${result.workflowNodeCount} workflow blocks, and ${result.edgeCount} edges.`
+          `Extracted ${result.symbolCount} symbols, ${result.workflowNodeCount} workflow blocks, and ${result.edgeCount} edges.`,
+          finalIndexState.completeness.status === "complete"
+            ? "Index coverage is complete for the discovered supported files."
+            : `Index coverage is ${finalIndexState.completeness.status}; repository-wide coverage must not be claimed.`
         ].join(" "),
         touched: []
       };
@@ -491,6 +749,12 @@ function resolveScanningConfigs(options: AgentRuntimeOptions): Record<ScanningAg
           mode,
           provider: options.config.provider,
           model: options.config.model,
+          cliCommand: options.config.cliCommand,
+          reasoningEffort: options.config.reasoningEffort,
+          speedTier: options.config.speedTier,
+          permissionMode: options.config.permissionMode,
+          codexSystemPromptMode: options.config.codexSystemPromptMode,
+          claudeSystemPromptMode: options.config.claudeSystemPromptMode,
           parallelLimit: options.config.parallelLimit,
           apiKeySource: options.config.apiKeySource,
           systemPromptSource: options.config.systemPromptSource
@@ -505,6 +769,7 @@ async function runLocalScan(
   file: ScannableFile,
   config: ScanningAgentConfig,
   toolbox: GraphCodeToolbox,
+  coverageNotice: string,
   workspaceRoot?: string
 ): Promise<ScanLocalOutput> {
   if (config.provider === "fake") {
@@ -518,6 +783,7 @@ async function runLocalScan(
       role: "user",
       content: [
         scanningPrompt(input),
+        coverageNotice,
         `Mode: local`,
         `File: ${file.path}`,
         `Content hash: ${file.contentHash}`,
@@ -542,6 +808,7 @@ async function runMediumScan(
   inventory: ScannableFile[],
   localOutputs: ScanLocalOutput[],
   config: ScanningAgentConfig,
+  coverageNotice: string,
   workspaceRoot?: string
 ): Promise<ScanMediumOutput> {
   if (config.provider === "fake") {
@@ -554,6 +821,7 @@ async function runMediumScan(
       role: "user",
       content: [
         scanningPrompt(input),
+        coverageNotice,
         `Mode: medium`,
         `Scope path: ${scopePath}`,
         `Files in scope:\n${inventory.filter((file) => fileInScope(file.path, scopePath)).map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
@@ -574,6 +842,7 @@ async function runGlobalScan(
   mediumOutputs: ScanMediumOutput[],
   unchangedGraphSummary: { nodes: object[]; edges: object[] },
   config: ScanningAgentConfig,
+  coverageNotice: string,
   workspaceRoot?: string
 ): Promise<ScanGlobalOutput> {
   if (config.provider === "fake") {
@@ -586,6 +855,7 @@ async function runGlobalScan(
       role: "user",
       content: [
         scanningPrompt(input),
+        coverageNotice,
         `Mode: global`,
         `Repository inventory:\n${inventory.map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
         `Compact unchanged graph summaries:\n${JSON.stringify(unchangedGraphSummary, null, 2)}`,
@@ -849,6 +1119,7 @@ type CodingContextInput = {
   execution: BlockExecutionMetadata;
   recommendedModeReason?: string;
   prompt?: string;
+  coverageNotice: string;
 };
 
 function buildCodingContextBundle(input: CodingContextInput): string {
@@ -871,6 +1142,7 @@ function buildCodingContextBundle(input: CodingContextInput): string {
 
   return [
     `Coding mode: ${input.mode}`,
+    input.coverageNotice,
     input.recommendedModeReason ? `Recommended mode reason: ${input.recommendedModeReason}` : "",
     `Target node: ${formatNode(input.detail.node)}`,
     `Organization scope: ${input.organizationScope ? formatNode(input.organizationScope) : "none"}`,
@@ -893,6 +1165,72 @@ function buildCodingContextBundle(input: CodingContextInput): string {
       .join("\n\n");
 }
 
+export type LegacyCodingContextBenchmarkInput = {
+  detail: NodeDetail;
+  graph: LegacyPlanningGraph;
+  scopeCanvas: CanvasGraph | null;
+  source: string;
+  gitStatus: string;
+  execution: BlockExecutionMetadata;
+  recommendedModeReason?: string;
+  prompt?: string;
+  coverageNotice: string;
+};
+
+export type LegacyCodingContextSize = {
+  mode: "small" | "medium" | "large";
+  promptCharacters: number;
+  estimatedInputTokens: number;
+};
+
+export function benchmarkLegacyCodingContexts(input: LegacyCodingContextBenchmarkInput): LegacyCodingContextSize[] {
+  const organizationScope = resolveCodingOrganizationScope(input.detail.node, input.graph.nodes);
+  const allowedPath = input.detail.node.source.path ?? input.detail.node.code.directory;
+  return (["small", "medium", "large"] as const).map((mode) => {
+    const context = buildCodingContextBundle({
+      ...input,
+      mode,
+      organizationScope,
+      allowedPath
+    });
+    return {
+      mode,
+      promptCharacters: context.length,
+      estimatedInputTokens: estimateLegacyInputTokens(context.length)
+    };
+  });
+}
+
+export type LegacyReviewContextBenchmarkInput = {
+  targetRun: AgentRun | null;
+  detail: NodeDetail | null;
+  graph: LegacyPlanningGraph;
+  scopeCanvas: CanvasGraph | null;
+  source: string;
+  gitStatus: string;
+  execution: BlockExecutionMetadata | null;
+  diff: string;
+  coverageNotice: string;
+};
+
+export function benchmarkLegacyReviewContexts(input: LegacyReviewContextBenchmarkInput): LegacyCodingContextSize[] {
+  const organizationScope = input.detail ? resolveCodingOrganizationScope(input.detail.node, input.graph.nodes) : null;
+  const allowedPath = input.detail?.node.source.path ?? input.detail?.node.code.directory ?? null;
+  return (["small", "medium", "large"] as const).map((mode) => {
+    const context = buildReviewContextBundle({
+      ...input,
+      mode,
+      organizationScope,
+      allowedPath
+    });
+    return {
+      mode,
+      promptCharacters: context.length,
+      estimatedInputTokens: estimateLegacyInputTokens(context.length)
+    };
+  });
+}
+
 type ReviewContextInput = {
   mode: ReviewAgentMode;
   targetRun: AgentRun | null;
@@ -905,6 +1243,7 @@ type ReviewContextInput = {
   gitStatus: string;
   execution: BlockExecutionMetadata | null;
   diff: string;
+  coverageNotice: string;
 };
 
 function buildReviewContextBundle(input: ReviewContextInput): string {
@@ -930,6 +1269,7 @@ function buildReviewContextBundle(input: ReviewContextInput): string {
 
   return [
     `Review mode: ${input.mode}`,
+    input.coverageNotice,
     input.targetRun
       ? [
           `Target run: ${input.targetRun.id}`,
@@ -1090,7 +1430,11 @@ async function runLangGraphTask(task: AgentTask): Promise<AgentResult> {
   return result.result ?? { response: "" };
 }
 
-type ProviderConfig = Omit<AgentConfig, "agentKind"> & { agentKind?: AgentKind; mode?: string };
+type ProviderConfig = Omit<AgentConfig, "agentKind"> & {
+  agentKind?: AgentKind;
+  mode?: string;
+  skipCodexDefaultSystemPrompt?: boolean;
+};
 
 function createProvider(config: ProviderConfig, workspaceRoot?: string): { invoke: (messages: PromptMessage[]) => Promise<string> } {
       if (config.provider === "fake") {
@@ -1152,14 +1496,77 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
   throw new Error(`Unsupported agent provider: ${config.provider}`);
 }
 
+function usesCliDirectEditMode(config: ProviderConfig): boolean {
+  return (config.provider === "codex" || config.provider === "claudecode") && (config.permissionMode === "approve_for_me" || config.permissionMode === "full_access");
+}
+
+function codexPermissionProfile(permissionMode: ProviderConfig["permissionMode"]): {
+  approvalPolicy: string;
+  sandboxMode: string;
+  directEdits: boolean;
+  configOverrides: string[];
+} {
+  if (permissionMode === "full_access") {
+    return {
+      approvalPolicy: "never",
+      sandboxMode: "danger-full-access",
+      directEdits: true,
+      configOverrides: []
+    };
+  }
+  if (permissionMode === "approve_for_me") {
+    return {
+      approvalPolicy: "on-request",
+      sandboxMode: "workspace-write",
+      directEdits: true,
+      configOverrides: ['approvals_reviewer="auto_review"']
+    };
+  }
+  return {
+    approvalPolicy: "never",
+    sandboxMode: "read-only",
+    directEdits: false,
+    configOverrides: []
+  };
+}
+
+function tomlString(value: string): string {
+  return JSON.stringify(value);
+}
+
 async function invokeCodexCli(config: ProviderConfig, messages: PromptMessage[], workspaceRoot?: string): Promise<string> {
   const command = resolveCliCommand(config, "codex");
   const cwd = workspaceRoot ?? process.cwd();
+  const permission = codexPermissionProfile(config.permissionMode);
+  const configOverrides = [
+    config.reasoningEffort ? `model_reasoning_effort=${tomlString(config.reasoningEffort)}` : "",
+    config.speedTier === "fast" ? `service_tier=${tomlString("fast")}` : "",
+    config.speedTier === "fast" ? "features.fast_mode=true" : "",
+    config.codexSystemPromptMode === "custom" && config.systemPromptSource.value?.trim()
+      ? `developer_instructions=${tomlString(config.systemPromptSource.value.trim())}`
+      : "",
+    config.skipCodexDefaultSystemPrompt ? `base_instructions=${tomlString("")}` : "",
+    ...permission.configOverrides
+  ].filter(Boolean);
   const prompt = buildCliPrompt(messages, {
     providerName: "Codex CLI",
-    systemInPrompt: true
+    systemInPrompt: false,
+    allowDirectEdits: permission.directEdits
   });
-  const { stdout } = await runCliCommand(command, ["exec", "--cd", cwd, "--sandbox", "read-only", "--ask-for-approval", "never", "-"], {
+  const args = [
+    "--ask-for-approval",
+    permission.approvalPolicy,
+    ...configOverrides.flatMap((override) => ["-c", override]),
+    "exec",
+    "--cd",
+    cwd,
+    "--sandbox",
+    permission.sandboxMode,
+    "--skip-git-repo-check",
+    ...(config.model.trim() ? ["--model", config.model.trim()] : []),
+    "-"
+  ];
+  const { stdout } = await runCliCommand(command, args, {
     cwd,
     input: prompt,
     timeout: 120000,
@@ -1172,27 +1579,28 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
   const command = resolveCliCommand(config, "claude");
   const cwd = workspaceRoot ?? process.cwd();
   const systemPrompt = systemPromptFromMessages(messages);
+  const permission = claudePermissionProfile(config.permissionMode);
   const prompt = buildCliPrompt(messages, {
     providerName: "Claude Code CLI",
-    systemInPrompt: false
+    systemInPrompt: false,
+    allowDirectEdits: permission.directEdits
   });
+  const args = [
+    "-p",
+    ...(config.claudeSystemPromptMode === "custom" && systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
+    "--permission-mode",
+    permission.permissionMode,
+    ...permission.disallowedTools.flatMap((tool) => ["--disallowedTools", tool]),
+    "--output-format",
+    "text",
+    ...(config.model.trim() ? ["--model", config.model.trim()] : []),
+    ...(isClaudeReasoningEffort(config.reasoningEffort) ? ["--effort", config.reasoningEffort] : []),
+    ...(config.speedTier === "fast" ? ["--settings", JSON.stringify({ fastMode: true })] : []),
+    prompt
+  ];
   const { stdout } = await runCliCommand(
     command,
-    [
-      "-p",
-      "--append-system-prompt",
-      systemPrompt,
-      "--permission-mode",
-      "plan",
-      "--disallowedTools",
-      "Edit",
-      "MultiEdit",
-      "Write",
-      "NotebookEdit",
-      "--output-format",
-      "text",
-      prompt
-    ],
+    args,
     {
       cwd,
       timeout: 120000,
@@ -1203,7 +1611,37 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
 }
 
 function resolveCliCommand(config: ProviderConfig, fallback: string): string {
-  return config.model.trim() || fallback;
+  return config.cliCommand?.trim() || fallback;
+}
+
+function claudePermissionProfile(permissionMode: ProviderConfig["permissionMode"]): {
+  permissionMode: string;
+  directEdits: boolean;
+  disallowedTools: string[];
+} {
+  if (permissionMode === "full_access") {
+    return {
+      permissionMode: "bypassPermissions",
+      directEdits: true,
+      disallowedTools: []
+    };
+  }
+  if (permissionMode === "approve_for_me") {
+    return {
+      permissionMode: "acceptEdits",
+      directEdits: true,
+      disallowedTools: []
+    };
+  }
+  return {
+    permissionMode: "plan",
+    directEdits: false,
+    disallowedTools: ["Edit", "MultiEdit", "Write", "NotebookEdit"]
+  };
+}
+
+function isClaudeReasoningEffort(value: string): value is (typeof CLAUDE_REASONING_EFFORTS)[number] {
+  return (CLAUDE_REASONING_EFFORTS as readonly string[]).includes(value);
 }
 
 function systemPromptFromMessages(messages: PromptMessage[]): string {
@@ -1214,7 +1652,7 @@ function systemPromptFromMessages(messages: PromptMessage[]): string {
     .trim();
 }
 
-function buildCliPrompt(messages: PromptMessage[], options: { providerName: string; systemInPrompt: boolean }): string {
+function buildCliPrompt(messages: PromptMessage[], options: { providerName: string; systemInPrompt: boolean; allowDirectEdits?: boolean }): string {
   const system = systemPromptFromMessages(messages);
   const conversation = messages
     .filter((message) => options.systemInPrompt || message.role !== "system")
@@ -1224,16 +1662,14 @@ function buildCliPrompt(messages: PromptMessage[], options: { providerName: stri
     `GraphCode ${options.providerName} account-plan invocation.`,
     "Use the GraphCode role/mode instructions as the active skill for this run.",
     options.systemInPrompt && system ? `GraphCode skill instructions:\n${system}` : "",
-    "Do not edit, write, or apply files directly. Return the requested GraphCode response only so the app can store, review, and apply proposals.",
+    options.allowDirectEdits
+      ? "You may edit workspace files directly when needed. Return a concise final message; GraphCode will capture the resulting git diff."
+      : "Do not edit, write, or apply files directly. Return the requested GraphCode response only so the app can store, review, and apply proposals.",
     "For coding runs, return a clean unified diff and append GRAPHCODE_TEST_ARTIFACTS_JSON only when test artifacts are proposed. For scanning runs, return strict JSON only.",
     conversation
   ]
     .filter(Boolean)
     .join("\n\n");
-}
-
-function usesWindowsCliShell(platform: NodeJS.Platform = process.platform): boolean {
-  return platform === "win32";
 }
 
 function runCliCommand(
@@ -1242,10 +1678,9 @@ function runCliCommand(
   options: { cwd: string; input?: string; timeout: number; maxBuffer: number }
 ): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = crossSpawn(command, args, {
       cwd: options.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      shell: usesWindowsCliShell(),
+      stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
       windowsHide: true
     });
     let stdout = "";
@@ -1268,14 +1703,14 @@ function runCliCommand(
       finish(new Error(`${command} timed out after ${options.timeout}ms.`));
     }, options.timeout);
     child.on("error", (error) => finish(error));
-    child.stdout.on("data", (chunk: Buffer) => {
+    child.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString("utf8");
       if (stdout.length + stderr.length > options.maxBuffer) {
         child.kill("SIGTERM");
         finish(new Error(`${command} produced more than ${options.maxBuffer} bytes of output.`));
       }
     });
-    child.stderr.on("data", (chunk: Buffer) => {
+    child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf8");
       if (stdout.length + stderr.length > options.maxBuffer) {
         child.kill("SIGTERM");
@@ -1290,7 +1725,14 @@ function runCliCommand(
       const detail = stderr.trim() || stdout.trim() || (signal ? `signal ${signal}` : `exit code ${code}`);
       finish(new Error(`${command} failed: ${detail}`));
     });
-    child.stdin.end(options.input ?? "");
+    if (options.input !== undefined) {
+      child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+        if (error.code !== "EPIPE") {
+          finish(error);
+        }
+      });
+      child.stdin?.end(options.input);
+    }
   });
 }
 
@@ -1357,6 +1799,40 @@ function extractCodeProposalArtifactManifest(response: string): { content: strin
   }
 }
 
+const workUnitProposalMetadataSchema = z.object({
+  contractUpdates: workUnitProposalSchema.shape.contractUpdates.default([]),
+  discoveredDependencies: workUnitProposalSchema.shape.discoveredDependencies.default([]),
+  assumptions: workUnitProposalSchema.shape.assumptions.default([]),
+  unresolvedIssues: workUnitProposalSchema.shape.unresolvedIssues.default([]),
+  confidence: workUnitProposalSchema.shape.confidence.default("medium")
+});
+
+export function extractWorkUnitProposalMetadata(response: string): {
+  content: string;
+  metadata: z.infer<typeof workUnitProposalMetadataSchema> | null;
+} {
+  const marker = "GRAPHCODE_WORK_UNIT_METADATA_JSON";
+  const markerIndex = response.indexOf(marker);
+  if (markerIndex < 0) return { content: response, metadata: null };
+  const tail = response.slice(markerIndex + marker.length).trimStart();
+  const nextMarkerMatch = tail.match(/\nGRAPHCODE_[A-Z_]+/);
+  const nextMarkerIndex = nextMarkerMatch?.index ?? -1;
+  const rawBlock = (nextMarkerIndex < 0 ? tail : tail.slice(0, nextMarkerIndex))
+    .trim()
+    .replace(/^```(?:json)?/i, "")
+    .replace(/```$/i, "")
+    .trim();
+  const remaining = nextMarkerIndex < 0 ? "" : tail.slice(nextMarkerIndex + 1);
+  try {
+    return {
+      content: [response.slice(0, markerIndex).trimEnd(), remaining.trimStart()].filter(Boolean).join("\n"),
+      metadata: workUnitProposalMetadataSchema.parse(JSON.parse(rawBlock))
+    };
+  } catch {
+    throw new Error("Work-unit proposal metadata is not valid GRAPHCODE_WORK_UNIT_METADATA_JSON.");
+  }
+}
+
 function normalizeDiff(response: string, allowedPath: string | null | undefined): string {
   if (response.includes("diff --git") || response.includes("--- ") || response.includes("+++ ")) {
     return response;
@@ -1369,6 +1845,100 @@ function assertDiffInScope(diff: string, allowedPath: string | null | undefined)
   if (diffEscapesScope(diff, allowedPath)) {
     throw new Error(`Coding agent diff escaped the selected block scope: ${allowedPath?.replace(/^\/+/, "")}`);
   }
+}
+
+function fakeWorkUnitDiff(context: WorkUnitContext, response: string): string {
+  const workUnit = context.workUnit;
+  const scope = workUnit.plannedWriteScopes[0];
+  if (!scope) throw new Error(`Work unit ${workUnit.id} has no write scope for the fake provider.`);
+  if (scope.permission === "rename") throw new Error("The fake work-unit provider does not synthesize rename proposals.");
+  const startLine = scope.startLine ?? 1;
+  const summary = response.replace(/\s+/g, " ").slice(0, 160);
+  if (scope.permission === "create") {
+    return [
+      `diff --git a/${scope.path} b/${scope.path}`,
+      "--- /dev/null",
+      `+++ b/${scope.path}`,
+      "@@ -0,0 +1,1 @@",
+      `+${fakeProposalLine(scope.path, "", summary)}`
+    ].join("\n");
+  }
+
+  const source = context.sources.find(
+    (candidate) => candidate.path === scope.path && candidate.availability === "present" && candidate.exact
+  );
+  const sourceLines = source?.content.split(/\r?\n/) ?? [];
+  const sourceStart = source?.startLine ?? 1;
+  const sourceEnd = source?.endLine ?? sourceStart + Math.max(0, sourceLines.length - 1);
+  const allowedEnd = scope.endLine ?? sourceEnd;
+  const firstAllowedIndex = Math.max(0, startLine - sourceStart);
+  let lineIndex = sourceLines.findIndex(
+    (line, index) => index >= firstAllowedIndex && sourceStart + index <= allowedEnd && line.trim().length > 0
+  );
+  if (lineIndex < 0) lineIndex = firstAllowedIndex;
+  const lineNumber = sourceStart + lineIndex;
+  const originalLine = sourceLines[lineIndex] ?? "";
+
+  if (scope.permission === "delete") {
+    return [
+      `diff --git a/${scope.path} b/${scope.path}`,
+      `--- a/${scope.path}`,
+      "+++ /dev/null",
+      `@@ -${lineNumber},1 +${lineNumber},0 @@`,
+      `-${originalLine}`
+    ].join("\n");
+  }
+
+  const nextLine = sourceStart + lineIndex + 1 <= allowedEnd ? sourceLines[lineIndex + 1] : undefined;
+  const previousLine = lineIndex > 0 && lineNumber - 1 >= startLine ? sourceLines[lineIndex - 1] : undefined;
+  const hunkStart = previousLine === undefined ? lineNumber : lineNumber - 1;
+  const hunkLines = previousLine === undefined
+    ? [
+        `-${originalLine}`,
+        `+${fakeProposalLine(scope.path, originalLine, summary)}`,
+        ...(nextLine === undefined ? [] : [` ${nextLine}`])
+      ]
+    : [
+        ` ${previousLine}`,
+        `-${originalLine}`,
+        `+${fakeProposalLine(scope.path, originalLine, summary)}`
+      ];
+  const hunkCount = nextLine === undefined && previousLine === undefined ? 1 : 2;
+
+  return [
+    `diff --git a/${scope.path} b/${scope.path}`,
+    `--- a/${scope.path}`,
+    `+++ b/${scope.path}`,
+    `@@ -${hunkStart},${hunkCount} +${hunkStart},${hunkCount} @@`,
+    ...hunkLines
+  ].join("\n");
+}
+
+function fakeProposalLine(filePath: string, originalLine: string, summary: string): string {
+  const safeSummary = `GraphCode fake proposal: ${summary}`.replaceAll("*/", "* /");
+  const extension = filePath.split(".").pop()?.toLowerCase() ?? "";
+  if (["ts", "tsx", "js", "jsx", "mjs", "cjs", "go", "c", "h", "cc", "cpp", "hpp", "java", "kt", "rs", "swift"].includes(extension)) {
+    return `${originalLine} // ${safeSummary}`;
+  }
+  if (["py", "rb", "sh", "bash", "zsh", "yml", "yaml", "toml"].includes(extension)) {
+    return `${originalLine} # ${safeSummary}`;
+  }
+  if (["sql", "lua"].includes(extension)) {
+    return `${originalLine} -- ${safeSummary}`;
+  }
+  if (["css", "scss", "less"].includes(extension)) {
+    return `${originalLine} /* ${safeSummary} */`;
+  }
+  if (["html", "xml", "md", "mdx"].includes(extension)) {
+    return `${originalLine} <!-- ${safeSummary} -->`;
+  }
+  return `${originalLine} `;
+}
+
+function normalizeDiffHeaderPath(value: string): string | null {
+  const header = value.trim().split(/\s+/)[0];
+  if (header === "/dev/null") return null;
+  return header.replace(/^[ab]\//, "");
 }
 
 function diffEscapesScope(diff: string, allowedPath: string | null | undefined): boolean {
@@ -1391,28 +1961,45 @@ function extractAllowedPath(content: string): string | null {
   return value && value !== "none" ? value : null;
 }
 
-function buildPlanningContextChunks(graph: PlanningGraph, parallelLimit: number): PlanningGraph[] {
-  const workerCount = Math.max(1, Math.min(parallelLimit, Math.max(graph.nodes.length, 1)));
-  const chunks: PlanningGraph[] = Array.from({ length: workerCount }, () => ({ nodes: [], edges: [] }));
-  graph.nodes.forEach((node, index) => {
-    chunks[index % workerCount].nodes.push(node);
-  });
-  graph.edges.forEach((edge, index) => {
-    chunks[index % workerCount].edges.push(edge);
-  });
-  return chunks.filter((chunk) => chunk.nodes.length > 0 || chunk.edges.length > 0);
-}
-
-async function boundedMap<T, R>(items: T[], parallelLimit: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {
+async function boundedMap<T, R>(
+  items: T[],
+  parallelLimit: number,
+  mapper: (item: T, index: number) => Promise<R>,
+  signal?: AbortSignal
+): Promise<R[]> {
   const results: R[] = [];
   let nextIndex = 0;
   const workerCount = Math.max(1, Math.min(parallelLimit, items.length || 1));
   async function worker(): Promise<void> {
     while (nextIndex < items.length) {
+      throwIfAgentCancelled(signal);
       const index = nextIndex++;
       results[index] = await mapper(items[index], index);
     }
   }
   await Promise.all(Array.from({ length: workerCount }, () => worker()));
   return results;
+}
+
+function throwIfAgentCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    const error = new Error("Agent indexing was cancelled.");
+    error.name = "AbortError";
+    throw error;
+  }
+}
+
+function formatIndexCoverageForPrompt(state: IndexState): string {
+  const counts = state.counts;
+  const countSummary = `discovered=${counts.discovered}, supported=${counts.supported}, indexed=${counts.indexed}, unsupported=${counts.unsupported}, excluded=${counts.excluded}, failed=${counts.failed}`;
+  if (state.completeness.status === "complete") {
+    return `Index coverage: COMPLETE (${countSummary}). Repository-wide claims may use only this indexed revision.`;
+  }
+  if (state.completeness.status === "partial") {
+    return `Index coverage warning: PARTIAL (${countSummary}). Reasons: ${state.completeness.reasons.join(" ")} Do not describe findings as repository-wide; explicitly identify omitted or unindexed regions.`;
+  }
+  if (state.completeness.status === "stale") {
+    return `Index coverage warning: STALE since ${state.completeness.sinceRevision}; ${state.completeness.changedFiles.length} changed files are not represented. Do not claim current repository-wide coverage.`;
+  }
+  return `Index coverage warning: FAILED (${state.completeness.errorCode}); last complete revision ${state.completeness.lastCompleteRevision ?? "none"}. Do not claim repository-wide coverage.`;
 }

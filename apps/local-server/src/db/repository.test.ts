@@ -12,6 +12,14 @@ import { buildElkEdgesForLayout } from "../layout/elk";
 let db: GraphDatabase;
 let repo: GraphRepository;
 const selfRootPath = path.join(os.tmpdir(), "graph-code-self-test");
+const codexSettingDefaults = {
+  cliCommand: "",
+  reasoningEffort: "medium" as const,
+  speedTier: "standard" as const,
+  permissionMode: "ask_for_permission" as const,
+  codexSystemPromptMode: "custom" as const,
+  claudeSystemPromptMode: "custom" as const
+};
 
 beforeEach(() => {
   const dbPath = path.join(os.tmpdir(), `graphcode-${crypto.randomUUID()}.sqlite`);
@@ -64,7 +72,13 @@ describe("SQLite graph repository", () => {
           "graph_status_history",
           "code_proposals",
           "coding_workflows",
-          "coding_workflow_items"
+          "coding_workflow_items",
+          "coding_work_unit_nodes",
+          "coding_work_unit_edges",
+          "coding_work_unit_dependencies",
+          "interface_contracts",
+          "model_routing_decisions",
+          "integration_checks"
         ])
       );
     });
@@ -75,21 +89,25 @@ describe("SQLite graph repository", () => {
       general: { theme: "dark" },
       github: { enabled: true, repository: "owner/repo", clientId: "github-client" },
       automation: { autoReviewAfterCoding: false },
+      extensions: { enabledPackageIds: [], configs: {} },
       agents: [
         {
           agentKind: "coding",
           provider: "openai",
           model: "gpt-4.1-mini",
+          ...codexSettingDefaults,
           parallelLimit: 2,
           apiKeySource: { type: "manual", value: "secret-value" },
           systemPromptSource: { type: "manual", value: "Stay scoped." }
         }
         ],
+        codingAgents: [],
         reviewAgents: [
           {
             mode: "small",
             provider: "openai",
             model: "gpt-4.1-mini",
+            ...codexSettingDefaults,
             parallelLimit: 1,
             apiKeySource: { type: "manual", value: "review-secret" },
             systemPromptSource: { type: "manual", value: "Review one block." }
@@ -100,6 +118,7 @@ describe("SQLite graph repository", () => {
           mode: "local",
           provider: "openai",
           model: "gpt-4.1-mini",
+          ...codexSettingDefaults,
           parallelLimit: 6,
           apiKeySource: { type: "manual", value: "scan-secret" },
           systemPromptSource: { type: "manual", value: "Scan one file." }
@@ -146,6 +165,8 @@ describe("SQLite graph repository", () => {
       expect(repo.getScanningAgentConfig(project.id, "local").apiKeySource.value).toBe("scan-secret");
       expect(run.codingMode).toBe("medium");
       expect(run.reviewMode).toBeNull();
+      expect(run.implementedAt).toBeNull();
+      expect(repo.updateAgentRun(run.id, { implementedAt: "2026-07-22T12:00:00.000Z" }).implementedAt).toBe("2026-07-22T12:00:00.000Z");
     expect(history[0].status).toBe("coded");
     expect(repo.getNode("module-web").agentStatus).toBe("coded");
     });
@@ -205,7 +226,10 @@ describe("SQLite graph repository", () => {
         github: { enabled: false, repository: "", clientId: "" },
         automation: { autoReviewAfterCoding: true },
         extensions: { enabledPackageIds: ["@graphcode/extension-embedded-systems"], configs: {} },
-        agents: []
+        agents: [],
+        codingAgents: [],
+        reviewAgents: [],
+        scanningAgents: []
       });
       const system = repo.createNodeFromMutation(project.id, {
         kind: "embedded_system",
@@ -714,11 +738,14 @@ describe("SQLite graph repository", () => {
         general: { theme: "system" },
         github: { enabled: false, repository: "", clientId: "" },
         automation: { autoReviewAfterCoding: true },
+        extensions: { enabledPackageIds: [], configs: {} },
         agents: [
           {
             agentKind: "planning",
             provider: "codex",
             model: "codex",
+            ...codexSettingDefaults,
+            cliCommand: "codex",
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Plan with Codex." }
@@ -729,6 +756,8 @@ describe("SQLite graph repository", () => {
             mode: "small",
             provider: "codex",
             model: "codex",
+            ...codexSettingDefaults,
+            cliCommand: "codex",
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Code with Codex." }
@@ -739,6 +768,8 @@ describe("SQLite graph repository", () => {
             mode: "small",
             provider: "codex",
             model: "codex",
+            ...codexSettingDefaults,
+            cliCommand: "codex",
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Review with Codex." }
@@ -749,6 +780,8 @@ describe("SQLite graph repository", () => {
             mode: "local",
             provider: "codex",
             model: "codex",
+            ...codexSettingDefaults,
+            cliCommand: "codex",
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Scan with Codex." }

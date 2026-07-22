@@ -1,7 +1,9 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { performance } from "node:perf_hooks";
 import ts from "typescript";
+import type { IndexCompleteness, IndexFileCounts, IndexTelemetry } from "@graphcode/graph-model";
 
 export type CodeGraphLanguage =
   | "typescript"
@@ -109,12 +111,45 @@ export type CodeGraphSnapshot = {
   files: CodeGraphFile[];
   symbols: CodeGraphSymbol[];
   edges: CodeGraphEdge[];
+  scan: CodeGraphScanReport;
+};
+
+export type CodeGraphScanPhase = "discovering" | "parsing" | "linking" | "complete";
+
+export type CodeGraphScanProgress = {
+  phase: CodeGraphScanPhase;
+  completed: number;
+  total: number;
+  message: string;
+};
+
+export type CodeGraphScanReport = {
+  generatedAt: string;
+  completeness: IndexCompleteness;
+  counts: IndexFileCounts;
+  failedFiles: Array<{ path: string; error: string }>;
+  telemetry: IndexTelemetry;
 };
 
 export type CodeGraphScanOptions = {
   files?: string[];
   maxFiles?: number;
+  signal?: AbortSignal;
+  onProgress?: (progress: CodeGraphScanProgress) => void;
 };
+
+export type RepositoryDiscoveryOptions = Pick<CodeGraphScanOptions, "signal"> & {
+  onProgress?: (progress: CodeGraphScanProgress) => void;
+};
+
+export class CodeGraphScanCancelledError extends Error {
+  readonly code = "INDEX_CANCELLED";
+
+  constructor() {
+    super("Code graph indexing was cancelled.");
+    this.name = "CodeGraphScanCancelledError";
+  }
+}
 
 type SymbolCollectionContext = {
   filePath: string;
@@ -175,9 +210,43 @@ const RESOLUTION_EXTENSIONS = [...CODE_LANGUAGE_BY_EXTENSION.keys()];
 
 export function scanRepositoryCodeGraph(rootPath: string, options: CodeGraphScanOptions = {}): CodeGraphSnapshot {
   const resolvedRoot = path.resolve(rootPath);
+  let peakRssBytes = process.memoryUsage().rss;
   fileSymbolsByPath.clear();
-  const files = selectFiles(resolvedRoot, options);
-  const parsedFiles = files.map((filePath) => parseSourceFile(resolvedRoot, filePath));
+  const discoveryStartedAt = performance.now();
+  const selection = selectFiles(resolvedRoot, options);
+  const discoveryMs = performance.now() - discoveryStartedAt;
+  peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+
+  const parsedFiles: CodeGraphFile[] = [];
+  const failedFiles: Array<{ path: string; error: string }> = [];
+  const parseStartedAt = performance.now();
+  selection.files.forEach((filePath, index) => {
+    throwIfCancelled(options.signal);
+    options.onProgress?.({
+      phase: "parsing",
+      completed: index,
+      total: selection.files.length,
+      message: `Parsing ${filePath}`
+    });
+    try {
+      parsedFiles.push(parseSourceFile(resolvedRoot, filePath));
+    } catch (error) {
+      failedFiles.push({ path: filePath, error: scanErrorMessage(error) });
+      fileSymbolsByPath.delete(filePath);
+    }
+    peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+  });
+  options.onProgress?.({
+    phase: "parsing",
+    completed: selection.files.length,
+    total: selection.files.length,
+    message: `Parsed ${parsedFiles.length} of ${selection.files.length} supported files.`
+  });
+  const parseMs = performance.now() - parseStartedAt;
+
+  throwIfCancelled(options.signal);
+  const linkStartedAt = performance.now();
+  options.onProgress?.({ phase: "linking", completed: 0, total: parsedFiles.length, message: "Linking parsed symbols and imports." });
   const filePathSet = new Set(parsedFiles.map((file) => file.path));
   const fileIdByPath = new Map(parsedFiles.map((file) => [file.path, file.id]));
 
@@ -192,13 +261,47 @@ export function scanRepositoryCodeGraph(rootPath: string, options: CodeGraphScan
   const symbols = normalizedFiles.flatMap((file) => fileSymbolsByPath.get(file.path) ?? []);
   const symbolBySimpleName = buildSymbolNameIndex(symbols);
   const edges = buildEdges(normalizedFiles, fileIdByPath, symbols, symbolBySimpleName);
+  const linkMs = performance.now() - linkStartedAt;
+  peakRssBytes = Math.max(peakRssBytes, process.memoryUsage().rss);
+
+  const counts: IndexFileCounts = {
+    discovered: selection.discoveredFiles,
+    supported: selection.files.length,
+    indexed: parsedFiles.length,
+    unsupported: selection.unsupportedFiles,
+    excluded: selection.excludedFiles,
+    failed: failedFiles.length
+  };
+  const reasons = [
+    ...(selection.excludedFiles > 0 ? [`Configured file limit ${options.maxFiles} excluded ${selection.excludedFiles} supported files.`] : []),
+    ...(failedFiles.length > 0 ? [`${failedFiles.length} supported files failed to parse.`] : [])
+  ];
+  const completeness: IndexCompleteness =
+    reasons.length === 0
+      ? { status: "complete" }
+      : { status: "partial", indexedFiles: counts.indexed, discoveredFiles: counts.discovered, reasons };
+  const generatedAt = new Date().toISOString();
+  const telemetry: IndexTelemetry = {
+    discoveryMs,
+    parseMs,
+    linkMs,
+    persistMs: 0,
+    peakRssBytes
+  };
+  options.onProgress?.({
+    phase: "complete",
+    completed: counts.indexed,
+    total: counts.supported,
+    message: completeness.status === "complete" ? `Indexed all ${counts.indexed} supported files.` : `Indexed ${counts.indexed} files with visible omissions.`
+  });
 
   return {
     rootPath: resolvedRoot,
     directories,
     files: normalizedFiles,
     symbols,
-    edges
+    edges,
+    scan: { generatedAt, completeness, counts, failedFiles, telemetry }
   };
 }
 
@@ -208,34 +311,81 @@ export function codeGraphId(prefix: "code-dir" | "code-file" | "code-symbol", va
   return `${prefix}-${hashStable(value)}`;
 }
 
-function selectFiles(rootPath: string, options: CodeGraphScanOptions): string[] {
+function selectFiles(
+  rootPath: string,
+  options: CodeGraphScanOptions
+): { files: string[]; discoveredFiles: number; unsupportedFiles: number; excludedFiles: number } {
   if (!options.files && !fs.existsSync(rootPath)) {
-    return [];
+    return { files: [], discoveredFiles: 0, unsupportedFiles: 0, excludedFiles: 0 };
   }
-  const inputFiles = options.files
-    ? options.files.map((filePath) => normalizeRelativePath(filePath)).filter(isCodeFile)
-    : walkFiles(rootPath, rootPath).filter(isCodeFile);
-  return [...new Set(inputFiles)].sort().slice(0, options.maxFiles ?? 2000);
+  if (options.maxFiles !== undefined && (!Number.isInteger(options.maxFiles) || options.maxFiles < 1)) {
+    throw new RangeError("maxFiles must be a positive integer when provided.");
+  }
+  const discovered = options.files
+    ? [...new Set(options.files.map((filePath) => normalizeRelativePath(filePath)))].sort()
+    : discoverRepositoryFiles(rootPath, options);
+  const supported = discovered.filter(isCodeFile);
+  const files = options.maxFiles === undefined ? supported : supported.slice(0, options.maxFiles);
+  return {
+    files,
+    discoveredFiles: discovered.length,
+    unsupportedFiles: discovered.length - supported.length,
+    excludedFiles: supported.length - files.length
+  };
 }
 
-function walkFiles(rootPath: string, currentPath: string): string[] {
-  const entries = fs.readdirSync(currentPath, { withFileTypes: true });
-  const files: string[] = [];
-  for (const entry of entries) {
-    if (entry.isDirectory() && IGNORED_DIRECTORIES.has(entry.name)) {
-      continue;
-    }
-    const absolutePath = path.join(currentPath, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...walkFiles(rootPath, absolutePath));
-      continue;
-    }
-    if (!entry.isFile()) {
-      continue;
-    }
-    files.push(normalizeRelativePath(path.relative(rootPath, absolutePath)));
+export function discoverRepositoryFiles(rootPath: string, options: RepositoryDiscoveryOptions = {}): string[] {
+  const resolvedRoot = path.resolve(rootPath);
+  if (!fs.existsSync(resolvedRoot)) {
+    return [];
   }
-  return files;
+  const files: string[] = [];
+  const pending = [resolvedRoot];
+  let visitedEntries = 0;
+  while (pending.length > 0) {
+    throwIfCancelled(options.signal);
+    const currentPath = pending.pop()!;
+    const entries = fs.readdirSync(currentPath, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      throwIfCancelled(options.signal);
+      visitedEntries += 1;
+      if (entry.isDirectory() && IGNORED_DIRECTORIES.has(entry.name)) {
+        continue;
+      }
+      const absolutePath = path.join(currentPath, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(absolutePath);
+      } else if (entry.isFile()) {
+        files.push(normalizeRelativePath(path.relative(resolvedRoot, absolutePath)));
+      }
+      if (visitedEntries % 250 === 0) {
+        options.onProgress?.({
+          phase: "discovering",
+          completed: files.length,
+          total: files.length,
+          message: `Discovered ${files.length} files so far.`
+        });
+      }
+    }
+  }
+  const result = [...new Set(files)].sort();
+  options.onProgress?.({
+    phase: "discovering",
+    completed: result.length,
+    total: result.length,
+    message: `Discovered ${result.length} files.`
+  });
+  return result;
+}
+
+function throwIfCancelled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new CodeGraphScanCancelledError();
+  }
+}
+
+function scanErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "Unknown parser failure.";
 }
 
 function parseSourceFile(rootPath: string, relativePath: string): CodeGraphFile {

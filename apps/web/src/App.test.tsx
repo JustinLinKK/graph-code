@@ -52,6 +52,7 @@ vi.mock("@xyflow/react", async () => ({
       data: {
         node?: GraphNode;
         boundary?: GraphBoundary;
+        workflowOverlay?: { wave: number; scale: string; status: string } | null;
         onResizeEnd?: (nodeId: string, size: { width: number; height: number }) => void;
       };
     }>;
@@ -103,6 +104,7 @@ vi.mock("@xyflow/react", async () => ({
               <button type="button" onClick={() => onNodeClick?.({}, node)} onDoubleClick={() => onNodeDoubleClick?.({}, node)}>
                 {node.data.node.name}
               </button>
+              {node.data.workflowOverlay ? <span>W{node.data.workflowOverlay.wave} · {node.data.workflowOverlay.scale} · {node.data.workflowOverlay.status}</span> : null}
               <button
                 type="button"
                 aria-label={`Drag ${node.data.node.name}`}
@@ -210,6 +212,22 @@ const project: Project = {
   createdAt: "now",
   updatedAt: "now"
 };
+
+function rememberExplicitProjectSession(scopeNodeId: string | null = null, viewports: Record<string, { x: number; y: number; zoom: number }> = {}): void {
+  window.localStorage.setItem(
+    "graphcode.canvasSession.v1",
+    JSON.stringify({
+      lastProjectId: project.id,
+      lastOpenedProjectId: project.id,
+      projects: {
+        [project.id]: {
+          lastScopeNodeId: scopeNodeId,
+          viewports
+        }
+      }
+    })
+  );
+}
 
 const framework = node({ id: "framework", kind: "framework", name: "GraphCode Workspace", childCount: 1 });
 const moduleWeb = node({
@@ -607,6 +625,12 @@ const defaultSettings = {
     agentKind,
     provider: "fake",
     model: "fake",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: agentKind === "scanning" ? 8 : 4,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${agentKind} prompt` },
@@ -617,6 +641,12 @@ const defaultSettings = {
       mode,
     provider: "fake",
     model: `fake-${mode}`,
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${mode} coding prompt` },
@@ -627,6 +657,12 @@ const defaultSettings = {
       mode,
       provider: "fake",
       model: `fake-review-${mode}`,
+      cliCommand: "",
+      reasoningEffort: "medium",
+      speedTier: "standard",
+      permissionMode: "ask_for_permission",
+      codexSystemPromptMode: "custom",
+      claudeSystemPromptMode: "custom",
       parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
       apiKeySource: { type: "env", value: "" },
       systemPromptSource: { type: "manual", value: `${mode} review prompt` },
@@ -637,6 +673,12 @@ const defaultSettings = {
     mode,
     provider: "fake",
     model: `fake-${mode}`,
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "local" ? 8 : 1,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `${mode} scanning prompt` },
@@ -702,6 +744,7 @@ describe("GraphCode app shell", () => {
         reactFlowMock.setCenter.mockClear();
         reactFlowMock.setViewport.mockClear();
         window.localStorage.clear();
+        rememberExplicitProjectSession();
         document.documentElement.dataset.theme = "system";
       const agentRuns: AgentRun[] = [];
       let planningRunCount = 0;
@@ -735,7 +778,53 @@ describe("GraphCode app shell", () => {
             createdAt: "now",
             updatedAt: "now"
           }
-        ]
+        ],
+        orchestration: {
+          schemaVersion: 1,
+          featureVersion: "ma6-ui-test-v1",
+          workflowId: "workflow-1",
+          projectId: project.id,
+          workUnits: [
+            {
+              id: "workflow-item-1",
+              title: "Render widget partition",
+              objective: "Update the render widget without editing its read-only process dependency.",
+              ownedNodeIds: ["function-render-widget"],
+              readHaloNodeIds: ["module-web", "process-web"],
+              dependencyWorkUnitIds: [],
+              plannedWriteScopes: [{ permission: "edit", path: "apps/web/src/App.tsx", startLine: 1, endLine: 20 }],
+              layerIndex: 0,
+              selectedScale: "small",
+              status: "pending"
+            }
+          ],
+          routingDecisions: [
+            {
+              workUnitId: "workflow-item-1",
+              selectedScale: "small",
+              reasons: ["Leaf-local implementation with a bounded write scope."],
+              estimatedInputTokens: 1200,
+              estimatedOutputTokens: 500,
+              estimatedCost: 0.002,
+              assignment: { providerId: "fake", modelId: "fake-small" }
+            }
+          ],
+          interfaceContracts: [
+            {
+              id: "contract-flow",
+              edgeId: "flow-input-process",
+              contractKind: "data_shape",
+              status: "stable",
+              producerWorkUnitId: "workflow-item-1",
+              consumerWorkUnitId: "workflow-item-1-read-halo",
+              baseline: { summary: "Selection input shape remains stable." },
+              proposed: null
+            }
+          ],
+          partitioning: { cutRelationshipEdges: 1, ignoredEdges: [] },
+          partitionConstraints: { keepTogetherNodeGroups: [], separateNodePairs: [], approvedIgnoredEdges: [] },
+          executionPolicy: { maximumConcurrency: 4, maxEstimatedCost: null, currency: "USD" }
+        }
       };
       vi.stubGlobal(
       "fetch",
@@ -744,8 +833,29 @@ describe("GraphCode app shell", () => {
         if (url === "/api/projects") {
           return json([project]);
         }
+        if (url === "/api/system/pick-folder") {
+          return json({
+            supported: false,
+            selected: false,
+            path: null,
+            message: "Native folder picker is unavailable in this test."
+          });
+        }
         if (url === "/api/projects/graphcode-self/hierarchy") {
           return json(hierarchy);
+        }
+        if (url === "/api/v2/projects/graphcode-self/index-state") {
+          return json({
+            projectId: "graphcode-self",
+            providerId: "current-parser",
+            indexRevision: "revision-1",
+            workspaceRevision: "revision-1",
+            generatedAt: new Date().toISOString(),
+            completeness: { status: "complete" },
+            counts: { discovered: 12, supported: 10, indexed: 10, unsupported: 2, excluded: 0, failed: 0 },
+            progress: { phase: "complete", completed: 10, total: 10, message: "Complete", updatedAt: new Date().toISOString() },
+            telemetry: { discoveryMs: 1, parseMs: 2, linkMs: 1, persistMs: 1, peakRssBytes: 1024 }
+          });
         }
         if (url.startsWith("/api/projects/graphcode-self/canvas")) {
           if (url.includes("rootNodeId=function-render-widget")) {
@@ -762,6 +872,64 @@ describe("GraphCode app shell", () => {
             });
           }
           return json(defaultSettings);
+        }
+        if (url === "/api/codex/status") {
+          return json({
+            installed: true,
+            command: "codex",
+            resolvedPath: "/usr/local/bin/codex",
+            version: "codex-test",
+            authenticated: true,
+            authStatus: "Authenticated",
+            modelsAvailable: true,
+            error: null,
+            checkedAt: "now"
+          });
+        }
+        if (url === "/api/codex/models") {
+          return json([
+            {
+              slug: "gpt-test",
+              displayName: "GPT Test",
+              description: "Test Codex model",
+              defaultReasoningLevel: "medium",
+              supportedReasoningLevels: [{ effort: "medium", description: "Balanced" }],
+              speedTiers: ["standard", "fast"]
+            }
+          ]);
+        }
+        if (url === "/api/claude/status") {
+          return json({
+            installed: true,
+            command: "claude",
+            resolvedPath: "/usr/local/bin/claude",
+            version: "claude-test",
+            authenticated: true,
+            authStatus: "Authenticated",
+            modelsAvailable: true,
+            error: null,
+            checkedAt: "now"
+          });
+        }
+        if (url === "/api/claude/models") {
+          return json([
+            {
+              slug: "sonnet",
+              displayName: "Sonnet",
+              description: "Claude Sonnet alias",
+              defaultReasoningLevel: "medium",
+              supportedReasoningLevels: [{ effort: "medium", description: "Balanced" }],
+              speedTiers: ["standard"]
+            },
+            {
+              slug: "opus",
+              displayName: "Opus",
+              description: "Claude Opus alias",
+              defaultReasoningLevel: "high",
+              supportedReasoningLevels: [{ effort: "high", description: "Deep" }],
+              speedTiers: ["standard", "fast"]
+            }
+          ]);
         }
         if (url === "/api/projects/graphcode-self/agent-runs") {
           return json(agentRuns);
@@ -784,6 +952,14 @@ describe("GraphCode app shell", () => {
                   ...existing,
                   appliedGraphRevision: 9
                 };
+          agentRuns[index] = updated;
+          return json(updated);
+        }
+        if (url === "/api/code-proposals/apply") {
+          const payload = JSON.parse(String(init?.body ?? "{}"));
+          const index = agentRuns.findIndex((run) => run.id === payload.runId);
+          if (index === -1) return new Response("not found", { status: 404 });
+          const updated = { ...agentRuns[index], implementedAt: "2026-07-22T12:00:00.000Z" };
           agentRuns[index] = updated;
           return json(updated);
         }
@@ -852,7 +1028,20 @@ describe("GraphCode app shell", () => {
             return json(defaultSettings);
           }
           if (url === "/api/coding-workflows/preview") {
-            return json(workflowResponse);
+            const payload = JSON.parse(String(init?.body ?? "{}"));
+            const overrides = new Map<string, string>((payload.modeOverrides ?? []).map((item: { nodeId: string; mode: string }) => [item.nodeId, item.mode]));
+            const selectedMode = overrides.get("function-render-widget") ?? "small";
+            return json({
+              ...workflowResponse,
+              items: workflowResponse.items.map((item) => ({ ...item, selectedMode })),
+              orchestration: {
+                ...workflowResponse.orchestration,
+                partitionConstraints: payload.partitionConstraints ?? workflowResponse.orchestration.partitionConstraints,
+                executionPolicy: payload.executionPolicy ?? workflowResponse.orchestration.executionPolicy,
+                workUnits: workflowResponse.orchestration.workUnits.map((unit) => ({ ...unit, selectedScale: selectedMode })),
+                routingDecisions: workflowResponse.orchestration.routingDecisions.map((decision) => ({ ...decision, selectedScale: selectedMode }))
+              }
+            });
           }
           if (url === "/api/coding-workflows/start") {
             const payload = JSON.parse(String(init?.body ?? "{}"));
@@ -876,6 +1065,10 @@ describe("GraphCode app shell", () => {
               items: workflowResponse.items.map((item) => ({ ...item, status: "applied", appliedAt: "now" }))
             });
           }
+          if (url === "/api/coding-workflows/control") {
+            const payload = JSON.parse(String(init?.body ?? "{}"));
+            return json({ ...workflowResponse, status: payload.action === "cancel" ? "cancelled" : "blocked" });
+          }
           if (url === "/api/projects/graphcode-self/coding-workflows/workflow-1") {
             return json(workflowResponse);
           }
@@ -883,6 +1076,7 @@ describe("GraphCode app shell", () => {
           const payload = JSON.parse(String(init?.body ?? "{}"));
           const agentKind = url.split("/").at(-1)?.replace("review", "review") ?? "planning";
           const id = url === "/api/agents/planning" ? `run-plan-${++planningRunCount}` : `run-${agentKind}`;
+          const directDiff = "diff --git a/src/render.ts b/src/render.ts\n--- a/src/render.ts\n+++ b/src/render.ts\n@@ -1 +1 @@\n-old\n+new";
           const run: AgentRun = {
             id,
             projectId: payload.projectId ?? project.id,
@@ -892,11 +1086,12 @@ describe("GraphCode app shell", () => {
               status: "succeeded",
             baseGraphRevision: 7,
             appliedGraphRevision: null,
+            implementedAt: null,
             conflictReason: null,
             targetNodeId: payload.nodeId ?? payload.scopeNodeId ?? null,
-            prompt: payload.prompt ?? "",
-            response: "Agent completed",
-            diff: "diff --git",
+            prompt: url === "/api/agents/review" ? `Review ${payload.runId}` : payload.prompt ?? "",
+            response: url === "/api/agents/review" ? "No findings.\nGRAPHCODE_REVIEW_VERDICT: reviewed" : url === "/api/agents/coding" ? directDiff : "Agent completed",
+            diff: url === "/api/agents/coding" ? directDiff : "",
             graphPatch:
               url === "/api/agents/planning"
                 ? {
@@ -1073,6 +1268,7 @@ describe("GraphCode app shell", () => {
     const canvas = within(await screen.findByTestId("react-flow"));
     expect(await canvas.findByText("Web Workspace")).toBeInTheDocument();
     expect(canvas.queryByText("GraphCode Workspace")).not.toBeInTheDocument();
+    expect(screen.getByText("Index complete · 10/10")).toBeInTheDocument();
   });
 
   it("shows boundary groups and member labels in the hierarchy", async () => {
@@ -1081,7 +1277,7 @@ describe("GraphCode app shell", () => {
     const hierarchyPanel = within(screen.getByLabelText("Project hierarchy"));
     expect((await hierarchyPanel.findAllByText("Frontend")).length).toBeGreaterThanOrEqual(1);
     expect(hierarchyPanel.getByText("Web Flow")).toBeInTheDocument();
-    expect(hierarchyPanel.getByText("1 blocks")).toBeInTheDocument();
+    expect(hierarchyPanel.getByText("1 block")).toBeInTheDocument();
   });
 
   it("adjusts the structure panel width from the splitter", async () => {
@@ -1109,7 +1305,7 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     fireEvent.click(await within(await screen.findByTestId("react-flow")).findByText("Web Workspace"));
-    const inspector = within(screen.getByLabelText("Node inspector"));
+    const inspector = within(screen.getByLabelText("Node details and coding"));
     await inspector.findByRole("heading", { name: "Web Workspace" });
     const tagInput = await inspector.findByLabelText("Tags label tags");
     fireEvent.input(tagInput, { target: { value: "frontend, ui" } });
@@ -1182,6 +1378,7 @@ describe("GraphCode app shell", () => {
       "graphcode.canvasSession.v1",
       JSON.stringify({
         lastProjectId: project.id,
+        lastOpenedProjectId: project.id,
         projects: {
           [project.id]: {
             lastScopeNodeId: "module-web",
@@ -1202,6 +1399,7 @@ describe("GraphCode app shell", () => {
       "graphcode.canvasSession.v1",
       JSON.stringify({
         lastProjectId: project.id,
+        lastOpenedProjectId: project.id,
         projects: {
           [project.id]: {
             lastScopeNodeId: "framework",
@@ -1290,6 +1488,16 @@ describe("GraphCode app shell", () => {
     expect(await screen.findByText("Open a workspace to begin")).toBeInTheDocument();
   });
 
+  it("does not auto-open a persisted self project without an explicit browser open marker", async () => {
+    window.localStorage.clear();
+
+    render(<App />);
+
+    expect(await screen.findByText("Open a workspace to begin")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith("/api/projects", expect.any(Object));
+    expect(fetch).not.toHaveBeenCalledWith("/api/projects/graphcode-self/hierarchy", expect.any(Object));
+  });
+
   it("collects first-run scanning context before creating a missing workspace", async () => {
     render(<App />);
 
@@ -1323,7 +1531,8 @@ describe("GraphCode app shell", () => {
             initialization: {
               projectName: "new-graphcode-project",
               projectDescription: "A local project with a CLI, API server, and web UI.",
-              scanningInstructions: "Group by runtime boundary and emphasize request/data flow."
+              scanningInstructions: "Group by runtime boundary and emphasize request/data flow.",
+              skipCodexDefaultSystemPrompt: false
             },
             creationMode: "scan"
           })
@@ -1631,7 +1840,7 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     const tablist = await screen.findByRole("tablist", { name: /Details panel mode/i });
-    fireEvent.click(within(tablist).getByRole("button", { name: /Planning/i }));
+    fireEvent.click(within(tablist).getByRole("tab", { name: /Planning/i }));
     fireEvent.change(await screen.findByPlaceholderText("Plan graph changes"), {
       target: { value: "Add cache node" }
     });
@@ -1664,7 +1873,7 @@ describe("GraphCode app shell", () => {
 
     fireEvent.click(await screen.findByText("Web Workspace"));
     expect((await screen.findAllByText("Client app.")).length).toBeGreaterThan(0);
-    fireEvent.click(await screen.findByRole("button", { name: /Start code/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Preview workflow/i }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
@@ -1677,15 +1886,29 @@ describe("GraphCode app shell", () => {
     });
     expect(await screen.findByText("Layered coding")).toBeInTheDocument();
     expect((await screen.findAllByText("renderWidget")).length).toBeGreaterThan(0);
+    expect(screen.getByText("Workflow overlay")).toBeInTheDocument();
+    expect(screen.getByText(/W1 · small · pending/i)).toBeInTheDocument();
 
     fireEvent.change(screen.getByDisplayValue("Small"), { target: { value: "large" } });
+    expect(screen.getByRole("button", { name: /Start workflow/i })).toBeDisabled();
+    fireEvent.change(screen.getByLabelText("Concurrency"), { target: { value: "2" } });
+    fireEvent.click(screen.getByRole("button", { name: /Revalidate preview/i }));
+    await waitFor(() => {
+      const previewCalls = vi.mocked(fetch).mock.calls.filter(([url]) => String(url) === "/api/coding-workflows/preview");
+      const body = JSON.parse(String(previewCalls.at(-1)?.[1]?.body ?? "{}"));
+      expect(body).toEqual(expect.objectContaining({
+        modeOverrides: expect.arrayContaining([{ nodeId: "function-render-widget", mode: "large" }]),
+        executionPolicy: expect.objectContaining({ maximumConcurrency: 2 })
+      }));
+    });
+    await waitFor(() => expect(screen.getByRole("button", { name: /Start workflow/i })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /Start workflow/i }));
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
         "/api/coding-workflows/start",
         expect.objectContaining({
           method: "POST",
-          body: expect.stringContaining('"mode":"large"')
+          body: expect.stringContaining('"background":true')
         })
       );
     });
@@ -1705,7 +1928,9 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByText("renderWidget"));
-    fireEvent.click(await screen.findByRole("button", { name: /Start code/i }));
+    const task = "Fix the renderer and add a focused test.";
+    fireEvent.change(await screen.findByRole("textbox", { name: "Coding task" }), { target: { value: task } });
+    fireEvent.click(await screen.findByRole("button", { name: /Start coding/i }));
 
     await waitFor(() => {
       expect(fetch).toHaveBeenCalledWith(
@@ -1715,6 +1940,36 @@ describe("GraphCode app shell", () => {
           body: expect.stringContaining('"mode":"small"')
         })
       );
+      const codingCall = vi.mocked(fetch).mock.calls.find(([url]) => String(url) === "/api/agents/coding");
+      expect(JSON.parse(String(codingCall?.[1]?.body ?? "{}"))).toEqual(expect.objectContaining({ prompt: task }));
+    });
+  });
+
+  it("implements an approved direct coding proposal without duplicating its diff", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("renderWidget"));
+    fireEvent.change(await screen.findByRole("textbox", { name: "Coding task" }), { target: { value: "Fix the renderer." } });
+    fireEvent.click(await screen.findByRole("button", { name: /Start coding/i }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/agents/coding", expect.objectContaining({ method: "POST" })));
+
+    fireEvent.click(await screen.findByRole("tab", { name: "Planning" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Review" }));
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/agents/review", expect.objectContaining({ method: "POST" })));
+
+    const codingRow = (await screen.findByText("Coding Small")).closest(".agent-activity-row") as HTMLElement;
+    expect(within(codingRow).getByText("Review attached")).toBeInTheDocument();
+    fireEvent.click(within(codingRow).getByText("Inspect proposal"));
+    expect(within(codingRow).queryByText("Agent response")).not.toBeInTheDocument();
+    expect(within(codingRow).getByText("Proposed diff")).toBeInTheDocument();
+
+    fireEvent.click(within(codingRow).getByRole("button", { name: "Implement proposal" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/code-proposals/apply",
+        expect.objectContaining({ method: "POST", body: expect.stringContaining('"runId":"run-coding"') })
+      );
+      expect(within(codingRow).getByText("Implemented")).toBeInTheDocument();
     });
   });
 
@@ -1723,7 +1978,7 @@ describe("GraphCode app shell", () => {
 
     fireEvent.click(await screen.findByLabelText("Settings"));
       expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
-      fireEvent.click(screen.getByRole("button", { name: /Agents/i }));
+      fireEvent.click(screen.getByRole("tab", { name: /Agents/i }));
       expect(screen.getByRole("heading", { name: "Planning" })).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "Review Small" })).toBeInTheDocument();
       expect(screen.getByRole("heading", { name: "Review Medium" })).toBeInTheDocument();
@@ -1738,13 +1993,13 @@ describe("GraphCode app shell", () => {
     fireEvent.change(screen.getAllByLabelText("Select Key File")[0], { target: { files: [keyFile] } });
     expect(await screen.findByText("API key read successfully")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: /Extensions/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /Extensions/i }));
     expect(screen.getByRole("heading", { name: "ML Pipeline" })).toBeInTheDocument();
     const mlPipelineEnabled = within(screen.getByRole("heading", { name: "ML Pipeline" }).closest(".agent-settings-card") as HTMLElement).getByLabelText("Enabled");
     fireEvent.click(mlPipelineEnabled);
     expect(mlPipelineEnabled).toBeChecked();
 
-    fireEvent.click(screen.getByRole("button", { name: /GitHub/i }));
+    fireEvent.click(screen.getByRole("tab", { name: /GitHub/i }));
     expect(screen.getByText("Not Connected")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /^Connect$/i }));
     expect(await screen.findByText("ABCD-EFGH")).toBeInTheDocument();
@@ -1773,15 +2028,32 @@ describe("GraphCode app shell", () => {
     render(<App />);
 
     fireEvent.click(await screen.findByLabelText("Settings"));
-    fireEvent.click(await screen.findByRole("button", { name: /Agents/i }));
+    fireEvent.click(await screen.findByRole("tab", { name: /Agents/i }));
     const planningCard = screen.getByRole("heading", { name: "Planning" }).closest(".agent-settings-card") as HTMLElement;
     const providerSelect = within(planningCard).getByLabelText("Provider");
 
     fireEvent.change(providerSelect, { target: { value: "codex" } });
 
-    expect(within(planningCard).getByLabelText("CLI Command")).toHaveValue("codex");
-    expect(within(planningCard).getByLabelText("API Key Source")).toBeDisabled();
-    expect(within(planningCard).getByText(/logged-in Codex CLI account/i)).toBeInTheDocument();
+    await waitFor(() => expect(within(planningCard).getByText("Codex Model")).toBeInTheDocument());
+    const codexModelSelect = within(within(planningCard).getByText("Codex Model").closest("label") as HTMLElement).getByRole("combobox");
+    expect(codexModelSelect).toHaveValue("gpt-test");
+    expect(within(planningCard).getByLabelText("Reasoning Effort")).toBeInTheDocument();
+    expect(within(planningCard).getByLabelText("Speed")).toBeInTheDocument();
+    expect(within(planningCard).getByLabelText("Permission Mode")).toHaveValue("ask_for_permission");
+    expect(within(planningCard).getByLabelText("System Prompt")).toHaveValue("default");
+    expect(within(planningCard).queryByLabelText("API Key Source")).not.toBeInTheDocument();
+
+    fireEvent.change(providerSelect, { target: { value: "claudecode" } });
+
+    await waitFor(() => expect(within(planningCard).getByText("Claude Model")).toBeInTheDocument());
+    const claudeModelSelect = within(within(planningCard).getByText("Claude Model").closest("label") as HTMLElement).getByRole("combobox");
+    expect(claudeModelSelect).toHaveValue("sonnet");
+    expect(within(within(planningCard).getByText("CLI Command").closest("label") as HTMLElement).getByRole("textbox")).toHaveValue("claude");
+    expect(within(planningCard).getByLabelText("Reasoning Effort")).toHaveValue("medium");
+    expect(within(planningCard).getByLabelText("Speed")).toHaveValue("standard");
+    expect(within(planningCard).getByLabelText("Permission Mode")).toHaveValue("ask_for_permission");
+    expect(within(planningCard).getByLabelText("System Prompt")).toHaveValue("default");
+    expect(within(planningCard).queryByLabelText("API Key Source")).not.toBeInTheDocument();
   });
 
   it("shows scanning runs in the activity feed", async () => {
@@ -1799,9 +2071,9 @@ describe("GraphCode app shell", () => {
       );
     });
     const tablist = await screen.findByRole("tablist", { name: /Details panel mode/i });
-    fireEvent.click(within(tablist).getByRole("button", { name: /Planning/i }));
+    fireEvent.click(within(tablist).getByRole("tab", { name: /Planning/i }));
     expect(await screen.findByText("Scanning")).toBeInTheDocument();
-    expect(screen.getByText("Agent completed")).toBeInTheDocument();
+    expect(screen.getByText("Agent completed", { selector: "p" })).toBeInTheDocument();
   });
 
   it("updates the canvas background when Night theme is saved", async () => {

@@ -2,24 +2,44 @@ import crypto from "node:crypto";
 import { execFile, type ExecFileOptions } from "node:child_process";
 import fs from "node:fs";
 import { promises as fsp } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import {
+  codingWorkflowExecutionPolicySchema,
+  codingWorkflowPartitionConstraintsSchema,
   type AgentKind,
   type AgentProvider,
   type AgentRun,
   type CanvasGraph,
+  CLAUDE_REASONING_EFFORTS,
+  CODEX_REASONING_EFFORTS,
+  type ClaudeAuthStartResult,
+  type ClaudeCliStatus,
+  type ClaudeInstallResult,
+  type ClaudeModelInfo,
   type CodingAgentRequest,
+  type CodingAgentMode,
+  type CodeProposalApplyRequest,
   type CodingWorkflow,
   type CodingWorkflowApplyLayerRequest,
+  type CodingWorkflowControlRequest,
+  type CodingWorkflowPreviewRequest,
   type CodingWorkflowStartRequest,
+  type CodexAuthStartResult,
+  type CodexCliStatus,
+  type CodexInstallResult,
+  type CodexModelInfo,
+  type CodexReasoningEffort,
   type GithubDevicePollRequest,
   type GithubDevicePollResponse,
   type GithubDeviceStartRequest,
   type GithubDeviceStartResponse,
   type GraphPatch,
   type GraphStatusPatch,
+  type IndexState,
   type GitStatusInfo,
+  type FolderPickerResult,
   type LanguageType,
   type OpenWorkspaceResult,
   type OpenWorkspaceRequest,
@@ -34,33 +54,116 @@ import {
   type WorkspaceSettingsMutation
 } from "@graphcode/graph-model";
 import {
+  benchmarkLegacyCodingContexts,
+  benchmarkLegacyReviewContexts,
+  compareWorkUnitContextToLegacy,
+  renderWorkUnitContext,
+  runIntegrationAgent,
+  runCodingWorkUnitAgent,
   runCodingAgent,
   runPlanningAgent,
   runReviewAgent,
   runScanningAgent,
+  WORK_UNIT_CONTEXT_COMPILER_VERSION,
   type GraphCodeToolbox,
+  type RenderedWorkUnitContext,
   type ScanEdgeDraft,
   type ScanLocalOutput,
   type ScanNodeDraft,
   type ScanPipelineResult,
-  type ScannableFile
+  type ScannableFile,
+  type WorkUnitContext,
+  type WorkUnitContextShadowComparison
 } from "@graphcode/agent-runtime";
-import { scanRepositoryCodeGraph, type CodeGraphSymbol } from "@graphcode/parser";
+import { CodeGraphScanCancelledError, discoverRepositoryFiles, scanRepositoryCodeGraph, type CodeGraphSymbol } from "@graphcode/parser";
 import { openDatabase, type GraphDatabase } from "./db/connection";
 import { GraphRepository, validationError } from "./db/repository";
 import { migrate } from "./db/schema";
+import { resolveAgentFeatureFlags, type AgentFeatureFlags } from "./config";
+import { compileStoredWorkUnitContext } from "./services/work-unit-context";
+import { contextBudgetForScale } from "./services/work-unit-preview";
+import { MODEL_ROUTER_FEATURE_VERSION, routeWorkUnit, type ModelRoutingCatalog } from "./services/model-router";
+import {
+  applyCombinedPatchToWorkspace,
+  parseUnifiedDiff,
+  readCurrentSourceHashes,
+  runIntegrationGate,
+  validateCombinedPatchInTemporaryWorkspace
+} from "./services/integration-runner";
+import { createWorkflowScheduler, WorkspaceRevisionApplyLock, WorkflowScheduler, WorkflowSchedulerFailure } from "./services/workflow-scheduler";
 
 const execFileAsync = promisify(execFile);
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_API_URL = "https://api.github.com";
 const GITHUB_DEVICE_SCOPE = "repo read:user";
+const DEFAULT_CODEX_COMMAND = process.env.GRAPHCODE_CODEX_COMMAND?.trim() || "codex";
+const DEFAULT_CLAUDE_COMMAND = process.env.GRAPHCODE_CLAUDE_COMMAND?.trim() || "claude";
+const CODEX_MODEL_CATALOG_TIMEOUT_MS = 20000;
+const CLAUDE_MODEL_CATALOG: ClaudeModelInfo[] = [
+  {
+    slug: "default",
+    displayName: "Default",
+    description: "Claude Code's default model selection for this account and workspace.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "best",
+    displayName: "Best",
+    description: "Claude Code chooses the best available model alias for the task.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "fable",
+    displayName: "Fable",
+    description: "Claude Code's documented Fable alias.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "sonnet",
+    displayName: "Sonnet",
+    description: "Claude Code's documented Sonnet alias.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  },
+  {
+    slug: "opus",
+    displayName: "Opus",
+    description: "Claude Code's documented Opus alias. Fast mode is available for supported Opus sessions.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard", "fast"]
+  },
+  {
+    slug: "haiku",
+    displayName: "Haiku",
+    description: "Claude Code's documented Haiku alias.",
+    defaultReasoningLevel: "medium",
+    supportedReasoningLevels: claudeReasoningLevels(),
+    speedTiers: ["standard"]
+  }
+];
 
 export class WorkspaceRuntime {
   private db: GraphDatabase;
   private repository: GraphRepository;
+  private readonly indexStates = new Map<string, IndexState>();
+  private readonly indexControllers = new Map<string, AbortController>();
+  private readonly revisionApplyLock = new WorkspaceRevisionApplyLock();
+  private readonly workflowSchedulers = new Map<string, WorkflowScheduler>();
 
-  constructor(private readonly fallbackDbPath: string, private readonly selfRootPath: string) {
+  constructor(
+    private readonly fallbackDbPath: string,
+    private readonly selfRootPath: string,
+    private readonly agentFeatureFlags: AgentFeatureFlags = resolveAgentFeatureFlags()
+  ) {
     this.db = openDatabase(fallbackDbPath);
     migrate(this.db);
     this.repository = new GraphRepository(this.db);
@@ -68,6 +171,34 @@ export class WorkspaceRuntime {
 
   repo(): GraphRepository {
     return this.repository;
+  }
+
+  getIndexState(projectId: string): IndexState {
+    this.repository.getProject(projectId);
+    return this.indexStates.get(projectId) ?? unavailableIndexState(projectId);
+  }
+
+  cancelIndex(projectId: string): IndexState {
+    this.repository.getProject(projectId);
+    this.indexControllers.get(projectId)?.abort();
+    const previous = this.getIndexState(projectId);
+    const cancelled = {
+      ...previous,
+      generatedAt: new Date().toISOString(),
+      completeness: {
+        status: "failed" as const,
+        lastCompleteRevision: previous.completeness.status === "complete" ? previous.indexRevision : null,
+        errorCode: "index_cancelled"
+      },
+      progress: {
+        ...previous.progress,
+        phase: "cancelled" as const,
+        message: "Indexing cancellation requested.",
+        updatedAt: new Date().toISOString()
+      }
+    };
+    this.indexStates.set(projectId, cancelled);
+    return cancelled;
   }
 
   seedSelfGraph(): Project {
@@ -98,10 +229,26 @@ export class WorkspaceRuntime {
       const validation = this.repository.validateWorkspaceSettings(projectId, input);
       const fieldErrors = { ...validation.fieldErrors };
       const cliChecks = [
-        ...input.agents.map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `agents.${index}.model` })),
-        ...(input.codingAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `codingAgents.${index}.model` })),
-        ...(input.reviewAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `reviewAgents.${index}.model` })),
-        ...(input.scanningAgents ?? []).map((agent, index) => ({ provider: agent.provider, command: agent.model, field: `scanningAgents.${index}.model` }))
+        ...input.agents.map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `agents.${index}.cliCommand` : `agents.${index}.model`
+        })),
+        ...(input.codingAgents ?? []).map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `codingAgents.${index}.cliCommand` : `codingAgents.${index}.model`
+        })),
+        ...(input.reviewAgents ?? []).map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `reviewAgents.${index}.cliCommand` : `reviewAgents.${index}.model`
+        })),
+        ...(input.scanningAgents ?? []).map((agent, index) => ({
+          provider: agent.provider,
+          command: agent.cliCommand,
+          field: isCliProvider(agent.provider) ? `scanningAgents.${index}.cliCommand` : `scanningAgents.${index}.model`
+        }))
       ];
       await Promise.all(
         cliChecks.map(async (check) => {
@@ -119,6 +266,276 @@ export class WorkspaceRuntime {
       ok: Object.keys(fieldErrors).length === 0,
       testedAt: new Date().toISOString(),
       fieldErrors
+    };
+  }
+
+  async getCodexStatus(command = DEFAULT_CODEX_COMMAND): Promise<CodexCliStatus> {
+    const checkedAt = new Date().toISOString();
+    const resolvedPath = await resolveCliPath(command);
+    let version: string | null = null;
+    let authStatus: string | null = null;
+    let authenticated = false;
+    let modelsAvailable = false;
+    const errors: string[] = [];
+
+    try {
+      const result = await execFileAsync(command, ["--version"], cliExecOptions(5000));
+      version = (outputText(result.stdout) || outputText(result.stderr)).trim() || null;
+    } catch (error) {
+      return {
+        installed: false,
+        command,
+        resolvedPath,
+        version: null,
+        authenticated: false,
+        authStatus: null,
+        modelsAvailable: false,
+        error: cliErrorMessage(error, `Codex CLI command not found or not executable: ${command}`),
+        checkedAt
+      };
+    }
+
+    try {
+      const result = await execFileAsync(command, ["login", "status"], cliExecOptions(10000));
+      authStatus = (outputText(result.stdout) || outputText(result.stderr)).trim() || "Authenticated";
+      authenticated = true;
+    } catch (error) {
+      authStatus = cliErrorMessage(error, "Codex CLI is not authenticated.");
+      errors.push(authStatus);
+    }
+
+    if (authenticated) {
+      try {
+        const result = await execFileAsync(command, ["debug", "models"], {
+          ...cliExecOptions(CODEX_MODEL_CATALOG_TIMEOUT_MS),
+          maxBuffer: 1024 * 1024 * 12
+        });
+        modelsAvailable = parseCodexModels(outputText(result.stdout)).length > 0;
+        if (!modelsAvailable) {
+          errors.push("Codex CLI returned an empty model catalog.");
+        }
+      } catch (error) {
+        errors.push(cliErrorMessage(error, "Codex model catalog is not available."));
+      }
+    }
+
+    return {
+      installed: true,
+      command,
+      resolvedPath,
+      version,
+      authenticated,
+      authStatus,
+      modelsAvailable,
+      error: errors.length > 0 ? errors.join(" ") : null,
+      checkedAt
+    };
+  }
+
+  async listCodexModels(command = DEFAULT_CODEX_COMMAND): Promise<CodexModelInfo[]> {
+    const status = await this.getCodexStatus(command);
+    if (!status.installed) {
+      throw validationError(status.error ?? "Codex CLI is not installed.");
+    }
+    if (!status.authenticated) {
+      throw validationError(status.error ?? "Codex CLI is not authenticated.");
+    }
+    const result = await execFileAsync(command, ["debug", "models"], {
+      ...cliExecOptions(CODEX_MODEL_CATALOG_TIMEOUT_MS),
+      maxBuffer: 1024 * 1024 * 12
+    });
+    return parseCodexModels(outputText(result.stdout));
+  }
+
+  async installCodexCli(): Promise<CodexInstallResult> {
+    const prefix = process.platform === "win32" ? null : path.join(os.homedir(), ".local");
+    const args = ["install", "--global"];
+    if (prefix) {
+      await fsp.mkdir(prefix, { recursive: true });
+      args.push("--prefix", prefix);
+    }
+    args.push("@openai/codex");
+    try {
+      await execFileAsync(process.platform === "win32" ? "npm.cmd" : "npm", args, {
+        ...cliExecOptions(120000),
+        maxBuffer: 1024 * 1024 * 8
+      });
+      const status = await this.getCodexStatus(DEFAULT_CODEX_COMMAND);
+      return {
+        ok: status.installed,
+        command: prefix ? `npm ${args.join(" ")}; ensure ${path.join(prefix, "bin")} is on PATH` : `npm ${args.join(" ")}`,
+        message: status.installed ? "Codex CLI installed." : "Codex package installed, but the codex command is not on PATH yet.",
+        status
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        command: prefix ? `npm ${args.join(" ")}` : `npm ${args.join(" ")}`,
+        message: cliErrorMessage(error, "Codex CLI install failed.")
+      };
+    }
+  }
+
+  async startCodexAuth(command = DEFAULT_CODEX_COMMAND): Promise<CodexAuthStartResult> {
+    const status = await this.getCodexStatus(command);
+    if (!status.installed) {
+      return {
+        ok: false,
+        command,
+        message: status.error ?? "Install the Codex CLI before signing in.",
+        status
+      };
+    }
+    if (status.authenticated) {
+      return {
+        ok: true,
+        command,
+        message: "Codex CLI is already authenticated.",
+        status
+      };
+    }
+    const authCommand = `${command} login --device-auth`;
+    return {
+      ok: true,
+      command: authCommand,
+      message: `Run ${authCommand} in a terminal, complete the browser device flow, then refresh Codex status.`,
+      status
+    };
+  }
+
+  async pickWorkspaceFolder(): Promise<FolderPickerResult> {
+    if (process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER === "1") {
+      return {
+        supported: false,
+        selected: false,
+        path: null,
+        message: "Native folder picker is disabled. Paste the workspace path manually."
+      };
+    }
+    const pickerEnvironment = detectFolderPickerEnvironment(process.platform, process.env, readProcessVersion());
+    if (pickerEnvironment === "windows") {
+      return pickWindowsFolder();
+    }
+    if (pickerEnvironment === "wsl") {
+      return {
+        supported: false,
+        selected: false,
+        path: null,
+        message: "GraphCode is running in WSL. Paste a Linux workspace path manually (for example, /home/... or /mnt/c/...) so Windows and WSL paths are not mixed."
+      };
+    }
+    if (pickerEnvironment === "macos") {
+      return pickMacFolder();
+    }
+    return {
+      supported: false,
+      selected: false,
+      path: null,
+      message: "Native folder picker is available on Windows and macOS. Paste the workspace path manually on this OS."
+    };
+  }
+
+  async getClaudeStatus(command = DEFAULT_CLAUDE_COMMAND): Promise<ClaudeCliStatus> {
+    const checkedAt = new Date().toISOString();
+    const resolvedPath = await resolveCliPath(command);
+    let version: string | null = null;
+    let authStatus: string | null = null;
+    let authenticated = false;
+    const errors: string[] = [];
+
+    try {
+      const result = await execFileAsync(command, ["--version"], cliExecOptions(5000));
+      version = (outputText(result.stdout) || outputText(result.stderr)).trim() || null;
+    } catch (error) {
+      return {
+        installed: false,
+        command,
+        resolvedPath,
+        version: null,
+        authenticated: false,
+        authStatus: null,
+        modelsAvailable: false,
+        error: cliErrorMessage(error, `Claude Code command not found or not executable: ${command}`),
+        checkedAt
+      };
+    }
+
+    try {
+      const result = await execFileAsync(command, ["auth", "status", "--text"], cliExecOptions(10000));
+      authStatus = (outputText(result.stdout) || outputText(result.stderr)).trim() || "Authenticated";
+      authenticated = true;
+    } catch (error) {
+      authStatus = cliErrorMessage(error, "Claude Code is not authenticated.");
+      errors.push(authStatus);
+    }
+
+    return {
+      installed: true,
+      command,
+      resolvedPath,
+      version,
+      authenticated,
+      authStatus,
+      modelsAvailable: authenticated,
+      error: errors.length > 0 ? errors.join(" ") : null,
+      checkedAt
+    };
+  }
+
+  async listClaudeModels(command = DEFAULT_CLAUDE_COMMAND): Promise<ClaudeModelInfo[]> {
+    const status = await this.getClaudeStatus(command);
+    if (!status.installed) {
+      throw validationError(status.error ?? "Claude Code is not installed.");
+    }
+    if (!status.authenticated) {
+      throw validationError(status.error ?? "Claude Code is not authenticated.");
+    }
+    return CLAUDE_MODEL_CATALOG;
+  }
+
+  async installClaudeCli(): Promise<ClaudeInstallResult> {
+    const status = await this.getClaudeStatus(DEFAULT_CLAUDE_COMMAND);
+    if (status.installed) {
+      return {
+        ok: true,
+        command: DEFAULT_CLAUDE_COMMAND,
+        message: "Claude Code is already installed.",
+        status
+      };
+    }
+    const command = process.platform === "win32" ? "irm https://claude.ai/install.ps1 | iex" : "curl -fsSL https://claude.ai/install.sh | bash";
+    return {
+      ok: false,
+      command,
+      message: `Run ${command} in a terminal to install Claude Code, then refresh Claude status.`,
+      status
+    };
+  }
+
+  async startClaudeAuth(command = DEFAULT_CLAUDE_COMMAND): Promise<ClaudeAuthStartResult> {
+    const status = await this.getClaudeStatus(command);
+    if (!status.installed) {
+      return {
+        ok: false,
+        command,
+        message: status.error ?? "Install Claude Code before signing in.",
+        status
+      };
+    }
+    if (status.authenticated) {
+      return {
+        ok: true,
+        command,
+        message: "Claude Code is already authenticated.",
+        status
+      };
+    }
+    const authCommand = `${command} auth login`;
+    return {
+      ok: true,
+      command: authCommand,
+      message: `Run ${authCommand} in a terminal, complete the browser sign-in, then refresh Claude status.`,
+      status
     };
   }
 
@@ -260,8 +677,91 @@ export class WorkspaceRuntime {
     return codingRun;
   }
 
-  previewCodingWorkflow(input: { projectId: string; scopeNodeId: string }): CodingWorkflow {
-    return this.repository.previewCodingWorkflow(input.projectId, input.scopeNodeId);
+  previewCodingWorkflow(input: CodingWorkflowPreviewRequest): CodingWorkflow {
+    const partitionConstraints = codingWorkflowPartitionConstraintsSchema.parse(input.partitionConstraints ?? {});
+    const executionPolicy = codingWorkflowExecutionPolicySchema.parse(input.executionPolicy ?? {});
+    const workflow = this.agentFeatureFlags.graphPartitionedWorkflows
+      ? this.repository.previewGraphPartitionedCodingWorkflow(
+          input.projectId,
+          input.scopeNodeId,
+          this.workUnitRevisionContext(input.projectId),
+          input.modeOverrides,
+          { partitionConstraints, executionPolicy }
+        )
+      : this.repository.previewCodingWorkflow(input.projectId, input.scopeNodeId, input.modeOverrides);
+    return this.agentFeatureFlags.graphPartitionedWorkflows && this.agentFeatureFlags.modelRouterV2
+      ? this.applyModelRouter(workflow)
+      : workflow;
+  }
+
+  async previewCodingWorkUnitContext(input: {
+    projectId: string;
+    workflowId: string;
+    workUnitId: string;
+    task: string;
+    provider: RenderedWorkUnitContext["provider"];
+    purpose: RenderedWorkUnitContext["purpose"];
+    includeLegacyShadow: boolean;
+    scaleOverride?: CodingAgentMode;
+  }): Promise<{
+    context: WorkUnitContext;
+    rendered: RenderedWorkUnitContext;
+    shadowComparison: WorkUnitContextShadowComparison | null;
+  }> {
+    if (!this.agentFeatureFlags.graphPartitionedWorkflows || !this.agentFeatureFlags.workUnitContext) {
+      throw validationError("Work-unit context preview requires graph-partitioned workflows and MA-3 context flags.");
+    }
+    const workflow = this.getCodingWorkflow(input.projectId, input.workflowId);
+    const orchestration = workflow.orchestration;
+    if (!orchestration) throw validationError("Coding workflow has no orchestration metadata.");
+    const revisionContext = this.workUnitRevisionContext(input.projectId);
+    const observedRevision = {
+      indexRevision: revisionContext.indexRevision,
+      workspaceRevision: revisionContext.workspaceRevision,
+      graphRevision: revisionContext.graphRevision,
+      sourceHashes: Object.fromEntries(this.repository.listScanFileStates(input.projectId).map((file) => [file.filePath, file.contentHash])),
+      contextCompilerVersion: WORK_UNIT_CONTEXT_COMPILER_VERSION,
+      routingFeatureVersion: orchestration.revision.routingFeatureVersion,
+      capturedAt: new Date().toISOString()
+    };
+    const context = await compileStoredWorkUnitContext({
+      repository: this.repository,
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      workUnitId: input.workUnitId,
+      task: input.task,
+      observedRevision,
+      indexState: revisionContext.indexState,
+      readSource: async (sourcePath) => this.readSourceFile(input.projectId, sourcePath).catch(() => null),
+      scaleOverride: input.scaleOverride
+        ? { scale: input.scaleOverride, contextBudget: contextBudgetForScale(input.scaleOverride) }
+        : undefined
+    });
+    const rendered = renderWorkUnitContext(context, { provider: input.provider, purpose: input.purpose });
+    const shadowComparison = input.includeLegacyShadow
+      ? await this.compareLegacyWorkUnitContexts(workflow, context)
+      : null;
+    this.repository.saveCodingWorkUnitContextDiagnostics({
+      projectId: input.projectId,
+      workflowId: input.workflowId,
+      workUnitId: input.workUnitId,
+      compilerVersion: context.compilerVersion,
+      diagnostics: {
+        compilerVersion: context.compilerVersion,
+        selectionPolicyVersion: context.selectionPolicyVersion,
+        revision: context.revision,
+        nodes: context.nodes,
+        edges: context.edges,
+        sources: context.sources.map(({ content: _content, ...source }) => source),
+        contracts: context.contracts.map((contract) => ({ id: contract.id, edgeId: contract.edgeId, status: contract.status })),
+        upstreamAccepted: context.upstreamAccepted.map((summary) => ({ workUnitId: summary.workUnitId, proposalId: summary.proposalId })),
+        omissions: context.omissions,
+        tokenUsage: context.tokenUsage,
+        provenance: context.provenance,
+        shadowComparison
+      }
+    });
+    return { context, rendered, shadowComparison };
   }
 
   getCodingWorkflow(projectId: string, workflowId: string): CodingWorkflow {
@@ -273,17 +773,311 @@ export class WorkspaceRuntime {
   }
 
   async startCodingWorkflow(input: CodingWorkflowStartRequest): Promise<CodingWorkflow> {
-    const workflow = this.repository.createCodingWorkflow(input.projectId, input.scopeNodeId, input.modeOverrides, "running");
+    const partitionConstraints = codingWorkflowPartitionConstraintsSchema.parse(input.partitionConstraints ?? {});
+    const executionPolicy = codingWorkflowExecutionPolicySchema.parse(input.executionPolicy ?? {});
+    let workflow =
+      this.agentFeatureFlags.graphPartitionedWorkflows && this.agentFeatureFlags.modelRouterV2
+        ? this.repository.createGraphPartitionedCodingWorkflow(
+            input.projectId,
+            input.scopeNodeId,
+            this.workUnitRevisionContext(input.projectId),
+            input.modeOverrides,
+            "running",
+            { partitionConstraints, executionPolicy }
+          )
+        : this.repository.createCodingWorkflow(
+            input.projectId,
+            input.scopeNodeId,
+            input.modeOverrides,
+            "running",
+            this.agentFeatureFlags.graphPartitionedWorkflows ? this.workUnitRevisionContext(input.projectId) : undefined
+          );
+    if (this.agentFeatureFlags.graphPartitionedWorkflows && this.agentFeatureFlags.modelRouterV2) {
+      workflow = this.applyModelRouter(workflow);
+    }
+    if (input.background) {
+      void this.runCodingWorkflowCurrentLayer(workflow.id).catch(() => {
+        this.repository.updateCodingWorkflowStatus(workflow.id, "failed");
+      });
+      return this.repository.getCodingWorkflow(workflow.id);
+    }
     await this.runCodingWorkflowCurrentLayer(workflow.id);
     return this.repository.getCodingWorkflow(workflow.id);
   }
 
   async applyCodingWorkflowLayer(input: CodingWorkflowApplyLayerRequest): Promise<CodingWorkflow> {
-    const workflow = this.repository.applyCodingWorkflowLayer(input.projectId, input.workflowId, input.layerIndex);
+    const workflow = this.agentFeatureFlags.integrationGate && this.agentFeatureFlags.graphPartitionedWorkflows
+      ? await this.applyIntegratedCodingWorkflowLayer(input, true)
+      : this.repository.applyCodingWorkflowLayer(input.projectId, input.workflowId, input.layerIndex);
     if (workflow.status === "blocked") {
       await this.runCodingWorkflowCurrentLayer(workflow.id);
     }
     return this.repository.getCodingWorkflow(workflow.id);
+  }
+
+  async controlCodingWorkflow(input: CodingWorkflowControlRequest): Promise<CodingWorkflow> {
+    const workflow = this.getCodingWorkflow(input.projectId, input.workflowId);
+    const scheduler = this.workflowSchedulers.get(workflow.id);
+    if (input.action === "pause") {
+      scheduler?.pause();
+      return this.repository.updateCodingWorkflowStatus(workflow.id, "blocked");
+    }
+    if (input.action === "cancel") {
+      scheduler?.cancel();
+      for (const item of workflow.items.filter((candidate) => !["applied", "skipped", "proposed", "cancelled"].includes(candidate.status))) {
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "cancelled" });
+      }
+      return this.repository.updateCodingWorkflowStatus(workflow.id, "cancelled");
+    }
+    if (input.action === "resume") {
+      if (scheduler) {
+        scheduler.resume();
+        return this.repository.updateCodingWorkflowStatus(workflow.id, "running");
+      }
+      for (const item of workflow.items.filter((candidate) => candidate.layerIndex === workflow.currentLayer && candidate.status === "blocked" && !candidate.proposalId)) {
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "pending" });
+      }
+      this.repository.updateCodingWorkflowStatus(workflow.id, "running");
+      await this.runCodingWorkflowCurrentLayer(workflow.id);
+      return this.repository.getCodingWorkflow(workflow.id);
+    }
+    if (input.action === "integrate") {
+      if (!this.agentFeatureFlags.integrationGate || !this.agentFeatureFlags.graphPartitionedWorkflows) {
+        throw validationError("Validate-only integration requires the graph-partitioned integration gate.");
+      }
+      return this.applyIntegratedCodingWorkflowLayer(
+        { projectId: input.projectId, workflowId: input.workflowId, layerIndex: workflow.currentLayer },
+        false
+      );
+    }
+    const item = workflow.items.find((candidate) => candidate.id === input.itemId);
+    if (!item) throw validationError(`Coding workflow item not found in workflow: ${input.itemId ?? "missing"}.`);
+    if (input.action === "skip") {
+      this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "skipped" });
+      return this.repository.getCodingWorkflow(workflow.id);
+    }
+    if (input.action === "escalate") {
+      if (!workflow.orchestration) throw validationError("Tier escalation requires graph-partitioned workflow metadata.");
+      const orchestration = structuredClone(workflow.orchestration);
+      const unit = orchestration.workUnits.find((candidate) => candidate.id === item.id);
+      const decision = orchestration.routingDecisions.find((candidate) => candidate.workUnitId === item.id);
+      if (!unit || !decision) throw validationError(`Routing metadata is missing for work unit ${item.id}.`);
+      if (decision.selectedScale === "large") throw validationError(`Work unit ${item.id} is already at the large tier.`);
+      const nextScale = decision.selectedScale === "small" ? "medium" : "large";
+      const catalog = this.modelRoutingCatalog(workflow.projectId);
+      decision.selectedScale = nextScale;
+      decision.assignment = catalog[nextScale];
+      decision.override = { actor: "user", reason: "User requested workflow-control escalation." };
+      decision.reasons = [...decision.reasons, `User escalated this work unit to ${nextScale}.`];
+      unit.selectedScale = nextScale;
+      unit.contextBudget = contextBudgetForScale(nextScale);
+      this.repository.replaceCodingWorkflowOrchestration(workflow.id, orchestration);
+    }
+    this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "pending", agentRunId: null, proposalId: null });
+    this.repository.updateCodingWorkflowStatus(workflow.id, "running", item.layerIndex);
+    await this.runCodingWorkflowCurrentLayer(workflow.id);
+    return this.repository.getCodingWorkflow(workflow.id);
+  }
+
+  private async applyIntegratedCodingWorkflowLayer(input: CodingWorkflowApplyLayerRequest, applyToWorkspace: boolean): Promise<CodingWorkflow> {
+    const workflow = this.repository.getCodingWorkflow(input.workflowId);
+    if (workflow.projectId !== input.projectId) throw validationError("Coding workflow does not belong to this project.");
+    const orchestration = workflow.orchestration;
+    if (!orchestration) throw validationError("The integration gate requires graph-partitioned workflow metadata.");
+    const layerItems = workflow.items.filter((item) => item.layerIndex === input.layerIndex);
+    if (layerItems.length === 0) throw validationError(`Coding workflow layer ${input.layerIndex} does not exist.`);
+    const proposals = layerItems
+      .filter((item) => item.status === "proposed")
+      .map((item) => {
+        if (!item.proposalId) throw validationError(`Coding workflow item ${item.id} does not have a code proposal.`);
+        const stored = this.repository.getCodeProposal(item.proposalId);
+        if (stored.workUnitProposal && stored.workUnitProposal.workUnitId !== item.id) {
+          throw validationError(`Code proposal ${stored.id} belongs to work unit ${stored.workUnitProposal.workUnitId}, not ${item.id}.`);
+        }
+        return {
+          proposalId: stored.id,
+          workUnitId: item.id,
+          diff: stored.diff,
+          contractUpdates: stored.workUnitProposal?.contractUpdates ?? [],
+          outputSummary: stored.workUnitProposal?.unresolvedIssues.length
+            ? `Unresolved: ${stored.workUnitProposal.unresolvedIssues.join("; ")}`
+            : "Child produced a scoped code proposal."
+        };
+      });
+    const paths = new Set<string>();
+    for (const unit of orchestration.workUnits.filter((candidate) => candidate.layerIndex === input.layerIndex)) {
+      for (const scope of unit.plannedWriteScopes) paths.add(scope.path);
+    }
+    for (const proposal of proposals) {
+      try {
+        for (const file of parseUnifiedDiff(proposal.diff).files) {
+          if (file.oldPath) paths.add(file.oldPath);
+          if (file.newPath) paths.add(file.newPath);
+        }
+      } catch {
+        // The integration gate records the authoritative parse failure.
+      }
+    }
+    const project = this.repository.getProject(input.projectId);
+    const revisionPaths = [...paths].sort();
+    const expectedRevision = await this.integrationRevisionKey(input.projectId, project.rootPath, revisionPaths);
+    return this.revisionApplyLock.runExclusive({
+      workspaceId: input.projectId,
+      expectedRevision,
+      observeRevision: () => this.integrationRevisionKey(input.projectId, project.rootPath, revisionPaths),
+      apply: async () => {
+        const currentSourceHashes = await readCurrentSourceHashes(project.rootPath, revisionPaths);
+        const validationCommands = this.integrationValidationCommands(workflow, input.layerIndex, project.rootPath);
+        const result = await runIntegrationGate({
+          orchestration,
+          layerIndex: input.layerIndex,
+          proposals,
+          currentSourceHashes,
+          validationCommands,
+          validateCombinedPatch: ({ combinedDiff, commands }) =>
+            validateCombinedPatchInTemporaryWorkspace({
+              workspaceRoot: project.rootPath,
+              combinedDiff,
+              commands,
+              timeoutMs: 120000
+            }),
+          invokeIntegrationAgent: ({ scale, context }) =>
+            runIntegrationAgent(
+              { scale, context },
+              {
+                config: { ...this.repository.getCodingAgentConfig(workflow.projectId, scale), agentKind: "coding" },
+                workspaceRoot: project.rootPath,
+                toolbox: this.createToolbox(workflow.projectId)
+              }
+            )
+        });
+        const previousActualWriteCheck = workflow.integrationChecks?.find(
+          (check) => check.layerIndex === input.layerIndex && check.checkKind === "actual_write_set"
+        );
+        const rawPreviousProposalIds = previousActualWriteCheck?.diagnostics.proposalIds;
+        const previouslyValidatedProposalIds =
+          rawPreviousProposalIds && typeof rawPreviousProposalIds === "object" && !Array.isArray(rawPreviousProposalIds)
+            ? (rawPreviousProposalIds as Record<string, string>)
+            : {};
+        this.repository.replaceIntegrationChecks({
+          workflowId: workflow.id,
+          layerIndex: input.layerIndex,
+          checks: result.checks.map((check) => ({
+            itemId: check.itemId,
+            checkKind: check.kind,
+            status: check.status,
+            diagnostics: check.diagnostics
+          }))
+        });
+        this.repository.updateInterfaceContractStates(workflow.id, result.contractReconciliation.contracts);
+        for (const parsed of result.parsedProposals) {
+          const item = layerItems.find((candidate) => candidate.id === parsed.workUnitId)!;
+          this.repository.updateCodingWorkflowItemIntegrationMetadata({
+            itemId: parsed.workUnitId,
+            actualWriteScopes: parsed.actualWriteScopes,
+            proposalRevision:
+              previouslyValidatedProposalIds[parsed.workUnitId] === parsed.proposalId
+                ? (item.proposalRevision ?? 1)
+                : (item.proposalRevision ?? 0) + 1
+          });
+        }
+        if (!result.applicable) {
+          for (const item of layerItems.filter((candidate) => candidate.status === "proposed")) {
+            this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "blocked" });
+          }
+          this.repository.updateCodingWorkflowStatus(workflow.id, "blocked", input.layerIndex);
+          const failedKinds = result.checks.filter((check) => check.status !== "passed").map((check) => check.kind);
+          throw validationError(`Coding workflow integration gate failed: ${[...new Set(failedKinds)].join(", ")}.`);
+        }
+
+        if (!applyToWorkspace) {
+          this.repository.updateCodingWorkflowStatus(workflow.id, "blocked", input.layerIndex);
+          return this.repository.getCodingWorkflow(workflow.id);
+        }
+
+        await applyCombinedPatchToWorkspace({ workspaceRoot: project.rootPath, combinedDiff: result.combinedDiff, timeoutMs: 60000 });
+        let applied = this.repository.applyCodingWorkflowLayer(input.projectId, input.workflowId, input.layerIndex);
+        for (const blockedWorkUnitId of result.contractReconciliation.blockedWorkUnitIds) {
+          const blockedItem = applied.items.find((candidate) => candidate.id === blockedWorkUnitId);
+          if (blockedItem && blockedItem.status !== "applied" && blockedItem.status !== "skipped") {
+            this.repository.updateCodingWorkflowItem({ itemId: blockedItem.id, status: "blocked" });
+          }
+        }
+        if (result.contractReconciliation.blockedWorkUnitIds.length > 0 && applied.status === "succeeded") {
+          this.repository.updateCodingWorkflowStatus(workflow.id, "blocked", input.layerIndex);
+        }
+        applied = this.repository.getCodingWorkflow(workflow.id);
+        if (!applied.orchestration) return applied;
+        const refreshedOrchestration = structuredClone(applied.orchestration);
+        const revisionSourcePaths = new Set(Object.keys(refreshedOrchestration.revision.sourceHashes));
+        for (const parsed of result.parsedProposals) {
+          for (const file of parsed.files) {
+            if (file.oldPath) revisionSourcePaths.add(file.oldPath);
+            if (file.newPath) revisionSourcePaths.add(file.newPath);
+          }
+        }
+        const refreshedHashes = await readCurrentSourceHashes(project.rootPath, [...revisionSourcePaths]);
+        refreshedOrchestration.revision = {
+          ...refreshedOrchestration.revision,
+          sourceHashes: refreshedHashes,
+          capturedAt: new Date().toISOString()
+        };
+        refreshedOrchestration.interfaceContracts = result.contractReconciliation.contracts;
+        refreshedOrchestration.workUnits = refreshedOrchestration.workUnits.map((unit) => ({
+          ...unit,
+          baseRevision: refreshedOrchestration.revision
+        }));
+        return this.repository.replaceCodingWorkflowOrchestration(workflow.id, refreshedOrchestration);
+      }
+    });
+  }
+
+  private async integrationRevisionKey(projectId: string, workspaceRoot: string, paths: string[]): Promise<string> {
+    const revision = this.workUnitRevisionContext(projectId);
+    const hashes = await readCurrentSourceHashes(workspaceRoot, paths);
+    return crypto
+      .createHash("sha1")
+      .update(JSON.stringify({
+        indexRevision: revision.indexRevision,
+        workspaceRevision: revision.workspaceRevision,
+        graphRevision: revision.graphRevision,
+        hashes: Object.fromEntries(Object.entries(hashes).sort(([left], [right]) => left.localeCompare(right)))
+      }))
+      .digest("hex");
+  }
+
+  private integrationValidationCommands(workflow: CodingWorkflow, layerIndex: number, workspaceRoot: string): string[] {
+    const commands: string[] = [];
+    const packageJsonPath = path.join(workspaceRoot, "package.json");
+    if (fs.existsSync(packageJsonPath)) {
+      try {
+        const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, "utf8")) as { scripts?: Record<string, string> };
+        const runner = fs.existsSync(path.join(workspaceRoot, "pnpm-lock.yaml"))
+          ? "pnpm"
+          : fs.existsSync(path.join(workspaceRoot, "yarn.lock"))
+            ? "yarn"
+            : "npm run";
+        for (const script of ["format:check", "lint", "typecheck", "build", "test"] as const) {
+          if (packageJson.scripts?.[script]) commands.push(`${runner} ${script}`);
+        }
+      } catch {
+        // Project-specific block commands below remain authoritative when package metadata is malformed.
+      }
+    }
+    for (const item of workflow.items.filter((candidate) => candidate.layerIndex === layerIndex)) {
+      const metadata = this.repository.resolveExecutionMetadata(item.nodeId);
+      if (!metadata.testCommand?.trim()) continue;
+      const workingDirectory = metadata.workingDirectory?.trim() || ".";
+      const absoluteWorkingDirectory = path.resolve(workspaceRoot, workingDirectory);
+      if (absoluteWorkingDirectory !== workspaceRoot && !absoluteWorkingDirectory.startsWith(`${workspaceRoot}${path.sep}`)) {
+        throw validationError(`Integration test working directory escapes the workspace: ${workingDirectory}.`);
+      }
+      const relativeWorkingDirectory = path.relative(workspaceRoot, absoluteWorkingDirectory) || ".";
+      const setup = metadata.setupCommand?.trim();
+      const test = metadata.testCommand.trim();
+      commands.push(`cd ${shellQuote(relativeWorkingDirectory)} && ${setup ? `${setup} && ` : ""}${test}`);
+    }
+    return [...new Set(commands)];
   }
 
     async runReview(input: ReviewAgentRequest): Promise<AgentRun> {
@@ -323,6 +1117,74 @@ export class WorkspaceRuntime {
     return this.repository.applyAgentGraphPatch(projectId, runId);
   }
 
+  async applyCodeProposal(input: CodeProposalApplyRequest): Promise<AgentRun> {
+    const run = this.repository.getAgentRun(input.runId);
+    if (run.projectId !== input.projectId) {
+      throw validationError("Coding run does not belong to the selected project.");
+    }
+    if (run.agentKind !== "coding" || run.status !== "succeeded") {
+      throw validationError("Only succeeded coding proposals can be implemented.");
+    }
+    if (run.implementedAt) {
+      return run;
+    }
+    const review = this.repository
+      .listAgentRuns(input.projectId, 200)
+      .find((candidate) => candidate.agentKind === "review" && candidate.prompt === `Review ${run.id}`);
+    if (!review || review.status !== "succeeded") {
+      throw validationError("A completed review is required before implementing this proposal.");
+    }
+    if (reviewVerdict(review.response) !== "reviewed") {
+      throw validationError("The attached review requested changes; implement is blocked until a reviewed proposal is available.");
+    }
+    const proposalReference = this.repository.getLatestCodeProposalForRun(run.id);
+    if (!proposalReference) {
+      throw validationError("The coding run does not have a stored proposal to implement.");
+    }
+    const proposal = this.repository.getCodeProposal(proposalReference.id);
+    const parsed = parseUnifiedDiff(proposal.diff);
+    const paths = [...new Set(parsed.files.flatMap((file) => [file.oldPath, file.newPath].filter((value): value is string => Boolean(value))))].sort();
+    const project = this.repository.getProject(input.projectId);
+    const expectedRevision = await this.integrationRevisionKey(input.projectId, project.rootPath, paths);
+    return this.revisionApplyLock.runExclusive({
+      workspaceId: input.projectId,
+      expectedRevision,
+      observeRevision: () => this.integrationRevisionKey(input.projectId, project.rootPath, paths),
+      apply: async () => {
+        const validation = await validateCombinedPatchInTemporaryWorkspace({
+          workspaceRoot: project.rootPath,
+          combinedDiff: proposal.diff,
+          commands: [],
+          timeoutMs: 120000
+        });
+        if (!validation.passed) {
+          throw validationError(`Code proposal validation failed: ${validation.diagnostics.join(" ")}`);
+        }
+        await applyCombinedPatchToWorkspace({
+          workspaceRoot: project.rootPath,
+          combinedDiff: proposal.diff,
+          timeoutMs: 60000
+        });
+        const implemented = this.repository.updateAgentRun(run.id, { implementedAt: new Date().toISOString() });
+        await Promise.resolve(this.refreshCodeGraph(input.projectId)).catch(() => undefined);
+        if (implemented.targetNodeId) {
+          try {
+            this.repository.setGraphStatuses(input.projectId, [{
+              entityType: "node",
+              entityId: implemented.targetNodeId,
+              status: "implemented",
+              note: `Implemented reviewed coding proposal ${proposal.id}.`,
+              agentRunId: implemented.id
+            }]);
+          } catch {
+            // The source patch remains authoritative if a scan replaced the selected node identity.
+          }
+        }
+        return this.repository.getAgentRun(run.id);
+      }
+    });
+  }
+
   async runScanning(input: ScanningAgentRequest): Promise<AgentRun> {
     const project = this.repository.getProject(input.projectId);
     const settings = this.repository.getWorkspaceSettings(input.projectId);
@@ -340,14 +1202,38 @@ export class WorkspaceRuntime {
       status: "running"
     });
     this.repository.addAgentMessage({ runId: run.id, role: "user", content: prompt });
-    const execute = () =>
-      runScanningAgent(enrichedInput, {
-        config: this.repository.getAgentConfig(input.projectId, "scanning"),
-        scanningConfigs: Object.fromEntries(SCANNING_AGENT_MODES.map((mode) => [mode, this.repository.getScanningAgentConfig(input.projectId, mode)])),
-        runId: run.id,
-        workspaceRoot: project.rootPath,
-        toolbox: this.createToolbox(input.projectId)
-      });
+    const controller = new AbortController();
+    this.indexControllers.get(input.projectId)?.abort();
+    this.indexControllers.set(input.projectId, controller);
+    const execute = async () => {
+      try {
+        return await runScanningAgent(enrichedInput, {
+          config: this.repository.getAgentConfig(input.projectId, "scanning"),
+          scanningConfigs: Object.fromEntries(
+            SCANNING_AGENT_MODES.map((mode) => {
+              const config = this.repository.getScanningAgentConfig(input.projectId, mode);
+              return [
+                mode,
+                input.skipCodexDefaultSystemPrompt && config.provider === "codex"
+                  ? { ...config, skipCodexDefaultSystemPrompt: true }
+                  : config
+              ];
+            })
+          ),
+          runId: run.id,
+          workspaceRoot: project.rootPath,
+          toolbox: this.createToolbox(input.projectId),
+          signal: controller.signal
+        });
+      } catch (error) {
+        this.markIndexFailed(input.projectId, error);
+        throw error;
+      } finally {
+        if (this.indexControllers.get(input.projectId) === controller) {
+          this.indexControllers.delete(input.projectId);
+        }
+      }
+    };
     if (input.background) {
       void this.finishAgentRun(run, execute);
       return run;
@@ -413,6 +1299,7 @@ export class WorkspaceRuntime {
         rootPath,
         projectDescription: project.description,
         scanningInstructions: project.scanningInstructions,
+        skipCodexDefaultSystemPrompt: initialization.skipCodexDefaultSystemPrompt,
         background: true
       });
     }
@@ -460,6 +1347,19 @@ export class WorkspaceRuntime {
     }
   }
 
+  async readGitDiff(projectId: string): Promise<string> {
+    const project = this.repository.getProject(projectId);
+    try {
+      const { stdout } = await execFileAsync("git", ["-C", project.rootPath, "diff", "--no-ext-diff", "--"], {
+        timeout: 10000,
+        maxBuffer: 1024 * 1024 * 8
+      });
+      return stdout.trimEnd();
+    } catch {
+      return "";
+    }
+  }
+
   private resolveGithubClientId(projectId: string, override?: string): string {
     const settings = this.repository.getWorkspaceSettings(projectId);
     const clientId = override?.trim() || settings.github.clientId.trim() || process.env.GRAPHCODE_GITHUB_CLIENT_ID?.trim() || "";
@@ -470,6 +1370,11 @@ export class WorkspaceRuntime {
   }
 
   private switchDatabase(dbPath: string): void {
+    for (const controller of this.indexControllers.values()) {
+      controller.abort();
+    }
+    this.indexControllers.clear();
+    this.indexStates.clear();
     this.db.close();
     this.db = openDatabase(dbPath);
     migrate(this.db);
@@ -496,6 +1401,14 @@ export class WorkspaceRuntime {
   }
 
   private async runCodingWorkflowCurrentLayer(workflowId: string): Promise<void> {
+    if (
+      this.agentFeatureFlags.graphPartitionedWorkflows &&
+      this.agentFeatureFlags.workUnitContext &&
+      this.agentFeatureFlags.modelRouterV2
+    ) {
+      await this.runPartitionedCodingWorkflow(workflowId);
+      return;
+    }
     let workflow = this.repository.getCodingWorkflow(workflowId);
     const readyItems = this.repository.getReadyCodingWorkflowItems(workflowId);
     if (readyItems.length === 0) {
@@ -537,12 +1450,309 @@ export class WorkspaceRuntime {
     this.repository.updateCodingWorkflowStatus(workflowId, complete ? "blocked" : "running");
   }
 
+  private async runPartitionedCodingWorkflow(workflowId: string): Promise<void> {
+    let workflow = this.repository.getCodingWorkflow(workflowId);
+    const orchestration = workflow.orchestration;
+    if (!orchestration) throw validationError("Partitioned coding workflow has no orchestration metadata.");
+    const itemById = new Map(workflow.items.map((item) => [item.id, item]));
+    const decisionByUnitId = new Map(orchestration.routingDecisions.map((decision) => [decision.workUnitId, decision]));
+    const catalog = this.modelRoutingCatalog(workflow.projectId);
+    const observedAtStart = this.workUnitRevisionContext(workflow.projectId);
+    const providerConcurrency: Record<string, number> = {};
+    const modelConcurrency: Record<string, number> = {};
+    for (const tier of Object.values(catalog)) {
+      providerConcurrency[tier.providerId] = Math.min(providerConcurrency[tier.providerId] ?? tier.maxConcurrency, tier.maxConcurrency);
+      modelConcurrency[`${tier.providerId}/${tier.modelId}`] = tier.maxConcurrency;
+    }
+    const scheduler = createWorkflowScheduler({
+      units: orchestration.workUnits.map((unit) => {
+        const item = itemById.get(unit.id);
+        const decision = decisionByUnitId.get(unit.id);
+        if (!item || !decision) throw validationError(`Stored scheduler metadata is incomplete for work unit ${unit.id}.`);
+        return {
+          id: unit.id,
+          dependencyWorkUnitIds: unit.dependencyWorkUnitIds,
+          plannedWriteScopes: unit.plannedWriteScopes,
+          routingDecision: decision,
+          baseRevisionKey: `${unit.baseRevision.indexRevision ?? "none"}:${unit.baseRevision.workspaceRevision ?? "none"}:${unit.baseRevision.graphRevision}`,
+          indexState: decision.features.indexState,
+          executionMode: "proposal_only" as const,
+          coordinatedProposalUnitIds: unit.coordinationWorkUnitIds,
+          initialOutcome:
+            item.status === "applied"
+              ? ("accepted" as const)
+              : item.status === "skipped"
+                ? ("waived" as const)
+                : item.status === "proposed"
+                  ? ("proposed" as const)
+                  : item.status === "failed"
+                    ? ("failed" as const)
+                    : undefined
+        };
+      }),
+      limits: {
+        globalConcurrency: Math.max(
+          1,
+          Math.min(
+            orchestration.executionPolicy?.maximumConcurrency ?? 16,
+            16,
+            ...Object.values(catalog).map((tier) => tier.maxConcurrency)
+          )
+        ),
+        providerConcurrency,
+        modelConcurrency,
+        ...(orchestration.executionPolicy?.maxEstimatedCost !== null && orchestration.executionPolicy?.maxEstimatedCost !== undefined
+          ? { globalCostBudget: orchestration.executionPolicy.maxEstimatedCost }
+          : {}),
+        maxRetries: 1,
+        maxEscalations: 1
+      },
+      validateRevision: (scheduled) => {
+        const unit = orchestration.workUnits.find((candidate) => candidate.id === scheduled.id)!;
+        return (
+          unit.baseRevision.indexRevision === observedAtStart.indexRevision &&
+          unit.baseRevision.workspaceRevision === observedAtStart.workspaceRevision &&
+          unit.baseRevision.graphRevision === observedAtStart.graphRevision
+        );
+      },
+      indexStateAllowed: (state) => state === "complete",
+      assignmentForScale: (scale) => catalog[scale],
+      execute: async (dispatch) => {
+        const unit = orchestration.workUnits.find((candidate) => candidate.id === dispatch.workUnitId)!;
+        const item = itemById.get(unit.id)!;
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "running" });
+        let compiled: Awaited<ReturnType<WorkspaceRuntime["previewCodingWorkUnitContext"]>>;
+        try {
+          compiled = await this.previewCodingWorkUnitContext({
+            projectId: workflow.projectId,
+            workflowId: workflow.id,
+            workUnitId: unit.id,
+            task: `Execute work unit ${unit.title}: ${unit.objective}`,
+            provider: renderProviderForAgent(dispatch.providerId),
+            purpose: "coding",
+            includeLegacyShadow: false,
+            scaleOverride: dispatch.scale
+          });
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Work-unit context compilation failed.";
+          throw new WorkflowSchedulerFailure(/stale|revision/i.test(message) ? "stale_revision" : "context_insufficient", message);
+        }
+        const run = this.repository.createAgentRun({
+          projectId: workflow.projectId,
+          agentKind: "coding",
+          codingMode: dispatch.scale,
+          targetNodeId: item.nodeId,
+          prompt: unit.objective,
+          status: "running"
+        });
+        this.repository.addAgentMessage({ runId: run.id, role: "user", content: unit.objective });
+        const completed = await this.finishAgentRun(run, () =>
+          runCodingWorkUnitAgent(
+            {
+              projectId: workflow.projectId,
+              targetNodeId: item.nodeId,
+              context: compiled.context,
+              rendered: compiled.rendered,
+              allowContractUpdates: this.agentFeatureFlags.edgeContracts
+            },
+            {
+              config: { ...this.repository.getCodingAgentConfig(workflow.projectId, dispatch.scale), agentKind: "coding" },
+              runId: run.id,
+              workspaceRoot: this.repository.getProject(workflow.projectId).rootPath,
+              toolbox: this.createToolbox(workflow.projectId),
+              signal: dispatch.signal
+            }
+          )
+        );
+        if (completed.status !== "succeeded") {
+          throw new WorkflowSchedulerFailure("transient_provider", completed.error ?? "Work-unit provider execution failed.");
+        }
+        const proposal = this.repository.getLatestCodeProposalForRun(completed.id);
+        if (!proposal) throw new WorkflowSchedulerFailure("validation_failure", "Work-unit provider returned no stored proposal.");
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "proposed", agentRunId: completed.id, proposalId: proposal.id });
+        return {
+          outcome: "proposed" as const,
+          actualInputTokens: compiled.rendered.estimatedInputTokens,
+          actualOutputTokens: Math.ceil(completed.response.length / 4),
+          testOutcome: "not_run" as const
+        };
+      }
+    });
+    this.repository.updateCodingWorkflowStatus(workflowId, "running");
+    this.workflowSchedulers.set(workflowId, scheduler);
+    let scheduled: Awaited<ReturnType<WorkflowScheduler["run"]>>;
+    try {
+      scheduled = await scheduler.run();
+    } finally {
+      if (this.workflowSchedulers.get(workflowId) === scheduler) this.workflowSchedulers.delete(workflowId);
+    }
+    workflow = this.repository.getCodingWorkflow(workflowId);
+    const updated = structuredClone(workflow.orchestration!);
+    const scheduledById = new Map(scheduled.units.map((unit) => [unit.id, unit]));
+    updated.routingDecisions = updated.routingDecisions.map((decision) => {
+      const result = scheduledById.get(decision.workUnitId)!;
+      return {
+        ...decision,
+        selectedScale: result.scale,
+        assignment: catalog[result.scale],
+        metrics: result.metrics
+      };
+    });
+    updated.workUnits = updated.workUnits.map((unit) => {
+      const result = scheduledById.get(unit.id)!;
+      return {
+        ...unit,
+        selectedScale: result.scale,
+        contextBudget: contextBudgetForScale(result.scale),
+        status: result.status === "waived" ? "skipped" : result.status
+      };
+    });
+    for (const result of scheduled.units) {
+      const item = itemById.get(result.id)!;
+      if (result.status === "failed") this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "failed" });
+      if (result.status === "blocked" || result.status === "stale") {
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "blocked" });
+      }
+      if (result.status === "cancelled") this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "cancelled" });
+    }
+    this.repository.replaceCodingWorkflowOrchestration(workflowId, updated);
+    const refreshed = this.repository.getCodingWorkflow(workflowId);
+    const hasProposal = refreshed.items.some((item) => item.status === "proposed");
+    const allAccepted = refreshed.items.every((item) => item.status === "applied" || item.status === "skipped");
+    this.repository.updateCodingWorkflowStatus(
+      workflowId,
+      scheduled.status === "cancelled" ? "cancelled" : allAccepted ? "succeeded" : hasProposal ? "blocked" : scheduled.status === "failed" ? "failed" : "blocked"
+    );
+  }
+
+  private workUnitRevisionContext(projectId: string) {
+    const indexState = this.getIndexState(projectId);
+    const completeness = indexState.completeness;
+    const routingIndexState =
+      completeness.status === "complete"
+        ? ("complete" as const)
+        : completeness.status === "partial"
+          ? (indexState.progress.phase === "idle" ? ("unavailable" as const) : ("partial" as const))
+          : completeness.status;
+    return {
+      indexRevision: indexState.indexRevision,
+      workspaceRevision: indexState.workspaceRevision,
+      graphRevision: this.repository.currentGraphRevision(projectId),
+      indexState: routingIndexState
+    };
+  }
+
+  private applyModelRouter(workflow: CodingWorkflow): CodingWorkflow {
+    if (!workflow.orchestration) return workflow;
+    const orchestration = structuredClone(workflow.orchestration);
+    const catalog = this.modelRoutingCatalog(workflow.projectId);
+    const unitById = new Map(orchestration.workUnits.map((unit) => [unit.id, unit]));
+    orchestration.routingDecisions = orchestration.routingDecisions.map((existingDecision) => {
+      const workUnit = unitById.get(existingDecision.workUnitId);
+      if (!workUnit) throw validationError(`Routing decision references missing work unit ${existingDecision.workUnitId}.`);
+      const estimatedInputTokens = Math.max(
+        existingDecision.estimatedInputTokens,
+        600 + existingDecision.features.estimatedSourceTokens + existingDecision.features.cutEdgeCount * 64
+      );
+      const estimatedOutputTokens = Math.max(existingDecision.estimatedOutputTokens, 600);
+      return routeWorkUnit({
+        workUnit,
+        features: existingDecision.features,
+        catalog,
+        estimatedInputTokens,
+        estimatedOutputTokens,
+        existingDecision
+      });
+    });
+    const decisionByUnitId = new Map(orchestration.routingDecisions.map((decision) => [decision.workUnitId, decision]));
+    orchestration.revision = { ...orchestration.revision, routingFeatureVersion: MODEL_ROUTER_FEATURE_VERSION };
+    orchestration.workUnits = orchestration.workUnits.map((unit) => {
+      const decision = decisionByUnitId.get(unit.id)!;
+      return {
+        ...unit,
+        recommendedScale: decision.recommendedScale,
+        selectedScale: decision.selectedScale,
+        contextBudget: contextBudgetForScale(decision.selectedScale),
+        baseRevision: { ...unit.baseRevision, routingFeatureVersion: MODEL_ROUTER_FEATURE_VERSION }
+      };
+    });
+    return this.repository.replaceCodingWorkflowOrchestration(workflow.id, orchestration);
+  }
+
+  private modelRoutingCatalog(projectId: string): ModelRoutingCatalog {
+    return Object.fromEntries(
+      (["small", "medium", "large"] as CodingAgentMode[]).map((scale) => {
+        const config = this.repository.getCodingAgentConfig(projectId, scale);
+        return [
+          scale,
+          {
+            providerId: config.provider,
+            modelId: config.model.trim() || `${config.provider}-default`,
+            maxConcurrency: config.parallelLimit,
+            inputPricePerMillion: null,
+            outputPricePerMillion: null,
+            currency: "USD"
+          }
+        ];
+      })
+    ) as ModelRoutingCatalog;
+  }
+
+  private async compareLegacyWorkUnitContexts(
+    workflow: CodingWorkflow,
+    context: WorkUnitContext
+  ): Promise<WorkUnitContextShadowComparison> {
+    const targetNodeId = context.workUnit.ownedNodeIds[0];
+    if (!targetNodeId) {
+      return compareWorkUnitContextToLegacy(context, { legacyCodingPromptCharacters: 0, legacyReviewPromptCharacters: 0 });
+    }
+    const detail = this.repository.getNodeDetail(targetNodeId);
+    const graph = {
+      nodes: this.repository.listProjectNodes(context.projectId),
+      edges: this.repository.listProjectEdges(context.projectId)
+    };
+    const scopeCanvas = await this.repository
+      .getCanvasGraph({ projectId: context.projectId, rootNodeId: workflow.scopeNodeId, includeAttachments: true })
+      .catch(() => null);
+    const allowedPath = detail.node.source.path ?? detail.node.code.directory;
+    const source = allowedPath ? await this.readSourceFile(context.projectId, allowedPath).catch(() => "") : "";
+    const gitStatus = await this.readGitStatus(context.projectId).catch(() => "");
+    const execution = this.repository.resolveExecutionMetadata(targetNodeId);
+    const coverageNotice = workUnitCoverageNotice(this.getIndexState(context.projectId));
+    const coding = benchmarkLegacyCodingContexts({
+      detail,
+      graph,
+      scopeCanvas,
+      source,
+      gitStatus,
+      execution,
+      prompt: context.task,
+      coverageNotice
+    }).find((entry) => entry.mode === context.scale)!;
+    const review = benchmarkLegacyReviewContexts({
+      targetRun: null,
+      detail,
+      graph,
+      scopeCanvas,
+      source,
+      gitStatus,
+      execution,
+      diff: "",
+      coverageNotice
+    }).find((entry) => entry.mode === context.scale)!;
+    return compareWorkUnitContextToLegacy(context, {
+      legacyCodingPromptCharacters: coding.promptCharacters,
+      legacyReviewPromptCharacters: review.promptCharacters
+    });
+  }
+
   private createToolbox(projectId: string): GraphCodeToolbox {
     return {
       readGraph: async (inputProjectId) => ({
         nodes: this.repository.listProjectNodes(inputProjectId),
         edges: this.repository.listProjectEdges(inputProjectId)
       }),
+      getIndexState: async (inputProjectId) => this.getIndexState(inputProjectId),
       getNodeDetail: async (nodeId) => this.repository.getNodeDetail(nodeId),
       getCanvasGraph: async (inputProjectId, rootNodeId, includeAttachments) =>
         this.repository.getCanvasGraph({ projectId: inputProjectId, rootNodeId, includeAttachments: includeAttachments ?? true }),
@@ -561,14 +1771,22 @@ export class WorkspaceRuntime {
       buildFakeLocalScanOutput: async (inputProjectId, file) => this.buildFakeLocalScanOutput(inputProjectId, file),
       applyScanResult: async (inputProjectId, result, runId) => {
         await this.validateScanResultSourceRanges(inputProjectId, result);
-        return this.repository.applyScanPipelineResult(inputProjectId, result, runId);
+        return this.applyScanPipelineResult(inputProjectId, result, runId);
       },
       readSourceFile: async (relativePath) => this.readSourceFile(projectId, relativePath),
       resolveExecutionMetadata: async (nodeId) => this.repository.resolveExecutionMetadata(nodeId),
-      writeCodeProposal: async (inputProjectId, runId, targetNodeId, diff, artifactManifest) => {
-        this.repository.storeCodeProposal({ projectId: inputProjectId, agentRunId: runId, targetNodeId, diff, artifactManifest });
+      writeCodeProposal: async (inputProjectId, runId, targetNodeId, diff, artifactManifest, workUnitProposal) => {
+        this.repository.storeCodeProposal({
+          projectId: inputProjectId,
+          agentRunId: runId,
+          targetNodeId,
+          diff,
+          artifactManifest,
+          workUnitProposal
+        });
       },
       readGitStatus: async (inputProjectId) => this.readGitStatus(inputProjectId),
+      readGitDiff: async (inputProjectId) => this.readGitDiff(inputProjectId),
       refreshCodeGraph: async (inputProjectId, rootPath) => this.refreshCodeGraph(inputProjectId, rootPath)
     };
   }
@@ -579,8 +1797,150 @@ export class WorkspaceRuntime {
     if (requestedRootPath && !samePath(requestedRootPath, rootPath)) {
       throw validationError("Scanning root path must match the active project root.");
     }
-    const snapshot = scanRepositoryCodeGraph(rootPath);
-    return this.repository.replaceScannedCodeGraph(projectId, snapshot);
+    const controller = new AbortController();
+    this.indexControllers.get(projectId)?.abort();
+    this.indexControllers.set(projectId, controller);
+    this.indexStates.set(projectId, indexingState(projectId, "discovering", "Discovering workspace files."));
+    try {
+      const snapshot = scanRepositoryCodeGraph(rootPath, {
+        signal: controller.signal,
+        onProgress: (progress) => {
+          const previous = this.indexStates.get(projectId) ?? indexingState(projectId, progress.phase, progress.message);
+          this.indexStates.set(projectId, {
+            ...previous,
+            generatedAt: new Date().toISOString(),
+            progress: {
+              phase: progress.phase,
+              completed: progress.completed,
+              total: progress.total,
+              message: progress.message,
+              updatedAt: new Date().toISOString()
+            }
+          });
+        }
+      });
+      const persistStartedAt = performance.now();
+      const prior = this.indexStates.get(projectId);
+      if (prior) {
+        this.indexStates.set(projectId, {
+          ...prior,
+          progress: {
+            phase: "persisting",
+            completed: 0,
+            total: snapshot.files.length,
+            message: "Persisting generated graph projection.",
+            updatedAt: new Date().toISOString()
+          }
+        });
+      }
+      const result = this.repository.replaceScannedCodeGraph(projectId, snapshot);
+      const persistMs = performance.now() - persistStartedAt;
+      const indexRevision = indexRevisionForSnapshot(snapshot.files.map((file) => file.path), snapshot.symbols.map((symbol) => symbol.id));
+      this.indexStates.set(projectId, {
+        projectId,
+        providerId: "current-parser",
+        indexRevision,
+        workspaceRevision: null,
+        generatedAt: snapshot.scan.generatedAt,
+        completeness: snapshot.scan.completeness,
+        counts: snapshot.scan.counts,
+        progress: {
+          phase: "complete",
+          completed: snapshot.scan.counts.indexed,
+          total: snapshot.scan.counts.supported,
+          message:
+            snapshot.scan.completeness.status === "complete"
+              ? `Indexed all ${snapshot.scan.counts.indexed} supported files.`
+              : `Indexed ${snapshot.scan.counts.indexed} files with visible omissions.`,
+          updatedAt: new Date().toISOString()
+        },
+        telemetry: { ...snapshot.scan.telemetry, persistMs }
+      });
+      return result;
+    } catch (error) {
+      this.markIndexFailed(projectId, error);
+      throw error;
+    } finally {
+      if (this.indexControllers.get(projectId) === controller) {
+        this.indexControllers.delete(projectId);
+      }
+    }
+  }
+
+  private applyScanPipelineResult(projectId: string, result: ScanPipelineResult, runId?: string | null) {
+    const previous = this.getIndexState(projectId);
+    this.indexStates.set(projectId, {
+      ...previous,
+      progress: {
+        phase: "persisting",
+        completed: 0,
+        total: result.inventory.length,
+        message: "Persisting scanner output.",
+        updatedAt: new Date().toISOString()
+      }
+    });
+    const persistStartedAt = performance.now();
+    const refresh = this.repository.applyScanPipelineResult(projectId, result, runId);
+    const failed = Math.max(0, previous.counts.supported - result.inventory.length);
+    const counts = {
+      ...previous.counts,
+      indexed: result.inventory.length,
+      failed
+    };
+    const completeness: IndexState["completeness"] =
+      failed === 0
+        ? { status: "complete" }
+        : {
+            status: "partial",
+            indexedFiles: result.inventory.length,
+            discoveredFiles: previous.counts.discovered,
+            reasons: [`${failed} supported files could not be read or indexed.`]
+          };
+    const indexRevision = indexRevisionForSnapshot(
+      result.inventory.map((file) => `${file.path}:${file.contentHash}`),
+      result.localOutputs.flatMap((output) => output.nodes.map((node) => node.stableKey))
+    );
+    this.indexStates.set(projectId, {
+      ...previous,
+      indexRevision,
+      workspaceRevision: indexRevision,
+      generatedAt: new Date().toISOString(),
+      completeness,
+      counts,
+      progress: {
+        phase: "complete",
+        completed: result.inventory.length,
+        total: previous.counts.supported,
+        message: completeness.status === "complete" ? `Indexed all ${result.inventory.length} supported files.` : `Indexed ${result.inventory.length} files with visible omissions.`,
+        updatedAt: new Date().toISOString()
+      },
+      telemetry: {
+        ...previous.telemetry,
+        persistMs: performance.now() - persistStartedAt,
+        peakRssBytes: Math.max(previous.telemetry.peakRssBytes, process.memoryUsage().rss)
+      }
+    });
+    return refresh;
+  }
+
+  private markIndexFailed(projectId: string, error: unknown): void {
+    const previous = this.indexStates.get(projectId) ?? unavailableIndexState(projectId);
+    const cancelled = error instanceof CodeGraphScanCancelledError || (error instanceof Error && error.name === "AbortError");
+    this.indexStates.set(projectId, {
+      ...previous,
+      generatedAt: new Date().toISOString(),
+      completeness: {
+        status: "failed",
+        lastCompleteRevision: previous.completeness.status === "complete" ? previous.indexRevision : null,
+        errorCode: cancelled ? "index_cancelled" : "index_failed"
+      },
+      progress: {
+        ...previous.progress,
+        phase: cancelled ? "cancelled" : "failed",
+        message: cancelled ? "Indexing was cancelled." : "Indexing failed; the previous graph remains available.",
+        updatedAt: new Date().toISOString()
+      }
+    });
   }
 
   private async readSourceFile(projectId: string, relativePath: string): Promise<string> {
@@ -603,21 +1963,49 @@ export class WorkspaceRuntime {
     if (!fs.existsSync(project.rootPath)) {
       return [];
     }
-    let relativePaths: string[];
-    try {
-      const { stdout } = await execFileAsync("git", ["-C", project.rootPath, "ls-files", "-co", "--exclude-standard"], {
-        timeout: 20000,
-        maxBuffer: 1024 * 1024 * 4
-      });
-      relativePaths = stdout
-        .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line && isScannablePath(line))
-        .slice(0, 2000);
-    } catch {
-      relativePaths = await this.walkScannableFiles(project.rootPath, project.rootPath);
-    }
+    const controller = this.indexControllers.get(projectId);
+    const discoveredPaths = discoverRepositoryFiles(project.rootPath, {
+      signal: controller?.signal,
+      onProgress: (progress) => {
+        const previous = this.indexStates.get(projectId) ?? indexingState(projectId, progress.phase, progress.message);
+        this.indexStates.set(projectId, {
+          ...previous,
+          generatedAt: new Date().toISOString(),
+          progress: { ...progress, updatedAt: new Date().toISOString() }
+        });
+      }
+    });
+    const relativePaths = discoveredPaths.filter(isScannablePath);
     const uniquePaths = [...new Set(relativePaths.map((relativePath) => normalizeGitPath(relativePath)))].sort();
+    this.indexStates.set(projectId, {
+      projectId,
+      providerId: "current-scanner",
+      indexRevision: this.indexStates.get(projectId)?.indexRevision ?? null,
+      workspaceRevision: null,
+      generatedAt: new Date().toISOString(),
+      completeness: {
+        status: "partial",
+        indexedFiles: 0,
+        discoveredFiles: discoveredPaths.length,
+        reasons: ["Indexing is in progress; repository-wide claims are not yet supported."]
+      },
+      counts: {
+        discovered: discoveredPaths.length,
+        supported: uniquePaths.length,
+        indexed: 0,
+        unsupported: discoveredPaths.length - uniquePaths.length,
+        excluded: 0,
+        failed: 0
+      },
+      progress: {
+        phase: "parsing",
+        completed: 0,
+        total: uniquePaths.length,
+        message: `Preparing ${uniquePaths.length} supported files for scanning.`,
+        updatedAt: new Date().toISOString()
+      },
+      telemetry: emptyIndexTelemetry()
+    });
     const files = await Promise.all(uniquePaths.map((relativePath) => this.scannableFile(project.rootPath, relativePath)));
     return files.filter((file): file is ScannableFile => Boolean(file));
   }
@@ -641,29 +2029,6 @@ export class WorkspaceRuntime {
       size: stat.size,
       language: normalizeLanguage(languageForFilePath(relativePath))
     };
-  }
-
-  private async walkScannableFiles(rootPath: string, currentPath: string): Promise<string[]> {
-    const entries = await fsp.readdir(currentPath, { withFileTypes: true });
-    const files: string[] = [];
-    for (const entry of entries) {
-      if ([".git", ".graphcode", "node_modules", "dist", "build", "coverage"].includes(entry.name)) {
-        continue;
-      }
-      const absolute = path.join(currentPath, entry.name);
-      if (entry.isDirectory()) {
-        files.push(...(await this.walkScannableFiles(rootPath, absolute)));
-      } else {
-        const relative = path.relative(rootPath, absolute);
-        if (isScannablePath(relative)) {
-          files.push(relative);
-        }
-      }
-      if (files.length >= 2000) {
-        break;
-      }
-    }
-    return files;
   }
 
   private async buildFakeLocalScanOutput(projectId: string, file: ScannableFile): Promise<ScanLocalOutput> {
@@ -979,7 +2344,7 @@ function workspaceProjectId(rootPath: string): string {
 function normalizeCreationInitialization(
   initialization: OpenWorkspaceRequest["initialization"],
   creationMode: NonNullable<OpenWorkspaceRequest["creationMode"]>
-): { projectName: string; projectDescription: string; scanningInstructions: string } {
+): { projectName: string; projectDescription: string; scanningInstructions: string; skipCodexDefaultSystemPrompt: boolean } {
   if (!initialization?.projectName?.trim()) {
     throw validationError("Project name is required to create a GraphCode workspace.");
   }
@@ -990,14 +2355,16 @@ function normalizeCreationInitialization(
     return {
       projectName: initialization.projectName.trim(),
       projectDescription: initialization.projectDescription.trim(),
-      scanningInstructions: initialization.scanningInstructions.trim()
+      scanningInstructions: initialization.scanningInstructions.trim(),
+      skipCodexDefaultSystemPrompt: initialization.skipCodexDefaultSystemPrompt ?? false
     };
   }
 
   return {
     projectName: initialization.projectName.trim(),
     projectDescription: initialization.projectDescription?.trim() ?? "",
-    scanningInstructions: ""
+    scanningInstructions: "",
+    skipCodexDefaultSystemPrompt: false
   };
 }
 
@@ -1065,6 +2432,12 @@ function hashPath(value: string): string {
   return crypto.createHash("sha1").update(value).digest("hex").slice(0, 16);
 }
 
+function shellQuote(value: string): string {
+  return process.platform === "win32"
+    ? `"${value.replace(/"/g, '""')}"`
+    : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 function samePath(first: string, second: string): boolean {
   return realPathOrResolve(first) === realPathOrResolve(second);
 }
@@ -1108,12 +2481,24 @@ function isCliProvider(provider: AgentProvider): provider is "codex" | "claudeco
   return provider === "codex" || provider === "claudecode";
 }
 
+function renderProviderForAgent(provider: string): RenderedWorkUnitContext["provider"] {
+  if (provider === "gemini") return "google";
+  if (provider === "claudecode") return "anthropic";
+  if (provider === "openai" || provider === "openrouter" || provider === "codex") return "openai";
+  return "generic";
+}
+
 function defaultCliCommand(provider: "codex" | "claudecode"): string {
   return provider === "codex" ? "codex" : "claude";
 }
 
 function cliProviderLabel(provider: "codex" | "claudecode"): string {
   return provider === "codex" ? "Codex CLI" : "Claude Code";
+}
+
+function reviewVerdict(response: string): "reviewed" | "bugged" | null {
+  const match = response.trim().match(/GRAPHCODE_REVIEW_VERDICT:\s*(reviewed|bugged)\s*$/i);
+  return match ? (match[1].toLowerCase() as "reviewed" | "bugged") : null;
 }
 
 async function validateCliProvider(provider: "codex" | "claudecode", command: string): Promise<string | null> {
@@ -1138,6 +2523,264 @@ function cliExecOptions(timeout: number): ExecFileOptions {
     shell: process.platform === "win32",
     windowsHide: true
   };
+}
+
+async function resolveCliPath(command: string): Promise<string | null> {
+  const lookupCommand = process.platform === "win32" ? "where" : "which";
+  try {
+    const { stdout } = await execFileAsync(lookupCommand, [command], cliExecOptions(3000));
+    return outputText(stdout)
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find(Boolean) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function cliErrorMessage(error: unknown, fallback: string): string {
+  const details = error as { stdout?: unknown; stderr?: unknown; message?: string };
+  return (outputText(details.stderr).trim() || outputText(details.stdout).trim() || details.message?.trim() || fallback).split(/\r?\n/)[0] ?? fallback;
+}
+
+function outputText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (Buffer.isBuffer(value)) {
+    return value.toString("utf8");
+  }
+  return "";
+}
+
+async function pickWindowsFolder(): Promise<FolderPickerResult> {
+  const script = [
+    "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
+    "$dialog.Description = 'Choose a GraphCode workspace folder'",
+    "$dialog.ShowNewFolderButton = $false",
+    "$result = $dialog.ShowDialog()",
+    "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath; exit 0 }",
+    "exit 2"
+  ].join("\n");
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", ["-NoProfile", "-STA", "-ExecutionPolicy", "Bypass", "-Command", script], {
+      timeout: 10 * 60 * 1000,
+      windowsHide: false,
+      maxBuffer: 1024 * 32
+    });
+    const selectedPath = firstOutputLine(stdout);
+    return {
+      supported: true,
+      selected: Boolean(selectedPath),
+      path: selectedPath,
+      message: selectedPath ? null : "No folder was selected."
+    };
+  } catch (error) {
+    if (exitCode(error) === 2) {
+      return {
+        supported: true,
+        selected: false,
+        path: null,
+        message: "Folder selection was canceled."
+      };
+    }
+    return {
+      supported: false,
+      selected: false,
+      path: null,
+      message: cliErrorMessage(error, "Windows folder picker failed. Paste the workspace path manually.")
+    };
+  }
+}
+
+function unavailableIndexState(projectId: string): IndexState {
+  const now = new Date().toISOString();
+  return {
+    projectId,
+    providerId: "current-parser",
+    indexRevision: null,
+    workspaceRevision: null,
+    generatedAt: now,
+    completeness: { status: "failed", lastCompleteRevision: null, errorCode: "index_state_unavailable" },
+    counts: { discovered: 0, supported: 0, indexed: 0, unsupported: 0, excluded: 0, failed: 0 },
+    progress: { phase: "idle", completed: 0, total: 0, message: "Index state is unavailable until the next scan.", updatedAt: now },
+    telemetry: emptyIndexTelemetry()
+  };
+}
+
+function indexingState(projectId: string, phase: IndexState["progress"]["phase"], message: string): IndexState {
+  const now = new Date().toISOString();
+  return {
+    projectId,
+    providerId: "current-parser",
+    indexRevision: null,
+    workspaceRevision: null,
+    generatedAt: now,
+    completeness: {
+      status: "partial",
+      indexedFiles: 0,
+      discoveredFiles: 0,
+      reasons: ["Indexing is in progress; repository-wide claims are not yet supported."]
+    },
+    counts: { discovered: 0, supported: 0, indexed: 0, unsupported: 0, excluded: 0, failed: 0 },
+    progress: { phase, completed: 0, total: 0, message, updatedAt: now },
+    telemetry: emptyIndexTelemetry()
+  };
+}
+
+function emptyIndexTelemetry(): IndexState["telemetry"] {
+  return { discoveryMs: 0, parseMs: 0, linkMs: 0, persistMs: 0, peakRssBytes: process.memoryUsage().rss };
+}
+
+function indexRevisionForSnapshot(files: string[], symbols: string[]): string {
+  return `current-${crypto.createHash("sha1").update([...files].sort().join("\n")).update("\0").update([...symbols].sort().join("\n")).digest("hex")}`;
+}
+
+async function pickMacFolder(): Promise<FolderPickerResult> {
+  try {
+    const { stdout } = await execFileAsync("osascript", ["-e", 'POSIX path of (choose folder with prompt "Choose a GraphCode workspace folder")'], {
+      timeout: 10 * 60 * 1000,
+      windowsHide: false,
+      maxBuffer: 1024 * 32
+    });
+    const selectedPath = firstOutputLine(stdout);
+    return {
+      supported: true,
+      selected: Boolean(selectedPath),
+      path: selectedPath,
+      message: selectedPath ? null : "No folder was selected."
+    };
+  } catch (error) {
+    if (exitCode(error) === 1) {
+      return {
+        supported: true,
+        selected: false,
+        path: null,
+        message: "Folder selection was canceled."
+      };
+    }
+    return {
+      supported: false,
+      selected: false,
+      path: null,
+      message: cliErrorMessage(error, "macOS folder picker failed. Paste the workspace path manually.")
+    };
+  }
+}
+
+function firstOutputLine(value: unknown): string | null {
+  return outputText(value)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? null;
+}
+
+function exitCode(error: unknown): number | null {
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "number" ? code : null;
+}
+
+export function detectFolderPickerEnvironment(
+  platform: NodeJS.Platform,
+  env: NodeJS.ProcessEnv,
+  processVersion: string
+): "windows" | "wsl" | "macos" | "unsupported" {
+  if (platform === "win32") return "windows";
+  if (platform === "darwin") return "macos";
+  if (platform === "linux" && (env.WSL_DISTRO_NAME || env.WSL_INTEROP || processVersion.toLowerCase().includes("microsoft"))) return "wsl";
+  return "unsupported";
+}
+
+function readProcessVersion(): string {
+  try {
+    return fs.readFileSync("/proc/version", "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function parseCodexModels(raw: string): CodexModelInfo[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return [];
+  }
+  const root = asRecord(parsed);
+  const rawModels = Array.isArray(parsed) ? parsed : Array.isArray(root?.models) ? root.models : [];
+  return rawModels
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .filter((item) => typeof item.slug === "string" && item.slug.trim().length > 0)
+    .filter((item) => typeof item.visibility !== "string" || item.visibility === "list")
+    .map((item) => {
+      const supportedReasoningLevels = parseCodexReasoningLevels(item.supported_reasoning_levels);
+      const defaultReasoningLevel = isCodexReasoningEffort(item.default_reasoning_level)
+        ? item.default_reasoning_level
+        : supportedReasoningLevels[0]?.effort ?? "medium";
+      const speedTiers = new Set<CodexModelInfo["speedTiers"][number]>(["standard"]);
+      const additionalSpeedTiers = Array.isArray(item.additional_speed_tiers) ? item.additional_speed_tiers : [];
+      const serviceTiers = Array.isArray(item.service_tiers) ? item.service_tiers : [];
+      if (
+        additionalSpeedTiers.some((tier) => tier === "fast") ||
+        serviceTiers.some((tier) => {
+          const record = asRecord(tier);
+          return record?.id === "fast" || record?.name === "Fast" || record?.id === "priority";
+        })
+      ) {
+        speedTiers.add("fast");
+      }
+      return {
+        slug: String(item.slug),
+        displayName: typeof item.display_name === "string" && item.display_name.trim() ? item.display_name : String(item.slug),
+        description: typeof item.description === "string" ? item.description : "",
+        defaultReasoningLevel,
+        supportedReasoningLevels,
+        speedTiers: [...speedTiers]
+      };
+    });
+}
+
+function parseCodexReasoningLevels(value: unknown): CodexModelInfo["supportedReasoningLevels"] {
+  if (!Array.isArray(value)) {
+    return [{ effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" }];
+  }
+  const levels = value
+    .map((item) => asRecord(item))
+    .filter((item): item is Record<string, unknown> => Boolean(item))
+    .filter((item): item is { effort: CodexReasoningEffort; description?: unknown } => isCodexReasoningEffort(item.effort))
+    .map((item) => ({
+      effort: item.effort,
+      description: typeof item.description === "string" ? item.description : ""
+    }));
+  return levels.length > 0 ? levels : [{ effort: "medium", description: "Balances speed and reasoning depth for everyday tasks" }];
+}
+
+function isCodexReasoningEffort(value: unknown): value is CodexReasoningEffort {
+  return typeof value === "string" && (CODEX_REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
+function claudeReasoningLevels(): ClaudeModelInfo["supportedReasoningLevels"] {
+  const descriptions: Record<(typeof CLAUDE_REASONING_EFFORTS)[number], string> = {
+    low: "Minimizes reasoning latency for straightforward tasks.",
+    medium: "Balances reasoning depth and speed for everyday coding tasks.",
+    high: "Applies deeper reasoning for harder implementation and review work.",
+    xhigh: "Uses extra reasoning depth for complex multi-step tasks.",
+    max: "Uses Claude Code's maximum session reasoning effort when available."
+  };
+  return CLAUDE_REASONING_EFFORTS.map((effort) => ({
+    effort,
+    description: descriptions[effort]
+  }));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
 }
 
 function isScannablePath(value: string): boolean {
@@ -1173,6 +2816,15 @@ function normalizeLanguage(value: string): LanguageType {
     "other"
   ]);
   return languages.has(value) ? (value as LanguageType) : "other";
+}
+
+function workUnitCoverageNotice(state: IndexState): string {
+  const counts = state.counts;
+  const countSummary = `discovered=${counts.discovered}, supported=${counts.supported}, indexed=${counts.indexed}, unsupported=${counts.unsupported}, excluded=${counts.excluded}, failed=${counts.failed}`;
+  if (state.completeness.status === "complete") return `Index coverage: COMPLETE (${countSummary}).`;
+  if (state.completeness.status === "partial") return `Index coverage warning: PARTIAL (${countSummary}). ${state.completeness.reasons.join(" ")}`;
+  if (state.completeness.status === "stale") return `Index coverage warning: STALE since ${state.completeness.sinceRevision}.`;
+  return `Index coverage warning: FAILED (${state.completeness.errorCode}).`;
 }
 
 function parseGitStatusByPath(status: string): Map<string, GitStatusInfo> {

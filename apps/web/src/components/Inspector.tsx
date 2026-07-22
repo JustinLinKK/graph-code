@@ -40,7 +40,7 @@ type InspectorProps = {
   onUpdateEdgeTags: (edgeId: string, input: TagAssignment) => void;
   onUpdateBoundaryTags: (boundaryId: string, input: TagAssignment) => void;
   agentBusy: boolean;
-  onStartCode: (nodeId: string, mode: CodingAgentMode) => void;
+  onStartCode: (nodeId: string, mode: CodingAgentMode, prompt?: string) => void;
 };
 
 export function Inspector({
@@ -65,12 +65,15 @@ export function Inspector({
 }: InspectorProps) {
   const [codingMode, setCodingMode] = useState<CodingAgentMode>("medium");
   const [codingModeTouched, setCodingModeTouched] = useState(false);
+  const [codingTask, setCodingTask] = useState("");
   const recommendedCodingMode = useMemo(() => recommendInspectorCodingMode(detail, canvasNodes), [canvasNodes, detail]);
   const selectedCodingMode = codingModeTouched ? codingMode : recommendedCodingMode;
+  const layeredCodingScope = isLayeredCodingScope(detail);
 
   useEffect(() => {
     setCodingMode(recommendedCodingMode);
     setCodingModeTouched(false);
+    setCodingTask("");
   }, [recommendedCodingMode, detail?.node.id]);
 
   if (selectedEdge) {
@@ -319,8 +322,21 @@ export function Inspector({
           Code Context
         </h3>
         {node.code.context ? <p className="context-box">{node.code.context}</p> : <p className="muted">No code context yet.</p>}
+        {!layeredCodingScope ? (
+          <label className="coding-task-field">
+            <span>Coding task</span>
+            <textarea
+              rows={3}
+              value={codingTask}
+              placeholder="Describe the change you want the coding agent to propose"
+              onChange={(event) => setCodingTask(event.target.value)}
+            />
+          </label>
+        ) : (
+          <p className="coding-workflow-hint">This scope contains multiple blocks. Preview a layered workflow before any coding agents run.</p>
+        )}
         <div className="inspector-action-row">
-          <span className="mode-control-label">Model selection</span>
+          <span className="mode-control-label">Coding scope</span>
           <div className="mode-segmented-control" aria-label="Coding mode">
             {CODING_AGENT_MODES.map((mode) => (
               <button
@@ -337,9 +353,15 @@ export function Inspector({
               </button>
             ))}
           </div>
-          <Button size="sm" variant="primary" isDisabled={agentBusy} onPress={() => onStartCode(node.id, selectedCodingMode)}>
+          <span className="coding-mode-recommendation">Recommended: {codingAgentModeLabel(recommendedCodingMode)}</span>
+          <Button
+            size="sm"
+            variant="primary"
+            isDisabled={agentBusy || (!layeredCodingScope && !codingTask.trim())}
+            onPress={() => onStartCode(node.id, selectedCodingMode, layeredCodingScope ? undefined : codingTask.trim())}
+          >
             <Play size={15} />
-            Start code
+            {layeredCodingScope ? "Preview workflow" : "Start coding"}
           </Button>
         </div>
       </section>
@@ -518,6 +540,16 @@ function recommendInspectorCodingMode(detail: NodeDetail | null, canvasNodes: Gr
     }
   }
   return "medium";
+}
+
+function isLayeredCodingScope(detail: NodeDetail | null): boolean {
+  if (!detail) {
+    return false;
+  }
+  if (detail.node.kind === "function" || detail.node.kind === "object") {
+    return detail.childCount > 0;
+  }
+  return ["framework", "module", "website", "ui_component"].includes(detail.node.kind);
 }
 
 function StatusSection({ agentStatus, gitStatus }: { agentStatus: AgentStatus; gitStatus: GitStatusInfo | null }) {

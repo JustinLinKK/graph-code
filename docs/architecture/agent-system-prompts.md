@@ -6,7 +6,9 @@ These are the default GraphCode system prompts stored in workspace settings when
 
 GraphCode treats these prompts as the portable skill layer for every provider. Hosted providers receive the prompt as the chat system message. Account-based CLI providers receive the same mode-specific instructions inside the CLI invocation so users can run agents through a logged-in Codex CLI or Claude Code account without storing API keys in GraphCode.
 
-The CLI providers are intentionally proposal-only. Codex runs with a read-only sandbox, and Claude Code runs in plan mode with editing tools disallowed. The provider must return a graph plan, unified diff, review verdict, or scan JSON back to GraphCode; GraphCode stores and reviews that result before anything is applied. GraphCode does not write `.codex`, `.agents`, or `.claude` skill files into opened workspaces for v1.
+The CLI providers are intentionally proposal-only. Codex runs with a read-only sandbox, and Claude Code runs in plan mode with editing tools disallowed. The provider must return a graph plan, unified diff, review verdict, or scan JSON back to GraphCode; GraphCode stores and reviews that result before anything is applied. Codex is allowed to inspect an opened folder even when it is not a Git repository, which keeps temporary examples and new projects usable without weakening the read-only sandbox. GraphCode does not write `.codex`, `.agents`, or `.claude` skill files into opened workspaces for v1.
+
+A successful coding proposal is still inert. GraphCode enables **Implement proposal** only after the matching review run succeeds with the exact `GRAPHCODE_REVIEW_VERDICT: reviewed` verdict. Implementation normalizes non-semantic patch transport details such as terminal newlines and hunk counts, validates the stored changes in an isolated temporary workspace, checks the workspace revision again under the apply lock, applies those same reviewed changes, records the implementation timestamp, and refreshes the code graph. A `bugged` verdict keeps implementation blocked.
 
 ## Scanning Local
 

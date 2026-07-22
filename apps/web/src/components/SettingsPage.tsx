@@ -5,8 +5,12 @@ import {
     type AgentConfig,
     type AgentKind,
     type AgentProvider,
+    type ClaudeCliStatus,
+    type ClaudeModelInfo,
     type CodingAgentConfig,
     type CodingAgentMode,
+  type CodexCliStatus,
+  type CodexModelInfo,
   type GithubDevicePollResponse,
   type GithubDeviceStartResponse,
     type Project,
@@ -19,8 +23,9 @@ import {
   type WorkspaceSettingsMutation
   } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
-import { Bot, CheckCircle2, Boxes, ExternalLink, Github, Monitor, Save, Unplug, X } from "lucide-react";
+import { Bot, CheckCircle2, Boxes, ExternalLink, Github, Monitor, RefreshCw, Save, Terminal, Unplug, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { getClaudeModels, getClaudeStatus, getCodexModels, getCodexStatus, installClaudeCli, installCodexCli, startClaudeAuth, startCodexAuth } from "../api";
 import { agentKindLabel, codingAgentModeLabel, providerLabel, reviewAgentModeLabel, scanningAgentModeLabel } from "../displayLabels";
 
 type SettingsPageProps = {
@@ -38,6 +43,25 @@ type SettingsPageProps = {
 const agentKinds: AgentKind[] = ["planning"];
 const providers: AgentProvider[] = ["fake", "codex", "claudecode", "openai", "openrouter", "gemini", "deepseek"];
 
+type AgentSecretDraft = { type: AgentConfig["apiKeySource"]["type"]; value: string };
+type AgentPromptDraft = { type: AgentConfig["systemPromptSource"]["type"]; value: string };
+type AgentSettingsLike = Pick<
+  AgentConfig,
+  | "provider"
+  | "model"
+  | "cliCommand"
+  | "reasoningEffort"
+  | "speedTier"
+  | "permissionMode"
+  | "codexSystemPromptMode"
+  | "claudeSystemPromptMode"
+  | "parallelLimit"
+> & {
+  apiKeySource: AgentSecretDraft;
+  systemPromptSource: AgentPromptDraft;
+};
+type AgentSettingsPatch = Partial<AgentSettingsLike>;
+
 export function SettingsPage({
   project,
   settings,
@@ -49,12 +73,20 @@ export function SettingsPage({
   onPollGithubDeviceFlow,
   onDisconnectGithub
 }: SettingsPageProps) {
-  const [activeSection, setActiveSection] = useState<"general" | "agents" | "extensions" | "github">("general");
-  const [draft, setDraft] = useState<WorkspaceSettingsMutation>(() => toMutation(settings));
+  const [activeSection, setActiveSection] = useState<"general" | "agents" | "extensions" | "integrations" | "github">("general");
+  const [draft, setDraft] = useState(() => toMutation(settings));
   const [readSuccessByField, setReadSuccessByField] = useState<Record<string, string>>({});
   const [deviceFlow, setDeviceFlow] = useState<GithubDeviceStartResponse | null>(null);
   const [githubBusy, setGithubBusy] = useState(false);
   const [githubMessage, setGithubMessage] = useState("");
+  const [codexStatus, setCodexStatus] = useState<CodexCliStatus | null>(null);
+  const [codexModels, setCodexModels] = useState<CodexModelInfo[]>([]);
+  const [codexBusy, setCodexBusy] = useState(false);
+  const [codexMessage, setCodexMessage] = useState("");
+  const [claudeStatus, setClaudeStatus] = useState<ClaudeCliStatus | null>(null);
+  const [claudeModels, setClaudeModels] = useState<ClaudeModelInfo[]>([]);
+  const [claudeBusy, setClaudeBusy] = useState(false);
+  const [claudeMessage, setClaudeMessage] = useState("");
   const errors = validation?.fieldErrors ?? {};
     const agentByKind = useMemo(() => new Map(draft.agents.map((agent) => [agent.agentKind, agent])), [draft.agents]);
     const codingAgentDrafts = useMemo(() => draft.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent), [draft.codingAgents]);
@@ -63,33 +95,112 @@ export function SettingsPage({
     const reviewAgentByMode = useMemo(() => new Map(reviewAgentDrafts.map((agent) => [agent.mode, agent])), [reviewAgentDrafts]);
     const scanningAgentDrafts = useMemo(() => draft.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent), [draft.scanningAgents]);
   const scanningAgentByMode = useMemo(() => new Map(scanningAgentDrafts.map((agent) => [agent.mode, agent])), [scanningAgentDrafts]);
+  const codexModelsBySlug = useMemo(() => new Map(codexModels.map((model) => [model.slug, model])), [codexModels]);
+  const claudeModelsBySlug = useMemo(() => new Map(claudeModels.map((model) => [model.slug, model])), [claudeModels]);
+
+  const refreshCodex = async () => {
+    setCodexBusy(true);
+    setCodexMessage("");
+    try {
+      const status = await getCodexStatus();
+      setCodexStatus(status);
+      if (status.installed && status.authenticated) {
+        const models = await getCodexModels();
+        setCodexModels(models);
+        setCodexMessage(models.length > 0 ? `Loaded ${models.length} Codex models.` : "Codex CLI returned no visible models.");
+      } else {
+        setCodexModels([]);
+        setCodexMessage(status.error ?? "Codex CLI is not ready yet.");
+      }
+    } catch (error) {
+      setCodexModels([]);
+      setCodexMessage(error instanceof Error ? error.message : "Failed to inspect Codex CLI.");
+    } finally {
+      setCodexBusy(false);
+    }
+  };
+
+  const refreshClaude = async () => {
+    setClaudeBusy(true);
+    setClaudeMessage("");
+    try {
+      const status = await getClaudeStatus();
+      setClaudeStatus(status);
+      if (status.installed && status.authenticated) {
+        const models = await getClaudeModels();
+        setClaudeModels(models);
+        setClaudeMessage(models.length > 0 ? `Loaded ${models.length} Claude model aliases.` : "Claude Code returned no model aliases.");
+      } else {
+        setClaudeModels([]);
+        setClaudeMessage(status.error ?? "Claude Code is not ready yet.");
+      }
+    } catch (error) {
+      setClaudeModels([]);
+      setClaudeMessage(error instanceof Error ? error.message : "Failed to inspect Claude Code.");
+    } finally {
+      setClaudeBusy(false);
+    }
+  };
 
   useEffect(() => {
     setDraft(toMutation(settings));
   }, [project.id]);
 
-  const updateAgent = (agentKind: AgentKind, patch: Partial<AgentConfig>) => {
+  useEffect(() => {
+    void refreshCodex();
+    void refreshClaude();
+  }, []);
+
+  useEffect(() => {
+    const firstModel = codexModels[0];
+    if (!firstModel) {
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      agents: current.agents.map((agent) => applyInitialCodexModel(agent, firstModel)),
+      codingAgents: (current.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent)).map((agent) => applyInitialCodexModel(agent, firstModel)),
+      reviewAgents: (current.reviewAgents ?? REVIEW_AGENT_MODES.map(defaultReviewAgent)).map((agent) => applyInitialCodexModel(agent, firstModel)),
+      scanningAgents: (current.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent)).map((agent) => applyInitialCodexModel(agent, firstModel))
+    }));
+  }, [codexModels]);
+
+  useEffect(() => {
+    const firstModel = claudeModels[0];
+    if (!firstModel) {
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      agents: current.agents.map((agent) => applyInitialClaudeModel(agent, firstModel)),
+      codingAgents: (current.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent)).map((agent) => applyInitialClaudeModel(agent, firstModel)),
+      reviewAgents: (current.reviewAgents ?? REVIEW_AGENT_MODES.map(defaultReviewAgent)).map((agent) => applyInitialClaudeModel(agent, firstModel)),
+      scanningAgents: (current.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent)).map((agent) => applyInitialClaudeModel(agent, firstModel))
+    }));
+  }, [claudeModels]);
+
+  const updateAgent = (agentKind: AgentKind, patch: AgentSettingsPatch) => {
     setDraft((current) => ({
       ...current,
       agents: current.agents.map((agent) => (agent.agentKind === agentKind ? { ...agent, ...patch } : agent))
     }));
   };
 
-    const updateCodingAgent = (mode: CodingAgentMode, patch: Partial<CodingAgentConfig>) => {
+    const updateCodingAgent = (mode: CodingAgentMode, patch: AgentSettingsPatch) => {
     setDraft((current) => ({
       ...current,
       codingAgents: (current.codingAgents ?? CODING_AGENT_MODES.map(defaultCodingAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
     }));
     };
 
-    const updateReviewAgent = (mode: ReviewAgentMode, patch: Partial<ReviewAgentConfig>) => {
+    const updateReviewAgent = (mode: ReviewAgentMode, patch: AgentSettingsPatch) => {
       setDraft((current) => ({
         ...current,
         reviewAgents: (current.reviewAgents ?? REVIEW_AGENT_MODES.map(defaultReviewAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
       }));
     };
 
-	  const updateScanningAgent = (mode: ScanningAgentMode, patch: Partial<ScanningAgentConfig>) => {
+	  const updateScanningAgent = (mode: ScanningAgentMode, patch: AgentSettingsPatch) => {
     setDraft((current) => ({
       ...current,
       scanningAgents: (current.scanningAgents ?? SCANNING_AGENT_MODES.map(defaultScanningAgent)).map((agent) => (agent.mode === mode ? { ...agent, ...patch } : agent))
@@ -336,12 +447,277 @@ export function SettingsPage({
     }
   };
 
+  const handleInstallCodex = async () => {
+    setCodexBusy(true);
+    setCodexMessage("");
+    try {
+      const result = await installCodexCli();
+      setCodexStatus(result.status ?? null);
+      setCodexMessage(result.message);
+      await refreshCodex();
+    } catch (error) {
+      setCodexMessage(error instanceof Error ? error.message : "Codex install failed.");
+    } finally {
+      setCodexBusy(false);
+    }
+  };
+
+  const handleStartCodexAuth = async () => {
+    setCodexBusy(true);
+    setCodexMessage("");
+    try {
+      const result = await startCodexAuth();
+      setCodexStatus(result.status ?? null);
+      setCodexMessage(result.message);
+    } catch (error) {
+      setCodexMessage(error instanceof Error ? error.message : "Codex auth failed.");
+    } finally {
+      setCodexBusy(false);
+    }
+  };
+
+  const handleInstallClaude = async () => {
+    setClaudeBusy(true);
+    setClaudeMessage("");
+    try {
+      const result = await installClaudeCli();
+      setClaudeStatus(result.status ?? null);
+      setClaudeMessage(result.message);
+      await refreshClaude();
+    } catch (error) {
+      setClaudeMessage(error instanceof Error ? error.message : "Claude Code install failed.");
+    } finally {
+      setClaudeBusy(false);
+    }
+  };
+
+  const handleStartClaudeAuth = async () => {
+    setClaudeBusy(true);
+    setClaudeMessage("");
+    try {
+      const result = await startClaudeAuth();
+      setClaudeStatus(result.status ?? null);
+      setClaudeMessage(result.message);
+    } catch (error) {
+      setClaudeMessage(error instanceof Error ? error.message : "Claude Code auth failed.");
+    } finally {
+      setClaudeBusy(false);
+    }
+  };
+
+  const renderModelControl = (agent: AgentSettingsLike, errorKey: string, onPatch: (patch: AgentSettingsPatch) => void) => {
+    if (agent.provider === "codex") {
+      const selectedModel = codexModelsBySlug.get(agent.model);
+      return (
+        <label className="form-field">
+          <span title="Loaded from the authenticated Codex CLI model catalog.">Codex Model</span>
+          <select
+            value={agent.model}
+            disabled={codexModels.length === 0}
+            onChange={(event) => onPatch(codexModelPatch(event.target.value, codexModelsBySlug.get(event.target.value), agent))}
+          >
+            <option value="">{codexModels.length > 0 ? "Select a Codex model" : "No Codex models loaded"}</option>
+            {codexModels.map((model) => (
+              <option key={model.slug} value={model.slug} title={model.description}>
+                {model.displayName}
+              </option>
+            ))}
+          </select>
+          {selectedModel?.description ? <small className="muted">{selectedModel.description}</small> : null}
+          <FieldError value={errors[`${errorKey}.model`]} />
+        </label>
+      );
+    }
+    if (agent.provider === "claudecode") {
+      const selectedModel = claudeModelsBySlug.get(agent.model);
+      return (
+        <label className="form-field">
+          <span title="Loaded from Claude Code's documented CLI model aliases after CLI/auth status is verified.">Claude Model</span>
+          <select
+            value={agent.model}
+            disabled={claudeModels.length === 0}
+            onChange={(event) => onPatch(claudeModelPatch(event.target.value, claudeModelsBySlug.get(event.target.value), agent))}
+          >
+            <option value="">{claudeModels.length > 0 ? "Select a Claude model" : "No Claude models loaded"}</option>
+            {claudeModels.map((model) => (
+              <option key={model.slug} value={model.slug} title={model.description}>
+                {model.displayName}
+              </option>
+            ))}
+          </select>
+          {selectedModel?.description ? <small className="muted">{selectedModel.description}</small> : null}
+          <FieldError value={errors[`${errorKey}.model`]} />
+        </label>
+      );
+    }
+    return (
+      <label className="form-field">
+        <span>{modelFieldLabel(agent.provider)}</span>
+        <input value={agent.model} onChange={(event) => onPatch({ model: event.target.value })} />
+        <FieldError value={errors[`${errorKey}.model`]} />
+      </label>
+    );
+  };
+
+  const renderCodexControls = (agent: AgentSettingsLike, errorKey: string, onPatch: (patch: AgentSettingsPatch) => void) => {
+    if (agent.provider !== "codex") {
+      return null;
+    }
+    const selectedModel = codexModelsBySlug.get(agent.model);
+    const reasoningLevels = selectedModel?.supportedReasoningLevels.length
+      ? selectedModel.supportedReasoningLevels
+      : [{ effort: "medium" as const, description: "Balances speed and reasoning depth for everyday tasks" }];
+    const reasoningValue = reasoningLevels.some((level) => level.effort === agent.reasoningEffort) ? agent.reasoningEffort : reasoningLevels[0].effort;
+    const fastAvailable = selectedModel?.speedTiers.includes("fast") ?? false;
+    const speedTiers = fastAvailable ? ["standard", "fast"] as const : ["standard"] as const;
+    const speedValue = fastAvailable && agent.speedTier === "fast" ? "fast" : "standard";
+    return (
+      <div className="codex-agent-controls">
+        <div className="form-grid">
+          <label className="form-field">
+            <span title="Executable command GraphCode uses to launch Codex CLI for this agent.">CLI Command</span>
+            <input value={agent.cliCommand || "codex"} onChange={(event) => onPatch({ cliCommand: event.target.value })} />
+            <FieldError value={errors[`${errorKey}.cliCommand`]} />
+          </label>
+          <label className="form-field">
+            <span title="Reasoning effort controls how much deliberation Codex applies before answering.">Reasoning Effort</span>
+            <select value={reasoningValue} onChange={(event) => onPatch({ reasoningEffort: event.target.value as AgentSettingsLike["reasoningEffort"] })}>
+              {reasoningLevels.map((level) => (
+                <option key={level.effort} value={level.effort} title={level.description}>
+                  {reasoningEffortLabel(level.effort)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="form-field">
+            <span title="Fast mode prioritizes quicker Codex responses and may increase usage.">Speed</span>
+            <select value={speedValue} onChange={(event) => onPatch({ speedTier: event.target.value as AgentSettingsLike["speedTier"] })}>
+              <option value="standard">Standard</option>
+              {fastAvailable ? (
+                <option value="fast" title="Higher speed with increased usage.">
+                  Fast
+                </option>
+              ) : null}
+            </select>
+          </label>
+        </div>
+        <div className="form-grid">
+          <label className="form-field">
+            <span title="Controls whether Codex proposes changes or can edit the workspace directly.">Permission Mode</span>
+            <select value={agent.permissionMode} onChange={(event) => onPatch({ permissionMode: event.target.value as AgentSettingsLike["permissionMode"] })}>
+              <option value="ask_for_permission">Ask for permission</option>
+              <option value="approve_for_me">Approve for me</option>
+              <option value="full_access">Full access</option>
+            </select>
+          </label>
+          <label className="form-field">
+            <span title="Use Codex's built-in system prompt or pass your custom prompt as Codex developer instructions.">System Prompt</span>
+            <select
+              value={agent.codexSystemPromptMode}
+              onChange={(event) => onPatch({ codexSystemPromptMode: event.target.value as AgentSettingsLike["codexSystemPromptMode"] })}
+            >
+              <option value="default">Default Codex system prompt</option>
+              <option value="custom">Custom prompt</option>
+            </select>
+          </label>
+        </div>
+        {agent.codexSystemPromptMode === "custom" ? (
+          <label className="form-field">
+            <span>Custom Prompt</span>
+            <textarea
+              rows={3}
+              value={agent.systemPromptSource.value ?? ""}
+              onChange={(event) => onPatch({ systemPromptSource: { type: "manual", value: event.target.value } })}
+            />
+            <FieldError value={errors[`${errorKey}.systemPromptSource.value`]} />
+          </label>
+        ) : null}
+      </div>
+    );
+  };
+
+  const renderClaudeControls = (agent: AgentSettingsLike, errorKey: string, onPatch: (patch: AgentSettingsPatch) => void) => {
+    if (agent.provider !== "claudecode") {
+      return null;
+    }
+    const selectedModel = claudeModelsBySlug.get(agent.model);
+    const reasoningLevels = selectedModel?.supportedReasoningLevels.length
+      ? selectedModel.supportedReasoningLevels
+      : [{ effort: "medium" as const, description: "Balances speed and reasoning depth for everyday tasks" }];
+    const reasoningValue = reasoningLevels.some((level) => level.effort === agent.reasoningEffort) ? agent.reasoningEffort : reasoningLevels[0].effort;
+    const fastAvailable = selectedModel?.speedTiers.includes("fast") ?? false;
+    const speedTiers = fastAvailable ? ["standard", "fast"] as const : ["standard"] as const;
+    const speedValue = fastAvailable && agent.speedTier === "fast" ? "fast" : "standard";
+    return (
+      <div className="codex-agent-controls">
+        <div className="form-grid">
+          <label className="form-field">
+            <span title="Executable command GraphCode uses to launch Claude Code for this agent.">CLI Command</span>
+            <input value={agent.cliCommand || "claude"} onChange={(event) => onPatch({ cliCommand: event.target.value })} />
+            <FieldError value={errors[`${errorKey}.cliCommand`]} />
+          </label>
+          <label className="form-field">
+            <span title="Claude Code reasoning effort controls how much deliberation is used for this session.">Reasoning Effort</span>
+            <select value={reasoningValue} onChange={(event) => onPatch({ reasoningEffort: event.target.value as AgentSettingsLike["reasoningEffort"] })}>
+              {reasoningLevels.map((level) => (
+                <option key={level.effort} value={level.effort} title={level.description}>
+                  {reasoningEffortLabel(level.effort)}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="form-field">
+            <span title="Claude fast mode is available for supported Opus sessions and may increase usage.">Speed</span>
+            <select value={speedValue} onChange={(event) => onPatch({ speedTier: event.target.value as AgentSettingsLike["speedTier"] })}>
+              {speedTiers.map((tier) => (
+                <option key={tier} value={tier} title={tier === "fast" ? "Higher speed with increased usage." : "Standard Claude Code response speed."}>
+                  {tier === "fast" ? "Fast" : "Standard"}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+        <div className="form-grid">
+          <label className="form-field">
+            <span title="Controls whether Claude Code plans only, accepts edits, or bypasses permission prompts.">Permission Mode</span>
+            <select value={agent.permissionMode} onChange={(event) => onPatch({ permissionMode: event.target.value as AgentSettingsLike["permissionMode"] })}>
+              <option value="ask_for_permission">Ask for permission</option>
+              <option value="approve_for_me">Approve for me</option>
+              <option value="full_access">Full access</option>
+            </select>
+          </label>
+          <label className="form-field">
+            <span title="Use Claude Code's built-in system prompt or append your custom GraphCode prompt for this run.">System Prompt</span>
+            <select
+              value={agent.claudeSystemPromptMode}
+              onChange={(event) => onPatch({ claudeSystemPromptMode: event.target.value as AgentSettingsLike["claudeSystemPromptMode"] })}
+            >
+              <option value="default">Default Claude Code system prompt</option>
+              <option value="custom">Custom prompt</option>
+            </select>
+          </label>
+        </div>
+        {agent.claudeSystemPromptMode === "custom" ? (
+          <label className="form-field">
+            <span>Custom Prompt</span>
+            <textarea
+              rows={3}
+              value={agent.systemPromptSource.value ?? ""}
+              onChange={(event) => onPatch({ systemPromptSource: { type: "manual", value: event.target.value } })}
+            />
+            <FieldError value={errors[`${errorKey}.systemPromptSource.value`]} />
+          </label>
+        ) : null}
+      </div>
+    );
+  };
+
   return (
-    <div className="settings-overlay" role="dialog" aria-modal="true" aria-label="Settings">
+    <div className="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
       <div className="settings-page">
         <div className="settings-title">
           <div>
-            <h2>Settings</h2>
+            <h2 id="settings-dialog-title">Settings</h2>
             <p>{project.rootPath}</p>
           </div>
           <Button isIconOnly size="sm" variant="ghost" aria-label="Close settings" onPress={onClose}>
@@ -350,26 +726,30 @@ export function SettingsPage({
         </div>
 
         <div className="settings-body">
-          <nav className="settings-nav" aria-label="Settings sections">
-            <button type="button" className={activeSection === "general" ? "active" : ""} onClick={() => setActiveSection("general")}>
+          <nav className="settings-nav" role="tablist" aria-label="Settings sections">
+            <button type="button" id="settings-tab-general" role="tab" aria-selected={activeSection === "general"} aria-controls="settings-panel" className={activeSection === "general" ? "active" : ""} onClick={() => setActiveSection("general")}>
               <Monitor size={16} />
               General
             </button>
-            <button type="button" className={activeSection === "agents" ? "active" : ""} onClick={() => setActiveSection("agents")}>
+            <button type="button" id="settings-tab-agents" role="tab" aria-selected={activeSection === "agents"} aria-controls="settings-panel" className={activeSection === "agents" ? "active" : ""} onClick={() => setActiveSection("agents")}>
               <Bot size={16} />
               Agents
             </button>
-            <button type="button" className={activeSection === "extensions" ? "active" : ""} onClick={() => setActiveSection("extensions")}>
+            <button type="button" id="settings-tab-extensions" role="tab" aria-selected={activeSection === "extensions"} aria-controls="settings-panel" className={activeSection === "extensions" ? "active" : ""} onClick={() => setActiveSection("extensions")}>
               <Boxes size={16} />
               Extensions
             </button>
-            <button type="button" className={activeSection === "github" ? "active" : ""} onClick={() => setActiveSection("github")}>
+            <button type="button" id="settings-tab-integrations" role="tab" aria-selected={activeSection === "integrations"} aria-controls="settings-panel" className={activeSection === "integrations" ? "active" : ""} onClick={() => setActiveSection("integrations")}>
+              <Terminal size={16} />
+              Integrations
+            </button>
+            <button type="button" id="settings-tab-github" role="tab" aria-selected={activeSection === "github"} aria-controls="settings-panel" className={activeSection === "github" ? "active" : ""} onClick={() => setActiveSection("github")}>
               <Github size={16} />
               GitHub
             </button>
           </nav>
 
-          <main className="settings-content">
+          <main id="settings-panel" className="settings-content" role="tabpanel" aria-labelledby={`settings-tab-${activeSection}`}>
             {activeSection === "general" ? (
               <section className="settings-section">
                 <h3>General</h3>
@@ -404,6 +784,84 @@ export function SettingsPage({
               </section>
             ) : null}
 
+            {activeSection === "integrations" ? (
+              <section className="settings-section agent-settings-grid">
+                <h3>Integrations</h3>
+                <div className="agent-settings-card">
+                  <h4>Codex CLI</h4>
+                  <div className="github-auth-box">
+                    <div>
+                      <span className={codexStatus?.installed && codexStatus.authenticated && codexStatus.modelsAvailable ? "settings-ok" : "settings-error"}>
+                        {codexStatus?.installed
+                          ? codexStatus.authenticated
+                            ? codexStatus.modelsAvailable
+                              ? "Installed, authenticated, and model catalog ready"
+                              : "Installed and authenticated; model catalog unavailable"
+                            : "Installed; authentication required"
+                          : "Not installed"}
+                      </span>
+                      <small>Command: {codexStatus?.resolvedPath ?? codexStatus?.command ?? "codex"}</small>
+                      {codexStatus?.version ? <small>Version: {codexStatus.version}</small> : null}
+                      {codexStatus?.authStatus ? <small>{codexStatus.authStatus}</small> : null}
+                      <small>Models loaded: {codexModels.length}</small>
+                    </div>
+                    <div className="github-auth-actions">
+                      <Button size="sm" variant="ghost" isDisabled={codexBusy} onPress={() => void refreshCodex()}>
+                        <RefreshCw size={15} />
+                        Refresh
+                      </Button>
+                      <Button size="sm" variant="secondary" isDisabled={codexBusy || codexStatus?.installed === true} onPress={() => void handleInstallCodex()}>
+                        <Terminal size={15} />
+                        Install
+                      </Button>
+                      <Button size="sm" variant="primary" isDisabled={codexBusy || !codexStatus?.installed || codexStatus.authenticated} onPress={() => void handleStartCodexAuth()}>
+                        <ExternalLink size={15} />
+                        Auth
+                      </Button>
+                    </div>
+                  </div>
+	                  {codexMessage ? <p className="settings-note">{codexMessage}</p> : null}
+	                  {codexStatus?.error ? <FieldError value={codexStatus.error} /> : null}
+	                </div>
+	                <div className="agent-settings-card">
+	                  <h4>Claude Code CLI</h4>
+	                  <div className="github-auth-box">
+	                    <div>
+	                      <span className={claudeStatus?.installed && claudeStatus.authenticated && claudeStatus.modelsAvailable ? "settings-ok" : "settings-error"}>
+	                        {claudeStatus?.installed
+	                          ? claudeStatus.authenticated
+	                            ? claudeStatus.modelsAvailable
+	                              ? "Installed, authenticated, and model aliases ready"
+	                              : "Installed and authenticated; model aliases unavailable"
+	                            : "Installed; authentication required"
+	                          : "Not installed"}
+	                      </span>
+	                      <small>Command: {claudeStatus?.resolvedPath ?? claudeStatus?.command ?? "claude"}</small>
+	                      {claudeStatus?.version ? <small>Version: {claudeStatus.version}</small> : null}
+	                      {claudeStatus?.authStatus ? <small>{claudeStatus.authStatus}</small> : null}
+	                      <small>Models loaded: {claudeModels.length}</small>
+	                    </div>
+	                    <div className="github-auth-actions">
+	                      <Button size="sm" variant="ghost" isDisabled={claudeBusy} onPress={() => void refreshClaude()}>
+	                        <RefreshCw size={15} />
+	                        Refresh
+	                      </Button>
+	                      <Button size="sm" variant="secondary" isDisabled={claudeBusy || claudeStatus?.installed === true} onPress={() => void handleInstallClaude()}>
+	                        <Terminal size={15} />
+	                        Install
+	                      </Button>
+	                      <Button size="sm" variant="primary" isDisabled={claudeBusy || !claudeStatus?.installed || claudeStatus.authenticated} onPress={() => void handleStartClaudeAuth()}>
+	                        <ExternalLink size={15} />
+	                        Auth
+	                      </Button>
+	                    </div>
+	                  </div>
+	                  {claudeMessage ? <p className="settings-note">{claudeMessage}</p> : null}
+	                  {claudeStatus?.error ? <FieldError value={claudeStatus.error} /> : null}
+	                </div>
+	              </section>
+	            ) : null}
+
             {activeSection === "agents" ? (
               <section className="settings-section agent-settings-grid">
                 <h3>Agents</h3>
@@ -429,7 +887,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateAgent(agentKind, providerPatch(agent.model, event.target.value as AgentProvider))}>
+                          <select value={agent.provider} onChange={(event) => updateAgent(agentKind, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -437,12 +895,11 @@ export function SettingsPage({
                             ))}
                           </select>
                         </label>
-                        <label className="form-field">
-                          <span>{modelFieldLabel(agent.provider)}</span>
-                          <input value={agent.model} onChange={(event) => updateAgent(agentKind, { model: event.target.value })} />
-                          <FieldError value={errors[`agents.${index}.model`]} />
-                        </label>
+                        {renderModelControl(agent, `agents.${index}`, (patch) => updateAgent(agentKind, patch))}
                       </div>
+                      {renderCodexControls(agent, `agents.${index}`, (patch) => updateAgent(agentKind, patch))}
+                      {renderClaudeControls(agent, `agents.${index}`, (patch) => updateAgent(agentKind, patch))}
+                      {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
                           <span>API Key Source</span>
@@ -468,6 +925,7 @@ export function SettingsPage({
                           <FieldError value={errors[`agents.${index}.apiKeySource.value`]} />
                         </div>
                       </div>
+                      ) : null}
                       <label className="form-field">
                         <span>Parallel Calls</span>
                         <input
@@ -478,6 +936,7 @@ export function SettingsPage({
                           onChange={(event) => updateAgent(agentKind, { parallelLimit: Number.parseInt(event.target.value, 10) || 1 })}
                         />
                       </label>
+                      {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
                           <span>System Prompt Source</span>
@@ -507,6 +966,7 @@ export function SettingsPage({
                           <FieldError value={errors[`agents.${index}.systemPromptSource.value`]} />
                         </div>
                       </div>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -519,7 +979,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateCodingAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider))}>
+                          <select value={agent.provider} onChange={(event) => updateCodingAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -527,12 +987,11 @@ export function SettingsPage({
                             ))}
                           </select>
                         </label>
-                        <label className="form-field">
-                          <span>{modelFieldLabel(agent.provider)}</span>
-                          <input value={agent.model} onChange={(event) => updateCodingAgent(mode, { model: event.target.value })} />
-                          <FieldError value={errors[`codingAgents.${index}.model`]} />
-                        </label>
+                        {renderModelControl(agent, `codingAgents.${index}`, (patch) => updateCodingAgent(mode, patch))}
                       </div>
+                      {renderCodexControls(agent, `codingAgents.${index}`, (patch) => updateCodingAgent(mode, patch))}
+                      {renderClaudeControls(agent, `codingAgents.${index}`, (patch) => updateCodingAgent(mode, patch))}
+                      {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
                           <span>API Key Source</span>
@@ -558,6 +1017,7 @@ export function SettingsPage({
                           <FieldError value={errors[`codingAgents.${index}.apiKeySource.value`]} />
                         </div>
                       </div>
+                      ) : null}
                       <label className="form-field">
                         <span>Parallel Calls</span>
                         <input
@@ -568,6 +1028,7 @@ export function SettingsPage({
                           onChange={(event) => updateCodingAgent(mode, { parallelLimit: Number.parseInt(event.target.value, 10) || 1 })}
                         />
                       </label>
+                      {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
                           <span>System Prompt Source</span>
@@ -597,6 +1058,7 @@ export function SettingsPage({
                           <FieldError value={errors[`codingAgents.${index}.systemPromptSource.value`]} />
                         </div>
                       </div>
+                      ) : null}
                       </div>
                     );
                   })}
@@ -609,7 +1071,7 @@ export function SettingsPage({
                         <div className="form-grid">
                           <label className="form-field">
                             <span>Provider</span>
-                            <select value={agent.provider} onChange={(event) => updateReviewAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider))}>
+                            <select value={agent.provider} onChange={(event) => updateReviewAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                               {providers.map((provider) => (
                                 <option key={provider} value={provider}>
                                   {providerLabel(provider)}
@@ -617,12 +1079,11 @@ export function SettingsPage({
                               ))}
                             </select>
                           </label>
-                          <label className="form-field">
-                            <span>{modelFieldLabel(agent.provider)}</span>
-                            <input value={agent.model} onChange={(event) => updateReviewAgent(mode, { model: event.target.value })} />
-                            <FieldError value={errors[`reviewAgents.${index}.model`]} />
-                          </label>
+                          {renderModelControl(agent, `reviewAgents.${index}`, (patch) => updateReviewAgent(mode, patch))}
                         </div>
+                        {renderCodexControls(agent, `reviewAgents.${index}`, (patch) => updateReviewAgent(mode, patch))}
+                        {renderClaudeControls(agent, `reviewAgents.${index}`, (patch) => updateReviewAgent(mode, patch))}
+                        {!isCliProvider(agent.provider) ? (
                         <div className="form-grid">
                           <label className="form-field">
                             <span>API Key Source</span>
@@ -648,6 +1109,7 @@ export function SettingsPage({
                             <FieldError value={errors[`reviewAgents.${index}.apiKeySource.value`]} />
                           </div>
                         </div>
+                        ) : null}
                         <label className="form-field">
                           <span>Parallel Calls</span>
                           <input
@@ -658,6 +1120,7 @@ export function SettingsPage({
                             onChange={(event) => updateReviewAgent(mode, { parallelLimit: Number.parseInt(event.target.value, 10) || 1 })}
                           />
                         </label>
+                        {!isCliProvider(agent.provider) ? (
                         <div className="form-grid">
                           <label className="form-field">
                             <span>System Prompt Source</span>
@@ -687,6 +1150,7 @@ export function SettingsPage({
                             <FieldError value={errors[`reviewAgents.${index}.systemPromptSource.value`]} />
                           </div>
                         </div>
+                        ) : null}
                       </div>
                     );
                   })}
@@ -699,7 +1163,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateScanningAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider))}>
+                          <select value={agent.provider} onChange={(event) => updateScanningAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -707,12 +1171,11 @@ export function SettingsPage({
                             ))}
                           </select>
                         </label>
-                        <label className="form-field">
-                          <span>{modelFieldLabel(agent.provider)}</span>
-                          <input value={agent.model} onChange={(event) => updateScanningAgent(mode, { model: event.target.value })} />
-                          <FieldError value={errors[`scanningAgents.${index}.model`]} />
-                        </label>
+                        {renderModelControl(agent, `scanningAgents.${index}`, (patch) => updateScanningAgent(mode, patch))}
                       </div>
+                      {renderCodexControls(agent, `scanningAgents.${index}`, (patch) => updateScanningAgent(mode, patch))}
+                      {renderClaudeControls(agent, `scanningAgents.${index}`, (patch) => updateScanningAgent(mode, patch))}
+                      {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
                           <span>API Key Source</span>
@@ -738,6 +1201,7 @@ export function SettingsPage({
                           <FieldError value={errors[`scanningAgents.${index}.apiKeySource.value`]} />
                         </div>
                       </div>
+                      ) : null}
                       <label className="form-field">
                         <span>Parallel Calls</span>
                         <input
@@ -748,6 +1212,7 @@ export function SettingsPage({
                           onChange={(event) => updateScanningAgent(mode, { parallelLimit: Number.parseInt(event.target.value, 10) || 1 })}
                         />
                       </label>
+                      {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
                           <span>System Prompt Source</span>
@@ -777,6 +1242,7 @@ export function SettingsPage({
                           <FieldError value={errors[`scanningAgents.${index}.systemPromptSource.value`]} />
                         </div>
                       </div>
+                      ) : null}
                     </div>
                   );
                 })}
@@ -940,7 +1406,7 @@ function readFileText(file: File): Promise<string> {
 }
 
 function modelFieldLabel(provider: AgentProvider): string {
-  return isCliProvider(provider) ? "CLI Command" : "Model";
+  return provider === "claudecode" ? "Claude Model" : "Model";
 }
 
 function authEntryLabel(provider: AgentProvider, type: AgentConfig["apiKeySource"]["type"]): string {
@@ -957,10 +1423,37 @@ function apiKeyEntryLabel(type: AgentConfig["apiKeySource"]["type"]): string {
   return "API Key Entry";
 }
 
-function providerPatch(currentModel: string, provider: AgentProvider): Pick<AgentConfig, "provider" | "model"> {
+function providerPatch(currentModel: string, provider: AgentProvider, firstCodexModel?: CodexModelInfo, firstClaudeModel?: ClaudeModelInfo): AgentSettingsPatch {
+  if (provider === "codex") {
+    return {
+      provider,
+      model: firstCodexModel?.slug ?? "",
+      cliCommand: "codex",
+      reasoningEffort: firstCodexModel?.defaultReasoningLevel ?? "medium",
+      speedTier: "standard",
+      permissionMode: "ask_for_permission",
+      codexSystemPromptMode: "default",
+      apiKeySource: { type: "env", value: "" },
+      systemPromptSource: { type: "manual", value: "" }
+    };
+  }
+  if (provider === "claudecode") {
+    return {
+      provider,
+      model: firstClaudeModel?.slug ?? "",
+      cliCommand: "claude",
+      reasoningEffort: firstClaudeModel?.defaultReasoningLevel ?? "medium",
+      speedTier: "standard",
+      permissionMode: "ask_for_permission",
+      claudeSystemPromptMode: "default",
+      apiKeySource: { type: "env", value: "" },
+      systemPromptSource: { type: "manual", value: "" }
+    };
+  }
   return {
     provider,
-    model: isCliProvider(provider) ? defaultCliCommand(provider) : currentModel
+    model: currentModel,
+    cliCommand: ""
   };
 }
 
@@ -968,8 +1461,69 @@ function isCliProvider(provider: AgentProvider): provider is "codex" | "claudeco
   return provider === "codex" || provider === "claudecode";
 }
 
-function defaultCliCommand(provider: "codex" | "claudecode"): string {
-  return provider === "codex" ? "codex" : "claude";
+function codexModelPatch(modelSlug: string, model: CodexModelInfo | undefined, agent: AgentSettingsLike): AgentSettingsPatch {
+  return {
+    model: modelSlug,
+    reasoningEffort: model?.defaultReasoningLevel ?? agent.reasoningEffort,
+    speedTier: model?.speedTiers.includes(agent.speedTier) ? agent.speedTier : "standard"
+  };
+}
+
+function claudeModelPatch(modelSlug: string, model: ClaudeModelInfo | undefined, agent: AgentSettingsLike): AgentSettingsPatch {
+  return {
+    model: modelSlug,
+    reasoningEffort: model?.defaultReasoningLevel ?? agent.reasoningEffort,
+    speedTier: model?.speedTiers.includes(agent.speedTier) ? agent.speedTier : "standard"
+  };
+}
+
+function applyInitialCodexModel<T extends AgentSettingsLike>(agent: T, model: CodexModelInfo): T {
+  if (agent.provider !== "codex" || agent.model.trim()) {
+    return agent;
+  }
+  return {
+    ...agent,
+    model: model.slug,
+    cliCommand: agent.cliCommand?.trim() || "codex",
+    reasoningEffort: model.defaultReasoningLevel,
+    speedTier: "standard",
+    permissionMode: agent.permissionMode ?? "ask_for_permission",
+    codexSystemPromptMode: agent.codexSystemPromptMode ?? "default"
+  };
+}
+
+function applyInitialClaudeModel<T extends AgentSettingsLike>(agent: T, model: ClaudeModelInfo): T {
+  if (agent.provider !== "claudecode" || agent.model.trim()) {
+    return agent;
+  }
+  return {
+    ...agent,
+    model: model.slug,
+    cliCommand: agent.cliCommand?.trim() || "claude",
+    reasoningEffort: model.defaultReasoningLevel,
+    speedTier: "standard",
+    permissionMode: agent.permissionMode ?? "ask_for_permission",
+    claudeSystemPromptMode: agent.claudeSystemPromptMode ?? "default"
+  };
+}
+
+function reasoningEffortLabel(value: AgentSettingsLike["reasoningEffort"]): string {
+  switch (value) {
+    case "low":
+      return "Low";
+    case "medium":
+      return "Medium";
+    case "high":
+      return "High";
+    case "xhigh":
+      return "Extra high";
+    case "max":
+      return "Max";
+    case "ultra":
+      return "Ultra";
+    default:
+      return value;
+  }
 }
 
 function defaultCodingAgent(mode: CodingAgentMode): CodingAgentConfig {
@@ -977,6 +1531,12 @@ function defaultCodingAgent(mode: CodingAgentMode): CodingAgentConfig {
     mode,
     provider: "fake",
     model: "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `Use ${mode} scoped coding context.` }
@@ -988,6 +1548,12 @@ function defaultReviewAgent(mode: ReviewAgentMode): ReviewAgentConfig {
     mode,
     provider: "fake",
     model: "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `Use ${mode} scoped review context.` }
@@ -999,13 +1565,19 @@ function defaultScanningAgent(mode: ScanningAgentMode): ScanningAgentConfig {
     mode,
     provider: "fake",
     model: `graphcode-scanner-${mode}-v1`,
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "local" ? 8 : mode === "medium" ? 4 : 1,
     apiKeySource: { type: "env", value: "" },
     systemPromptSource: { type: "manual", value: `Use ${mode} scanner context.` }
   };
 }
 
-function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
+function toMutation(settings: WorkspaceSettings) {
   const settingsCodingAgents = settings.codingAgents ?? [];
   const codingAgents = settingsCodingAgents.length > 0 ? settingsCodingAgents : CODING_AGENT_MODES.map(defaultCodingAgent);
   const settingsReviewAgents = settings.reviewAgents ?? [];
@@ -1029,33 +1601,57 @@ function toMutation(settings: WorkspaceSettings): WorkspaceSettingsMutation {
       agentKind: agent.agentKind,
       provider: agent.provider,
       model: agent.model,
+      cliCommand: agent.cliCommand,
+      reasoningEffort: agent.reasoningEffort,
+      speedTier: agent.speedTier,
+      permissionMode: agent.permissionMode,
+      codexSystemPromptMode: agent.codexSystemPromptMode,
+      claudeSystemPromptMode: agent.claudeSystemPromptMode,
       parallelLimit: agent.parallelLimit,
       apiKeySource: { ...agent.apiKeySource, value: "" },
-      systemPromptSource: agent.systemPromptSource
+      systemPromptSource: { ...agent.systemPromptSource, value: agent.systemPromptSource.value ?? "" }
     })),
       codingAgents: codingAgents.map((agent) => ({
         mode: agent.mode,
       provider: agent.provider,
       model: agent.model,
+      cliCommand: agent.cliCommand,
+      reasoningEffort: agent.reasoningEffort,
+      speedTier: agent.speedTier,
+      permissionMode: agent.permissionMode,
+      codexSystemPromptMode: agent.codexSystemPromptMode,
+      claudeSystemPromptMode: agent.claudeSystemPromptMode,
       parallelLimit: agent.parallelLimit,
       apiKeySource: { ...agent.apiKeySource, value: "" },
-        systemPromptSource: agent.systemPromptSource
+        systemPromptSource: { ...agent.systemPromptSource, value: agent.systemPromptSource.value ?? "" }
       })),
       reviewAgents: reviewAgents.map((agent) => ({
         mode: agent.mode,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySource: { ...agent.apiKeySource, value: "" },
-        systemPromptSource: agent.systemPromptSource
+        systemPromptSource: { ...agent.systemPromptSource, value: agent.systemPromptSource.value ?? "" }
       })),
       scanningAgents: scanningAgents.map((agent) => ({
       mode: agent.mode,
       provider: agent.provider,
       model: agent.model,
+      cliCommand: agent.cliCommand,
+      reasoningEffort: agent.reasoningEffort,
+      speedTier: agent.speedTier,
+      permissionMode: agent.permissionMode,
+      codexSystemPromptMode: agent.codexSystemPromptMode,
+      claudeSystemPromptMode: agent.claudeSystemPromptMode,
       parallelLimit: agent.parallelLimit,
       apiKeySource: { ...agent.apiKeySource, value: "" },
-      systemPromptSource: agent.systemPromptSource
+      systemPromptSource: { ...agent.systemPromptSource, value: agent.systemPromptSource.value ?? "" }
     }))
   };
 }

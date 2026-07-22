@@ -25,7 +25,7 @@ export function BoundaryNodeCard({ data, selected }: NodeProps) {
       <div className="boundary-node-header">
         <div className="boundary-node-heading">
           <div className="boundary-node-title">{boundary.name}</div>
-          <span className="boundary-node-count">{boundary.memberCount} blocks</span>
+          <span className="boundary-node-count">{boundary.memberCount} {boundary.memberCount === 1 ? "block" : "blocks"}</span>
         </div>
         {boundary.summary ? <p>{boundary.summary}</p> : null}
       </div>

@@ -23,6 +23,10 @@ import {
   type CodingAgentConfigView,
   type CodingAgentMode,
   type CodingWorkflow,
+  type CodingWorkflowExecutionPolicy,
+  codingWorkflowOrchestrationSchema,
+  type CodingWorkflowOrchestration,
+  type CodingWorkflowPartitionConstraints,
   type CodingWorkflowItem,
   type CodingWorkflowItemStatus,
   type CodingWorkflowModeOverride,
@@ -64,6 +68,9 @@ import {
   type HierarchyBoundaryGroup,
   type HierarchyBoundaryLabel,
   type HierarchyNode,
+  type IntegrationCheck,
+  type IntegrationCheckKind,
+  type InterfaceContract,
   IO_KINDS,
   type IoDetails,
   type IoKind,
@@ -82,6 +89,7 @@ import {
   type ProcessDetails,
   type ProcessKind,
   type Project,
+  type SourceWriteScope,
   REVIEW_AGENT_MODES,
   type ReviewAgentConfig,
   type ReviewAgentConfigView,
@@ -95,18 +103,22 @@ import {
   type TagMutation,
   type WorkspaceSettings,
   type WorkspaceSettingsMutation,
+  type WorkUnitProposal,
   blockExecutionMetadataSchema,
   codeProposalArtifactManifestSchema,
   extensionNodeDefinitionForKind,
   extensionPackageForNodeKind,
   isAttachmentNodeKind,
   isDomainNodeKind,
-  isExtensionNodeKind
+  isExtensionNodeKind,
+  workUnitProposalSchema
 } from "@graphcode/graph-model";
 import type { ScanEdgeDraft, ScanNodeDraft, ScanPipelineResult } from "@graphcode/agent-runtime";
 import { codeGraphId, type CodeGraphSnapshot, type CodeGraphSymbol, type CodeGraphWorkflowNode } from "@graphcode/parser";
 import type { GraphDatabase } from "./connection";
 import { layoutCanvasWithBoundaryGroups } from "../layout/elk";
+import { deriveLegacyWorkUnitOrchestration, type WorkUnitPreviewRevisionContext } from "../services/work-unit-preview";
+import { previewPartitionedCodingWorkflow } from "../services/workflow-partitioner";
 
 const ROLE_AGENT_KINDS: AgentKind[] = ["planning", "scanning"];
 const GENERATED_TEST_ARTIFACT_DIR = "__graphcode_generated__";
@@ -201,6 +213,12 @@ type AgentSettingsRow = {
   agent_kind: AgentKind;
   provider: AgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: AgentConfig["reasoningEffort"];
+  speed_tier: AgentConfig["speedTier"];
+  permission_mode: AgentConfig["permissionMode"];
+  codex_system_prompt_mode: AgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: AgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: AgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -213,6 +231,12 @@ type CodingAgentSettingsRow = {
   coding_mode: CodingAgentMode;
   provider: CodingAgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: CodingAgentConfig["reasoningEffort"];
+  speed_tier: CodingAgentConfig["speedTier"];
+  permission_mode: CodingAgentConfig["permissionMode"];
+  codex_system_prompt_mode: CodingAgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: CodingAgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: CodingAgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -225,6 +249,12 @@ type ReviewAgentSettingsRow = {
   review_mode: ReviewAgentMode;
   provider: ReviewAgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: ReviewAgentConfig["reasoningEffort"];
+  speed_tier: ReviewAgentConfig["speedTier"];
+  permission_mode: ReviewAgentConfig["permissionMode"];
+  codex_system_prompt_mode: ReviewAgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: ReviewAgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: ReviewAgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -237,6 +267,12 @@ type ScanningAgentSettingsRow = {
   scanning_mode: ScanningAgentMode;
   provider: ScanningAgentConfig["provider"];
   model: string;
+  cli_command: string;
+  reasoning_effort: ScanningAgentConfig["reasoningEffort"];
+  speed_tier: ScanningAgentConfig["speedTier"];
+  permission_mode: ScanningAgentConfig["permissionMode"];
+  codex_system_prompt_mode: ScanningAgentConfig["codexSystemPromptMode"];
+  claude_system_prompt_mode: ScanningAgentConfig["claudeSystemPromptMode"];
   parallel_limit: number;
   api_key_source_type: ScanningAgentConfig["apiKeySource"]["type"];
   api_key_source_value: string;
@@ -272,6 +308,7 @@ type AgentRunRow = {
   status: AgentRunStatus;
   base_graph_revision: number;
   applied_graph_revision: number | null;
+  implemented_at: string | null;
   conflict_reason: string | null;
   target_node_id: string | null;
   prompt: string;
@@ -307,16 +344,18 @@ type CodeProposalRow = {
   target_node_id: string | null;
   diff: string;
   artifact_manifest_json: string | null;
+  work_unit_proposal_json: string | null;
   created_at: string;
 };
 
-type StoredCodeProposal = {
+export type StoredCodeProposal = {
   id: string;
   projectId: string;
   agentRunId: string | null;
   targetNodeId: string | null;
   diff: string;
   artifactManifest: CodeProposalArtifactManifest | null;
+  workUnitProposal: WorkUnitProposal | null;
   createdAt: string;
 };
 
@@ -327,6 +366,8 @@ type CodingWorkflowRow = {
   status: CodingWorkflow["status"];
   current_layer: number;
   summary: string;
+  orchestration_version: string | null;
+  orchestration_diagnostics_json: string;
   created_at: string;
   updated_at: string;
 };
@@ -338,7 +379,23 @@ type CodingWorkflowItemRow = {
   node_id: string;
   node_name: string;
   node_kind: GraphNodeKind;
+  parent_item_id: string | null;
   layer_index: number;
+  work_unit_title: string;
+  objective: string;
+  base_index_revision: string | null;
+  base_workspace_revision: string | null;
+  base_graph_revision: number;
+  base_revision_json: string;
+  routing_decision_id: string | null;
+  context_budget_json: string;
+  planned_write_scopes_json: string;
+  actual_write_scopes_json: string;
+  expected_outputs_json: string;
+  context_diagnostics_json: string;
+  context_compiler_version: string;
+  routing_feature_version: string;
+  proposal_revision: number | null;
   recommended_mode: CodingAgentMode;
   selected_mode: CodingAgentMode;
   mode_reason: string;
@@ -349,6 +406,74 @@ type CodingWorkflowItemRow = {
   applied_at: string | null;
   created_at: string;
   updated_at: string;
+};
+
+type WorkUnitNodeRow = { item_id: string; node_id: string; role: "owned" | "read_halo" | "upstream" | "summary"; score: number | null; reason: string };
+type WorkUnitEdgeRow = {
+  item_id: string;
+  edge_id: string;
+  role: "internal" | "boundary" | "dependency" | "evidence";
+  reason: string;
+  source_node_id: string;
+  target_node_id: string;
+  edge_kind: GraphEdgeKind;
+};
+type WorkUnitDependencyRow = {
+  id: string;
+  source_item_id: string;
+  target_item_id: string;
+  kind: "requires_before" | "coordinates_with" | "read_context" | "write_conflict" | "informational";
+  edge_id: string | null;
+  status: "planned" | "satisfied" | "blocked" | "ignored";
+};
+type InterfaceContractRow = {
+  id: string;
+  workflow_id: string;
+  edge_id: string;
+  edge_kind: GraphEdgeKind;
+  producer_item_id: string;
+  consumer_item_id: string;
+  direction: "producer_to_consumer" | "bidirectional";
+  contract_kind: CodingWorkflowOrchestration["interfaceContracts"][number]["contractKind"];
+  subject_node_ids_json: string;
+  baseline_json: string;
+  proposed_json: string | null;
+  status: CodingWorkflowOrchestration["interfaceContracts"][number]["status"];
+  evidence_json: string;
+  revision: number;
+};
+type IntegrationCheckRow = {
+  id: string;
+  workflow_id: string;
+  layer_index: number;
+  item_id: string | null;
+  check_kind: IntegrationCheckKind;
+  status: IntegrationCheck["status"];
+  diagnostics_json: string;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+type ModelRoutingDecisionRow = {
+  id: string;
+  item_id: string;
+  feature_version: string;
+  features_json: string;
+  recommended_scale: CodingAgentMode;
+  selected_scale: CodingAgentMode;
+  reasons_json: string;
+  token_estimates_json: string;
+  cost_estimate: number | null;
+  provider_id: string | null;
+  model_id: string | null;
+  assignment_json: string | null;
+  metrics_json: string | null;
+  override_json: string | null;
+};
+
+export type CodingWorkflowOrchestrationContext = Omit<WorkUnitPreviewRevisionContext, "sourceHashes"> & {
+  sourceHashes?: Record<string, string>;
 };
 
 
@@ -889,8 +1014,14 @@ export class GraphRepository {
           this.upsertCodingAgentSettings(projectId, {
             mode,
             provider: legacyCodingAgent.provider,
-            model: legacyCodingAgent.model,
-            parallelLimit: legacyCodingAgent.parallelLimit,
+          model: legacyCodingAgent.model,
+          cliCommand: legacyCodingAgent.cliCommand,
+          reasoningEffort: legacyCodingAgent.reasoningEffort,
+          speedTier: legacyCodingAgent.speedTier,
+          permissionMode: legacyCodingAgent.permissionMode,
+          codexSystemPromptMode: legacyCodingAgent.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyCodingAgent.claudeSystemPromptMode,
+          parallelLimit: legacyCodingAgent.parallelLimit,
             apiKeySource: legacyCodingAgent.apiKeySource,
             systemPromptSource: legacyCodingAgent.systemPromptSource
           });
@@ -931,8 +1062,14 @@ export class GraphRepository {
           this.upsertReviewAgentSettings(projectId, {
             mode,
             provider: legacyReviewAgent.provider,
-            model: legacyReviewAgent.model,
-            parallelLimit: legacyReviewAgent.parallelLimit,
+          model: legacyReviewAgent.model,
+          cliCommand: legacyReviewAgent.cliCommand,
+          reasoningEffort: legacyReviewAgent.reasoningEffort,
+          speedTier: legacyReviewAgent.speedTier,
+          permissionMode: legacyReviewAgent.permissionMode,
+          codexSystemPromptMode: legacyReviewAgent.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyReviewAgent.claudeSystemPromptMode,
+          parallelLimit: legacyReviewAgent.parallelLimit,
             apiKeySource: legacyReviewAgent.apiKeySource,
             systemPromptSource: legacyReviewAgent.systemPromptSource
           });
@@ -1062,7 +1199,7 @@ export class GraphRepository {
         fieldErrors[`agents.${index}.agentKind`] = "Each agent can only be configured once.";
       }
       seen.add(agent.agentKind);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`agents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -1104,7 +1241,7 @@ export class GraphRepository {
         fieldErrors[`codingAgents.${index}.mode`] = "Each coding mode can only be configured once.";
       }
       seenCodingModes.add(agent.mode);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`codingAgents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -1130,7 +1267,7 @@ export class GraphRepository {
         fieldErrors[`reviewAgents.${index}.mode`] = "Each review mode can only be configured once.";
       }
       seenReviewModes.add(agent.mode);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`reviewAgents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -1156,7 +1293,7 @@ export class GraphRepository {
         fieldErrors[`scanningAgents.${index}.mode`] = "Each scanning mode can only be configured once.";
       }
       seenScanningModes.add(agent.mode);
-      if (!agent.model.trim() && !isCliAgentProvider(agent.provider)) {
+      if (!agent.model.trim() && requiresModelSelection(agent.provider)) {
         fieldErrors[`scanningAgents.${index}.model`] = "Model is required.";
       }
       if (agent.provider !== "fake" && !isCliAgentProvider(agent.provider)) {
@@ -1289,7 +1426,7 @@ export class GraphRepository {
 
   updateAgentRun(
     runId: string,
-    input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error" | "appliedGraphRevision" | "conflictReason">> & { graphPatch?: GraphPatch | null }
+    input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error" | "appliedGraphRevision" | "implementedAt" | "conflictReason">> & { graphPatch?: GraphPatch | null }
   ): AgentRun {
     const existing = this.getAgentRun(runId);
     this.db
@@ -1303,6 +1440,7 @@ export class GraphRepository {
           graph_patch_json = @graphPatchJson,
           error = @error,
           applied_graph_revision = @appliedGraphRevision,
+          implemented_at = @implementedAt,
           conflict_reason = @conflictReason,
           updated_at = datetime('now')
         WHERE id = @id
@@ -1316,6 +1454,7 @@ export class GraphRepository {
         graphPatchJson: input.graphPatch === undefined ? (existing.graphPatch ? JSON.stringify(existing.graphPatch) : null) : input.graphPatch ? JSON.stringify(input.graphPatch) : null,
         error: input.error === undefined ? existing.error : input.error,
         appliedGraphRevision: input.appliedGraphRevision === undefined ? existing.appliedGraphRevision : input.appliedGraphRevision,
+        implementedAt: input.implementedAt === undefined ? existing.implementedAt : input.implementedAt,
         conflictReason: input.conflictReason === undefined ? existing.conflictReason : input.conflictReason
       });
     return this.getAgentRun(runId);
@@ -1655,7 +1794,14 @@ export class GraphRepository {
     return revision;
   }
 
-  storeCodeProposal(input: { projectId: string; agentRunId?: string | null; targetNodeId?: string | null; diff: string; artifactManifest?: CodeProposalArtifactManifest | null }): string {
+  storeCodeProposal(input: {
+    projectId: string;
+    agentRunId?: string | null;
+    targetNodeId?: string | null;
+    diff: string;
+    artifactManifest?: CodeProposalArtifactManifest | null;
+    workUnitProposal?: WorkUnitProposal | null;
+  }): string {
     const project = this.getProject(input.projectId);
     if (input.targetNodeId) {
       this.assertNodeInProject(input.projectId, input.targetNodeId);
@@ -1665,9 +1811,21 @@ export class GraphRepository {
     }
     const id = `proposal-${crypto.randomUUID()}`;
     const artifactManifest = this.writeProposalArtifacts(project, id, input.artifactManifest ?? null);
+    const workUnitProposal = input.workUnitProposal ? workUnitProposalSchema.parse(input.workUnitProposal) : null;
+    if (workUnitProposal && workUnitProposal.diff !== input.diff) {
+      throw validationError("Stored work-unit proposal diff must match the code proposal diff.");
+    }
     this.db
-      .prepare("INSERT INTO code_proposals (id, project_id, agent_run_id, target_node_id, diff, artifact_manifest_json) VALUES (?, ?, ?, ?, ?, ?)")
-      .run(id, input.projectId, input.agentRunId ?? null, input.targetNodeId ?? null, input.diff, artifactManifest ? JSON.stringify(artifactManifest) : null);
+      .prepare("INSERT INTO code_proposals (id, project_id, agent_run_id, target_node_id, diff, artifact_manifest_json, work_unit_proposal_json) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(
+        id,
+        input.projectId,
+        input.agentRunId ?? null,
+        input.targetNodeId ?? null,
+        input.diff,
+        artifactManifest ? JSON.stringify(artifactManifest) : null,
+        workUnitProposal ? JSON.stringify(workUnitProposal) : null
+      );
     return id;
   }
 
@@ -1687,21 +1845,143 @@ export class GraphRepository {
     return mapCodeProposal(row);
   }
 
-  previewCodingWorkflow(projectId: string, scopeNodeId: string, modeOverrides: CodingWorkflowModeOverride[] = []): CodingWorkflow {
-    return this.createCodingWorkflow(projectId, scopeNodeId, modeOverrides, "preview");
+  previewCodingWorkflow(
+    projectId: string,
+    scopeNodeId: string,
+    modeOverrides: CodingWorkflowModeOverride[] = [],
+    orchestrationContext?: CodingWorkflowOrchestrationContext
+  ): CodingWorkflow {
+    return this.createCodingWorkflow(projectId, scopeNodeId, modeOverrides, "preview", orchestrationContext);
   }
 
-  createCodingWorkflow(projectId: string, scopeNodeId: string, modeOverrides: CodingWorkflowModeOverride[] = [], status: CodingWorkflow["status"] = "running"): CodingWorkflow {
+  previewGraphPartitionedCodingWorkflow(
+    projectId: string,
+    scopeNodeId: string,
+    orchestrationContext: CodingWorkflowOrchestrationContext,
+    modeOverrides: CodingWorkflowModeOverride[] = [],
+    options: {
+      partitionConstraints?: CodingWorkflowPartitionConstraints;
+      executionPolicy?: CodingWorkflowExecutionPolicy;
+    } = {}
+  ): CodingWorkflow {
+    return this.createGraphPartitionedCodingWorkflow(projectId, scopeNodeId, orchestrationContext, modeOverrides, "preview", options);
+  }
+
+  createGraphPartitionedCodingWorkflow(
+    projectId: string,
+    scopeNodeId: string,
+    orchestrationContext: CodingWorkflowOrchestrationContext,
+    modeOverrides: CodingWorkflowModeOverride[] = [],
+    status: "preview" | "running" = "running",
+    options: {
+      partitionConstraints?: CodingWorkflowPartitionConstraints;
+      executionPolicy?: CodingWorkflowExecutionPolicy;
+    } = {}
+  ): CodingWorkflow {
+    const project = this.getProject(projectId);
+    const scope = this.assertNodeInProject(projectId, scopeNodeId);
+    const planItems = this.planCodingWorkflowItems(project.id, scope, modeOverrides);
+    const workflowId = `workflow-${crypto.randomUUID()}`;
+    const sourceHashes =
+      orchestrationContext.sourceHashes ??
+      Object.fromEntries(this.listScanFileStates(project.id).map((file) => [file.filePath, file.contentHash]));
+    const orchestration = previewPartitionedCodingWorkflow({
+      workflowId,
+      projectId: project.id,
+      scopeNodeId: scope.id,
+      scopeName: scope.name,
+      planItems,
+      nodes: this.listNodes(project.id),
+      edges: this.listEdges(project.id),
+      revision: { ...orchestrationContext, sourceHashes },
+      maximumConcurrency: options.executionPolicy?.maximumConcurrency,
+      partitionConstraints: options.partitionConstraints,
+      executionPolicy: options.executionPolicy
+    });
+    const nodeById = new Map(this.listNodes(project.id).map((node) => [node.id, node]));
+    const routingByUnitId = new Map(orchestration.routingDecisions.map((decision) => [decision.workUnitId, decision]));
+    const usedAnchorNodeIds = new Set<string>();
+    const availableAnchorNodeIds = orchestration.partitioning?.includedNodeIds.filter((nodeId) => nodeById.has(nodeId)) ?? [];
+    const previewItems = orchestration.workUnits.map((unit) => {
+      const anchorNodeId =
+        unit.ownedNodeIds.find((nodeId) => !usedAnchorNodeIds.has(nodeId)) ??
+        availableAnchorNodeIds.find((nodeId) => !usedAnchorNodeIds.has(nodeId));
+      if (!anchorNodeId) {
+        throw validationError(`Partitioned preview cannot assign a unique legacy item anchor to work unit ${unit.id}.`);
+      }
+      usedAnchorNodeIds.add(anchorNodeId);
+      const routing = routingByUnitId.get(unit.id)!;
+      return { unit, anchorNodeId, routing };
+    });
+    const summary = `${previewItems.length} deterministic graph-partitioned ${status === "preview" ? "preview " : ""}unit${previewItems.length === 1 ? "" : "s"} planned under ${scope.name}.`;
+    const save = this.db.transaction(() => {
+      this.db
+        .prepare("INSERT INTO coding_workflows (id, project_id, scope_node_id, status, current_layer, summary) VALUES (?, ?, ?, ?, 0, ?)")
+        .run(workflowId, project.id, scope.id, status, summary);
+      const insertItem = this.db.prepare(`
+        INSERT INTO coding_workflow_items (
+          id, workflow_id, project_id, node_id, layer_index, work_unit_title, objective,
+          recommended_mode, selected_mode, mode_reason, status, conflict_group
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+      `);
+      for (const item of previewItems) {
+        insertItem.run(
+          item.unit.id,
+          workflowId,
+          project.id,
+          item.anchorNodeId,
+          item.unit.layerIndex,
+          item.unit.title,
+          item.unit.objective,
+          item.unit.recommendedScale,
+          item.unit.selectedScale,
+          item.routing.reasons.join(" "),
+          `partition-preview:${item.unit.id}`
+        );
+      }
+      this.persistCodingWorkflowOrchestration(workflowId, orchestration);
+    });
+    save();
+    return this.getCodingWorkflow(workflowId);
+  }
+
+  createCodingWorkflow(
+    projectId: string,
+    scopeNodeId: string,
+    modeOverrides: CodingWorkflowModeOverride[] = [],
+    status: CodingWorkflow["status"] = "running",
+    orchestrationContext?: CodingWorkflowOrchestrationContext
+  ): CodingWorkflow {
     const project = this.getProject(projectId);
     const scope = this.assertNodeInProject(projectId, scopeNodeId);
     const planItems = this.planCodingWorkflowItems(project.id, scope, modeOverrides);
     const id = `workflow-${crypto.randomUUID()}`;
+    const persistedItems = planItems.map((item) => ({
+      ...item,
+      id: `workflow-item-${crypto.randomUUID()}`,
+      status: (status === "preview" ? "pending" : item.layerIndex === 0 ? "pending" : "blocked") as CodingWorkflowItemStatus
+    }));
+    const orchestration = orchestrationContext
+      ? deriveLegacyWorkUnitOrchestration({
+          workflowId: id,
+          projectId: project.id,
+          items: persistedItems,
+          nodes: this.listNodes(project.id),
+          edges: this.listEdges(project.id),
+          revision: {
+            ...orchestrationContext,
+            sourceHashes:
+              orchestrationContext.sourceHashes ??
+              Object.fromEntries(this.listScanFileStates(project.id).map((file) => [file.filePath, file.contentHash]))
+          }
+        })
+      : undefined;
     const summary = planItems.length > 0 ? `${planItems.length} coding item${planItems.length === 1 ? "" : "s"} planned under ${scope.name}.` : `No planning blocks found under ${scope.name}.`;
     const save = this.db.transaction(() => {
       this.db
         .prepare("INSERT INTO coding_workflows (id, project_id, scope_node_id, status, current_layer, summary) VALUES (?, ?, ?, ?, 0, ?)")
         .run(id, project.id, scope.id, status, summary);
-      for (const item of planItems) {
+      for (const item of persistedItems) {
         this.db
           .prepare(
             `
@@ -1713,7 +1993,7 @@ export class GraphRepository {
           `
           )
           .run(
-            `workflow-item-${crypto.randomUUID()}`,
+            item.id,
             id,
             project.id,
             item.nodeId,
@@ -1721,9 +2001,12 @@ export class GraphRepository {
             item.recommendedMode,
             item.selectedMode,
             item.modeReason,
-            status === "preview" ? "pending" : item.layerIndex === 0 ? "pending" : "blocked",
+            item.status,
             item.conflictGroup
           );
+      }
+      if (orchestration) {
+        this.persistCodingWorkflowOrchestration(id, orchestration);
       }
     });
     save();
@@ -1735,7 +2018,103 @@ export class GraphRepository {
     if (!row) {
       throw notFound(`Coding workflow not found: ${workflowId}`);
     }
-    return mapCodingWorkflow(row, this.listCodingWorkflowItems(workflowId), this.getNode(row.scope_node_id));
+    const itemRows = this.listCodingWorkflowItemRows(workflowId);
+    const items = itemRows.map(mapCodingWorkflowItem);
+    const orchestration = row.orchestration_version ? this.loadCodingWorkflowOrchestration(row, itemRows) : undefined;
+    const integrationChecks = this.listIntegrationChecks(workflowId);
+    return mapCodingWorkflow(row, items, this.getNode(row.scope_node_id), integrationChecks, orchestration);
+  }
+
+  replaceCodingWorkflowOrchestration(workflowId: string, orchestration: CodingWorkflowOrchestration): CodingWorkflow {
+    this.getCodingWorkflow(workflowId);
+    const save = this.db.transaction(() => this.persistCodingWorkflowOrchestration(workflowId, orchestration));
+    save();
+    return this.getCodingWorkflow(workflowId);
+  }
+
+  listIntegrationChecks(workflowId: string, layerIndex?: number): IntegrationCheck[] {
+    const rows = layerIndex === undefined
+      ? this.db.prepare("SELECT * FROM integration_checks WHERE workflow_id = ? ORDER BY layer_index, created_at, rowid").all(workflowId)
+      : this.db.prepare("SELECT * FROM integration_checks WHERE workflow_id = ? AND layer_index = ? ORDER BY created_at, rowid").all(workflowId, layerIndex);
+    return (rows as IntegrationCheckRow[]).map(mapIntegrationCheck);
+  }
+
+  replaceIntegrationChecks(input: {
+    workflowId: string;
+    layerIndex: number;
+    checks: Array<{
+      itemId: string | null;
+      checkKind: IntegrationCheckKind;
+      status: IntegrationCheck["status"];
+      diagnostics: Record<string, unknown>;
+    }>;
+  }): IntegrationCheck[] {
+    this.getCodingWorkflow(input.workflowId);
+    const now = new Date().toISOString();
+    const save = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM integration_checks WHERE workflow_id = ? AND layer_index = ?").run(input.workflowId, input.layerIndex);
+      const insert = this.db.prepare(`
+        INSERT INTO integration_checks (
+          id, workflow_id, layer_index, item_id, check_kind, status, diagnostics_json,
+          started_at, completed_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const check of input.checks) {
+        if (check.itemId) {
+          const item = this.db.prepare("SELECT workflow_id FROM coding_workflow_items WHERE id = ?").get(check.itemId) as { workflow_id: string } | undefined;
+          if (!item || item.workflow_id !== input.workflowId) throw validationError(`Integration check item ${check.itemId} is outside workflow ${input.workflowId}.`);
+        }
+        insert.run(
+          `integration-check-${crypto.randomUUID()}`,
+          input.workflowId,
+          input.layerIndex,
+          check.itemId,
+          check.checkKind,
+          check.status,
+          JSON.stringify(check.diagnostics),
+          now,
+          now,
+          now,
+          now
+        );
+      }
+    });
+    save();
+    return this.listIntegrationChecks(input.workflowId, input.layerIndex);
+  }
+
+  updateCodingWorkflowItemIntegrationMetadata(input: {
+    itemId: string;
+    actualWriteScopes: SourceWriteScope[];
+    proposalRevision: number;
+  }): void {
+    const result = this.db.prepare(`
+      UPDATE coding_workflow_items
+      SET actual_write_scopes_json = ?, proposal_revision = ?, updated_at = datetime('now')
+      WHERE id = ?
+    `).run(JSON.stringify(input.actualWriteScopes), input.proposalRevision, input.itemId);
+    if (result.changes !== 1) throw notFound(`Coding workflow item not found: ${input.itemId}`);
+  }
+
+  updateInterfaceContractStates(workflowId: string, contracts: InterfaceContract[]): void {
+    const update = this.db.prepare(`
+      UPDATE interface_contracts
+      SET proposed_json = ?, status = ?, evidence_json = ?, revision = revision + 1
+      WHERE id = ? AND workflow_id = ?
+    `);
+    const save = this.db.transaction(() => {
+      for (const contract of contracts) {
+        const result = update.run(
+          contract.proposed ? JSON.stringify(contract.proposed) : null,
+          contract.status,
+          JSON.stringify(contract.evidence),
+          contract.id,
+          workflowId
+        );
+        if (result.changes !== 1) throw validationError(`Interface contract ${contract.id} is outside workflow ${workflowId}.`);
+      }
+    });
+    save();
   }
 
   getReadyCodingWorkflowItems(workflowId: string): CodingWorkflowItem[] {
@@ -1957,6 +2336,42 @@ export class GraphRepository {
   }
 
   private listCodingWorkflowItems(workflowId: string): CodingWorkflowItem[] {
+    return this.listCodingWorkflowItemRows(workflowId).map(mapCodingWorkflowItem);
+  }
+
+  saveCodingWorkUnitContextDiagnostics(input: {
+    projectId: string;
+    workflowId: string;
+    workUnitId: string;
+    compilerVersion: string;
+    diagnostics: unknown;
+  }): void {
+    const item = this.db
+      .prepare("SELECT id FROM coding_workflow_items WHERE id = ? AND workflow_id = ? AND project_id = ?")
+      .get(input.workUnitId, input.workflowId, input.projectId) as { id: string } | undefined;
+    if (!item) throw notFound(`Coding work unit not found: ${input.workUnitId}`);
+    this.db
+      .prepare(
+        `UPDATE coding_workflow_items
+         SET context_diagnostics_json = ?, context_compiler_version = ?, updated_at = datetime('now')
+         WHERE id = ? AND workflow_id = ? AND project_id = ?`
+      )
+      .run(JSON.stringify(input.diagnostics), input.compilerVersion, input.workUnitId, input.workflowId, input.projectId);
+  }
+
+  getCodingWorkUnitContextDiagnostics(projectId: string, workflowId: string, workUnitId: string): unknown {
+    const row = this.db
+      .prepare(
+        `SELECT context_diagnostics_json
+         FROM coding_workflow_items
+         WHERE id = ? AND workflow_id = ? AND project_id = ?`
+      )
+      .get(workUnitId, workflowId, projectId) as { context_diagnostics_json: string } | undefined;
+    if (!row) throw notFound(`Coding work unit not found: ${workUnitId}`);
+    return parseJson(row.context_diagnostics_json);
+  }
+
+  private listCodingWorkflowItemRows(workflowId: string): CodingWorkflowItemRow[] {
     const rows = this.db
       .prepare(
         `
@@ -1968,7 +2383,305 @@ export class GraphRepository {
       `
       )
       .all(workflowId) as CodingWorkflowItemRow[];
-    return rows.map(mapCodingWorkflowItem);
+    return rows;
+  }
+
+  private persistCodingWorkflowOrchestration(workflowId: string, input: CodingWorkflowOrchestration): void {
+    const parsed = codingWorkflowOrchestrationSchema.safeParse(input);
+    if (!parsed.success) {
+      throw validationError(`Invalid work-unit orchestration: ${parsed.error.issues.map((issue) => issue.message).join(" ")}`);
+    }
+    const orchestration = parsed.data;
+    const workflow = this.db.prepare("SELECT * FROM coding_workflows WHERE id = ?").get(workflowId) as CodingWorkflowRow | undefined;
+    if (!workflow) {
+      throw notFound(`Coding workflow not found: ${workflowId}`);
+    }
+    if (orchestration.workflowId !== workflowId || orchestration.projectId !== workflow.project_id) {
+      throw validationError("Work-unit orchestration does not belong to this workflow and project.");
+    }
+    const itemRows = this.listCodingWorkflowItemRows(workflowId);
+    const storedItemIds = new Set(itemRows.map((item) => item.id));
+    const orchestrationItemIds = new Set(orchestration.workUnits.map((unit) => unit.id));
+    if (
+      storedItemIds.size !== orchestrationItemIds.size ||
+      [...storedItemIds].some((itemId) => !orchestrationItemIds.has(itemId))
+    ) {
+      throw validationError("Work-unit orchestration must contain exactly one work unit for every stored workflow item.");
+    }
+    const projectNodeIds = new Set(this.listNodes(workflow.project_id).map((node) => node.id));
+    const projectEdgeIds = new Set(this.listEdges(workflow.project_id).map((edge) => edge.id));
+    for (const unit of orchestration.workUnits) {
+      for (const nodeId of [...unit.ownedNodeIds, ...unit.readHaloNodeIds]) {
+        if (!projectNodeIds.has(nodeId)) {
+          throw validationError(`Work unit ${unit.id} references a node outside its project: ${nodeId}.`);
+        }
+      }
+    }
+    for (const edge of orchestration.boundaryEdges) {
+      if (!projectEdgeIds.has(edge.id)) {
+        throw validationError(`Work-unit orchestration references an edge outside its project: ${edge.id}.`);
+      }
+    }
+
+    this.db.prepare("DELETE FROM interface_contracts WHERE workflow_id = ?").run(workflowId);
+    this.db.prepare("DELETE FROM model_routing_decisions WHERE item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?)").run(workflowId);
+    this.db.prepare("DELETE FROM coding_work_unit_dependencies WHERE source_item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?)").run(workflowId);
+    this.db.prepare("DELETE FROM coding_work_unit_edges WHERE item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?)").run(workflowId);
+    this.db.prepare("DELETE FROM coding_work_unit_nodes WHERE item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?)").run(workflowId);
+
+    this.db
+      .prepare("UPDATE coding_workflows SET orchestration_version = ?, orchestration_diagnostics_json = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(
+        orchestration.featureVersion,
+        JSON.stringify({
+          warnings: orchestration.warnings,
+          ...(orchestration.partitioning ? { partitioning: orchestration.partitioning } : {}),
+          ...(orchestration.partitionConstraints ? { partitionConstraints: orchestration.partitionConstraints } : {}),
+          ...(orchestration.executionPolicy ? { executionPolicy: orchestration.executionPolicy } : {})
+        }),
+        workflowId
+      );
+
+    const updateItem = this.db.prepare(`
+      UPDATE coding_workflow_items
+      SET parent_item_id = @parentItemId,
+          work_unit_title = @workUnitTitle,
+          objective = @objective,
+          base_index_revision = @baseIndexRevision,
+          base_workspace_revision = @baseWorkspaceRevision,
+          base_graph_revision = @baseGraphRevision,
+          base_revision_json = @baseRevisionJson,
+          routing_decision_id = @routingDecisionId,
+          context_budget_json = @contextBudgetJson,
+          planned_write_scopes_json = @plannedWriteScopesJson,
+          expected_outputs_json = @expectedOutputsJson,
+          context_compiler_version = @contextCompilerVersion,
+          routing_feature_version = @routingFeatureVersion,
+          recommended_mode = @recommendedMode,
+          selected_mode = @selectedMode,
+          mode_reason = @modeReason,
+          updated_at = datetime('now')
+      WHERE id = @itemId AND workflow_id = @workflowId
+    `);
+    const insertNode = this.db.prepare(
+      "INSERT INTO coding_work_unit_nodes (item_id, node_id, role, score, reason) VALUES (?, ?, ?, ?, ?)"
+    );
+    const insertEdge = this.db.prepare(
+      "INSERT INTO coding_work_unit_edges (item_id, edge_id, role, reason) VALUES (?, ?, ?, ?)"
+    );
+    const insertDependency = this.db.prepare(`
+      INSERT INTO coding_work_unit_dependencies (id, source_item_id, target_item_id, kind, edge_id, status)
+      VALUES (?, ?, ?, ?, ?, 'planned')
+    `);
+    const ownerByNodeId = new Map<string, string>();
+    for (const unit of orchestration.workUnits) {
+      for (const nodeId of unit.ownedNodeIds) ownerByNodeId.set(nodeId, unit.id);
+    }
+    const edgeById = new Map(orchestration.boundaryEdges.map((edge) => [edge.id, edge]));
+
+    for (const unit of orchestration.workUnits) {
+      updateItem.run({
+        itemId: unit.id,
+        workflowId,
+        parentItemId: unit.parentWorkUnitId,
+        workUnitTitle: unit.title,
+        objective: unit.objective,
+        baseIndexRevision: unit.baseRevision.indexRevision,
+        baseWorkspaceRevision: unit.baseRevision.workspaceRevision,
+        baseGraphRevision: unit.baseRevision.graphRevision,
+        baseRevisionJson: JSON.stringify(unit.baseRevision),
+        routingDecisionId: unit.routingDecisionId,
+        contextBudgetJson: JSON.stringify(unit.contextBudget),
+        plannedWriteScopesJson: JSON.stringify(unit.plannedWriteScopes),
+        expectedOutputsJson: JSON.stringify(unit.expectedOutputs),
+        contextCompilerVersion: unit.baseRevision.contextCompilerVersion,
+        routingFeatureVersion: unit.baseRevision.routingFeatureVersion,
+        recommendedMode: unit.recommendedScale,
+        selectedMode: unit.selectedScale,
+        modeReason:
+          orchestration.routingDecisions.find((decision) => decision.workUnitId === unit.id)?.reasons.join(" ") ??
+          "Work-unit routing decision."
+      });
+      for (const nodeId of unit.ownedNodeIds) insertNode.run(unit.id, nodeId, "owned", 1, "MA-1 legacy workflow ownership seed.");
+      for (const nodeId of unit.readHaloNodeIds) insertNode.run(unit.id, nodeId, "read_halo", null, "Read-only boundary context.");
+      for (const edgeId of unit.boundaryEdgeIds) insertEdge.run(unit.id, edgeId, "boundary", "Edge crosses this work unit's ownership boundary.");
+      for (const dependencyId of unit.dependencyWorkUnitIds) {
+        insertDependency.run(`work-unit-dependency-${crypto.randomUUID()}`, unit.id, dependencyId, "requires_before", null);
+      }
+      for (const coordinationId of unit.coordinationWorkUnitIds) {
+        const coordinationEdge = unit.boundaryEdgeIds
+          .map((edgeId) => edgeById.get(edgeId))
+          .find((edge) => edge && [ownerByNodeId.get(edge.sourceNodeId), ownerByNodeId.get(edge.targetNodeId)].includes(coordinationId));
+        insertDependency.run(
+          `work-unit-dependency-${crypto.randomUUID()}`,
+          unit.id,
+          coordinationId,
+          "coordinates_with",
+          coordinationEdge?.id ?? null
+        );
+      }
+    }
+
+    const insertRouting = this.db.prepare(`
+      INSERT INTO model_routing_decisions (
+        id, item_id, feature_version, features_json, recommended_scale, selected_scale,
+        reasons_json, token_estimates_json, cost_estimate, provider_id, model_id,
+        assignment_json, metrics_json, override_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    for (const decision of orchestration.routingDecisions) {
+      insertRouting.run(
+        decision.id,
+        decision.workUnitId,
+        decision.featureVersion,
+        JSON.stringify(decision.features),
+        decision.recommendedScale,
+        decision.selectedScale,
+        JSON.stringify(decision.reasons),
+        JSON.stringify({ input: decision.estimatedInputTokens, output: decision.estimatedOutputTokens }),
+        decision.estimatedCost,
+        decision.assignment?.providerId ?? null,
+        decision.assignment?.modelId ?? null,
+        decision.assignment ? JSON.stringify(decision.assignment) : null,
+        decision.metrics ? JSON.stringify(decision.metrics) : null,
+        decision.override ? JSON.stringify(decision.override) : null
+      );
+    }
+
+    const insertContract = this.db.prepare(`
+      INSERT INTO interface_contracts (
+        id, workflow_id, edge_id, edge_kind, producer_item_id, consumer_item_id, direction,
+        contract_kind, subject_node_ids_json, baseline_json, proposed_json, status, evidence_json, revision
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `);
+    for (const contract of orchestration.interfaceContracts) {
+      insertContract.run(
+        contract.id,
+        workflowId,
+        contract.edgeId,
+        contract.edgeKind,
+        contract.producerWorkUnitId,
+        contract.consumerWorkUnitId,
+        contract.direction,
+        contract.contractKind,
+        JSON.stringify(contract.subjectNodeIds),
+        JSON.stringify(contract.baseline),
+        contract.proposed ? JSON.stringify(contract.proposed) : null,
+        contract.status,
+        JSON.stringify(contract.evidence)
+      );
+    }
+  }
+
+  private loadCodingWorkflowOrchestration(workflow: CodingWorkflowRow, itemRows: CodingWorkflowItemRow[]): CodingWorkflowOrchestration {
+    const nodeRows = this.db
+      .prepare("SELECT * FROM coding_work_unit_nodes WHERE item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?) ORDER BY item_id, role, node_id")
+      .all(workflow.id) as WorkUnitNodeRow[];
+    const edgeRows = this.db
+      .prepare(`
+        SELECT link.*, edge.source_node_id, edge.target_node_id, edge.kind AS edge_kind
+        FROM coding_work_unit_edges link
+        JOIN graph_edges edge ON edge.id = link.edge_id
+        WHERE link.item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?)
+        ORDER BY link.item_id, link.role, link.edge_id
+      `)
+      .all(workflow.id) as WorkUnitEdgeRow[];
+    const dependencyRows = this.db
+      .prepare("SELECT * FROM coding_work_unit_dependencies WHERE source_item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?) ORDER BY source_item_id, kind, target_item_id")
+      .all(workflow.id) as WorkUnitDependencyRow[];
+    const routingRows = this.db
+      .prepare("SELECT * FROM model_routing_decisions WHERE item_id IN (SELECT id FROM coding_workflow_items WHERE workflow_id = ?) ORDER BY item_id")
+      .all(workflow.id) as ModelRoutingDecisionRow[];
+    const contractRows = this.db
+      .prepare("SELECT * FROM interface_contracts WHERE workflow_id = ? ORDER BY id")
+      .all(workflow.id) as InterfaceContractRow[];
+    const baseRevision = itemRows[0] ? parseJson(itemRows[0].base_revision_json) : null;
+    const workUnits = itemRows.map((item) => ({
+      id: item.id,
+      workflowId: item.workflow_id,
+      projectId: item.project_id,
+      parentWorkUnitId: item.parent_item_id,
+      layerIndex: item.layer_index,
+      title: item.work_unit_title || item.node_name,
+      objective: item.objective,
+      ownedNodeIds: nodeRows.filter((row) => row.item_id === item.id && row.role === "owned").map((row) => row.node_id),
+      readHaloNodeIds: nodeRows.filter((row) => row.item_id === item.id && row.role === "read_halo").map((row) => row.node_id),
+      boundaryEdgeIds: edgeRows.filter((row) => row.item_id === item.id && row.role === "boundary").map((row) => row.edge_id),
+      dependencyWorkUnitIds: dependencyRows.filter((row) => row.source_item_id === item.id && row.kind === "requires_before").map((row) => row.target_item_id),
+      coordinationWorkUnitIds: [
+        ...new Set(dependencyRows.filter((row) => row.source_item_id === item.id && row.kind === "coordinates_with").map((row) => row.target_item_id))
+      ],
+      plannedWriteScopes: parseJson(item.planned_write_scopes_json),
+      expectedOutputs: parseJson(item.expected_outputs_json),
+      recommendedScale: item.recommended_mode,
+      selectedScale: item.selected_mode,
+      routingDecisionId: item.routing_decision_id,
+      contextBudget: parseJson(item.context_budget_json),
+      baseRevision: parseJson(item.base_revision_json),
+      status: item.status
+    }));
+    const uniqueBoundaryEdges = new Map<string, CodingWorkflowOrchestration["boundaryEdges"][number]>();
+    for (const row of edgeRows.filter((candidate) => candidate.role === "boundary")) {
+      uniqueBoundaryEdges.set(row.edge_id, { id: row.edge_id, sourceNodeId: row.source_node_id, targetNodeId: row.target_node_id, kind: row.edge_kind });
+    }
+    const routingDecisions = routingRows.map((row) => {
+      const estimates = parseJson(row.token_estimates_json) as { input?: number; output?: number };
+      return {
+        id: row.id,
+        workUnitId: row.item_id,
+        recommendedScale: row.recommended_scale,
+        selectedScale: row.selected_scale,
+        featureVersion: row.feature_version,
+        features: parseJson(row.features_json),
+        reasons: parseJson(row.reasons_json),
+        estimatedInputTokens: estimates.input ?? 0,
+        estimatedOutputTokens: estimates.output ?? 0,
+        estimatedCost: row.cost_estimate,
+        ...(row.assignment_json ? { assignment: parseJson(row.assignment_json) } : {}),
+        ...(row.metrics_json ? { metrics: parseJson(row.metrics_json) } : {}),
+        override: row.override_json ? parseJson(row.override_json) : null
+      };
+    });
+    const interfaceContracts = contractRows.map((row) => ({
+      id: row.id,
+      workflowId: row.workflow_id,
+      edgeId: row.edge_id,
+      edgeKind: row.edge_kind,
+      producerWorkUnitId: row.producer_item_id,
+      consumerWorkUnitId: row.consumer_item_id,
+      direction: row.direction,
+      subjectNodeIds: parseJson(row.subject_node_ids_json),
+      contractKind: row.contract_kind,
+      baseline: parseJson(row.baseline_json),
+      proposed: row.proposed_json ? parseJson(row.proposed_json) : null,
+      status: row.status,
+      evidence: parseJson(row.evidence_json)
+    }));
+    const diagnostics = parseJson(workflow.orchestration_diagnostics_json) as {
+      warnings?: string[];
+      partitioning?: CodingWorkflowOrchestration["partitioning"];
+      partitionConstraints?: CodingWorkflowOrchestration["partitionConstraints"];
+      executionPolicy?: CodingWorkflowOrchestration["executionPolicy"];
+    };
+    const parsed = codingWorkflowOrchestrationSchema.safeParse({
+      schemaVersion: 1,
+      featureVersion: workflow.orchestration_version,
+      workflowId: workflow.id,
+      projectId: workflow.project_id,
+      revision: baseRevision,
+      workUnits,
+      boundaryEdges: [...uniqueBoundaryEdges.values()],
+      interfaceContracts,
+      routingDecisions,
+      warnings: diagnostics.warnings ?? [],
+      ...(diagnostics.partitionConstraints ? { partitionConstraints: diagnostics.partitionConstraints } : {}),
+      ...(diagnostics.executionPolicy ? { executionPolicy: diagnostics.executionPolicy } : {}),
+      ...(diagnostics.partitioning ? { partitioning: diagnostics.partitioning } : {})
+    });
+    if (!parsed.success) {
+      throw validationError(`Stored work-unit orchestration is invalid: ${parsed.error.issues.map((issue) => issue.message).join(" ")}`);
+    }
+    return parsed.data;
   }
 
   private planCodingWorkflowItems(projectId: string, scope: GraphNode, modeOverrides: CodingWorkflowModeOverride[]): Array<{
@@ -5417,6 +6130,12 @@ export class GraphRepository {
           mode,
           provider: legacyCodingConfig.provider,
           model: legacyCodingConfig.model,
+          cliCommand: legacyCodingConfig.cliCommand,
+          reasoningEffort: legacyCodingConfig.reasoningEffort,
+          speedTier: legacyCodingConfig.speedTier,
+          permissionMode: legacyCodingConfig.permissionMode,
+          codexSystemPromptMode: legacyCodingConfig.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyCodingConfig.claudeSystemPromptMode,
           parallelLimit: legacyCodingConfig.parallelLimit,
           apiKeySource: legacyCodingConfig.apiKeySource,
           systemPromptSource: legacyCodingConfig.systemPromptSource
@@ -5433,6 +6152,12 @@ export class GraphRepository {
           mode,
           provider: legacyReviewConfig.provider,
           model: legacyReviewConfig.model,
+          cliCommand: legacyReviewConfig.cliCommand,
+          reasoningEffort: legacyReviewConfig.reasoningEffort,
+          speedTier: legacyReviewConfig.speedTier,
+          permissionMode: legacyReviewConfig.permissionMode,
+          codexSystemPromptMode: legacyReviewConfig.codexSystemPromptMode,
+          claudeSystemPromptMode: legacyReviewConfig.claudeSystemPromptMode,
           parallelLimit: legacyReviewConfig.parallelLimit,
           apiKeySource: legacyReviewConfig.apiKeySource,
           systemPromptSource: legacyReviewConfig.systemPromptSource
@@ -5478,13 +6203,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO agent_settings (
-          project_id, agent_kind, provider, model, parallel_limit,
+          project_id, agent_kind, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @agentKind, @provider, @model, @parallelLimit,
+          @projectId, @agentKind, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5493,6 +6222,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5506,6 +6241,12 @@ export class GraphRepository {
         agentKind: agent.agentKind,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -5527,13 +6268,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO coding_agent_settings (
-          project_id, coding_mode, provider, model, parallel_limit,
+          project_id, coding_mode, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @codingMode, @provider, @model, @parallelLimit,
+          @projectId, @codingMode, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5542,6 +6287,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5555,6 +6306,12 @@ export class GraphRepository {
         codingMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -5576,13 +6333,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO review_agent_settings (
-          project_id, review_mode, provider, model, parallel_limit,
+          project_id, review_mode, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @reviewMode, @provider, @model, @parallelLimit,
+          @projectId, @reviewMode, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5591,6 +6352,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5604,6 +6371,12 @@ export class GraphRepository {
         reviewMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -5625,13 +6398,17 @@ export class GraphRepository {
       .prepare(
         `
         INSERT INTO scanning_agent_settings (
-          project_id, scanning_mode, provider, model, parallel_limit,
+          project_id, scanning_mode, provider, model, cli_command,
+          reasoning_effort, speed_tier, permission_mode, codex_system_prompt_mode, claude_system_prompt_mode,
+          parallel_limit,
           api_key_source_type, api_key_source_value,
           system_prompt_source_type, system_prompt_source_value,
           created_at, updated_at
         )
         VALUES (
-          @projectId, @scanningMode, @provider, @model, @parallelLimit,
+          @projectId, @scanningMode, @provider, @model, @cliCommand,
+          @reasoningEffort, @speedTier, @permissionMode, @codexSystemPromptMode, @claudeSystemPromptMode,
+          @parallelLimit,
           @apiKeySourceType, @apiKeySourceValue,
           @systemPromptSourceType, @systemPromptSourceValue,
           datetime('now'), datetime('now')
@@ -5640,6 +6417,12 @@ export class GraphRepository {
         DO UPDATE SET
           provider = excluded.provider,
           model = excluded.model,
+          cli_command = excluded.cli_command,
+          reasoning_effort = excluded.reasoning_effort,
+          speed_tier = excluded.speed_tier,
+          permission_mode = excluded.permission_mode,
+          codex_system_prompt_mode = excluded.codex_system_prompt_mode,
+          claude_system_prompt_mode = excluded.claude_system_prompt_mode,
           parallel_limit = excluded.parallel_limit,
           api_key_source_type = excluded.api_key_source_type,
           api_key_source_value = excluded.api_key_source_value,
@@ -5653,6 +6436,12 @@ export class GraphRepository {
         scanningMode: agent.mode,
         provider: agent.provider,
         model: agent.model,
+        cliCommand: agent.cliCommand,
+        reasoningEffort: agent.reasoningEffort,
+        speedTier: agent.speedTier,
+        permissionMode: agent.permissionMode,
+        codexSystemPromptMode: agent.codexSystemPromptMode,
+        claudeSystemPromptMode: agent.claudeSystemPromptMode,
         parallelLimit: agent.parallelLimit,
         apiKeySourceType: agent.apiKeySource.type,
         apiKeySourceValue: agent.apiKeySource.value ?? "",
@@ -6322,6 +7111,12 @@ function defaultAgentConfig(agentKind: AgentKind): AgentConfig {
     agentKind,
     provider: "fake",
     model: agentKind === "scanning" ? "graphcode-scanner-v1" : "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: agentKind === "scanning" ? 8 : 4,
     apiKeySource: {
       type: "env",
@@ -6339,6 +7134,12 @@ function defaultCodingAgentConfig(mode: CodingAgentMode): CodingAgentConfig {
     mode,
     provider: "fake",
     model: "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 8 : mode === "medium" ? 4 : 2,
     apiKeySource: {
       type: "env",
@@ -6356,6 +7157,12 @@ function defaultReviewAgentConfig(mode: ReviewAgentMode): ReviewAgentConfig {
     mode,
     provider: "fake",
     model: "graphcode-fake-v1",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "large" ? 4 : mode === "medium" ? 2 : 1,
     apiKeySource: {
       type: "env",
@@ -6373,6 +7180,12 @@ function defaultScanningAgentConfig(mode: ScanningAgentMode): ScanningAgentConfi
     mode,
     provider: "fake",
     model: `graphcode-scanner-${mode}-v1`,
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
     parallelLimit: mode === "local" ? 8 : mode === "medium" ? 4 : 1,
     apiKeySource: {
       type: "env",
@@ -6504,6 +7317,12 @@ function mapAgentSettingsView(row: AgentSettingsRow): AgentConfigView {
     agentKind: row.agent_kind,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6523,6 +7342,12 @@ function mapAgentSettings(row: AgentSettingsRow): AgentConfig {
     agentKind: row.agent_kind,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6542,6 +7367,12 @@ function mapCodingAgentSettingsView(row: CodingAgentSettingsRow): CodingAgentCon
     mode: row.coding_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6563,6 +7394,12 @@ function mapReviewAgentSettingsView(row: ReviewAgentSettingsRow): ReviewAgentCon
     mode: row.review_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6584,6 +7421,12 @@ function mapScanningAgentSettingsView(row: ScanningAgentSettingsRow): ScanningAg
     mode: row.scanning_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6603,6 +7446,12 @@ function mapCodingAgentSettings(row: CodingAgentSettingsRow): CodingAgentConfig 
     mode: row.coding_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6620,6 +7469,12 @@ function mapReviewAgentSettings(row: ReviewAgentSettingsRow): ReviewAgentConfig 
     mode: row.review_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6637,6 +7492,12 @@ function mapScanningAgentSettings(row: ScanningAgentSettingsRow): ScanningAgentC
     mode: row.scanning_mode,
     provider: row.provider,
     model: row.model,
+    cliCommand: row.cli_command ?? "",
+    reasoningEffort: row.reasoning_effort ?? "medium",
+    speedTier: row.speed_tier ?? "standard",
+    permissionMode: row.permission_mode ?? "ask_for_permission",
+    codexSystemPromptMode: row.codex_system_prompt_mode ?? "custom",
+    claudeSystemPromptMode: row.claude_system_prompt_mode ?? "custom",
     parallelLimit: row.parallel_limit,
     apiKeySource: {
       type: row.api_key_source_type,
@@ -6659,6 +7520,7 @@ function mapAgentRun(row: AgentRunRow): AgentRun {
     status: row.status,
     baseGraphRevision: row.base_graph_revision ?? 0,
     appliedGraphRevision: row.applied_graph_revision ?? null,
+    implementedAt: row.implemented_at ?? null,
     conflictReason: row.conflict_reason ?? null,
     targetNodeId: row.target_node_id,
     prompt: row.prompt,
@@ -6713,6 +7575,14 @@ function parseCodeProposalArtifactManifest(value: string | null): CodeProposalAr
   }
 }
 
+function parseJson(value: string): any {
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw validationError("Stored workflow orchestration contains malformed JSON.");
+  }
+}
+
 function mapCodeProposal(row: CodeProposalRow): StoredCodeProposal {
   return {
     id: row.id,
@@ -6721,11 +7591,18 @@ function mapCodeProposal(row: CodeProposalRow): StoredCodeProposal {
     targetNodeId: row.target_node_id,
     diff: row.diff,
     artifactManifest: parseCodeProposalArtifactManifest(row.artifact_manifest_json),
+    workUnitProposal: row.work_unit_proposal_json ? workUnitProposalSchema.parse(parseJson(row.work_unit_proposal_json)) : null,
     createdAt: row.created_at
   };
 }
 
-function mapCodingWorkflow(row: CodingWorkflowRow, items: CodingWorkflowItem[], scope: GraphNode): CodingWorkflow {
+function mapCodingWorkflow(
+  row: CodingWorkflowRow,
+  items: CodingWorkflowItem[],
+  scope: GraphNode,
+  integrationChecks: IntegrationCheck[],
+  orchestration?: CodingWorkflowOrchestration
+): CodingWorkflow {
   return {
     id: row.id,
     projectId: row.project_id,
@@ -6736,7 +7613,9 @@ function mapCodingWorkflow(row: CodingWorkflowRow, items: CodingWorkflowItem[], 
     summary: row.summary,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
-    items
+    items,
+    integrationChecks,
+    ...(orchestration ? { orchestration } : {})
   };
 }
 
@@ -6748,7 +7627,18 @@ function mapCodingWorkflowItem(row: CodingWorkflowItemRow): CodingWorkflowItem {
     nodeId: row.node_id,
     nodeName: row.node_name,
     nodeKind: row.node_kind,
+    parentItemId: row.parent_item_id,
     layerIndex: row.layer_index,
+    objective: row.objective,
+    baseIndexRevision: row.base_index_revision,
+    baseWorkspaceRevision: row.base_workspace_revision,
+    baseGraphRevision: row.base_graph_revision,
+    routingDecisionId: row.routing_decision_id,
+    ...(row.routing_decision_id ? { contextBudget: parseJson(row.context_budget_json) } : {}),
+    plannedWriteScopes: parseJson(row.planned_write_scopes_json),
+    actualWriteScopes: parseJson(row.actual_write_scopes_json),
+    contextDiagnostics: parseJson(row.context_diagnostics_json),
+    proposalRevision: row.proposal_revision,
     recommendedMode: row.recommended_mode,
     selectedMode: row.selected_mode,
     modeReason: row.mode_reason,
@@ -6757,6 +7647,22 @@ function mapCodingWorkflowItem(row: CodingWorkflowItemRow): CodingWorkflowItem {
     agentRunId: row.agent_run_id,
     proposalId: row.proposal_id,
     appliedAt: row.applied_at,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapIntegrationCheck(row: IntegrationCheckRow): IntegrationCheck {
+  return {
+    id: row.id,
+    workflowId: row.workflow_id,
+    layerIndex: row.layer_index,
+    itemId: row.item_id,
+    checkKind: row.check_kind,
+    status: row.status,
+    diagnostics: parseJson(row.diagnostics_json),
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -7503,6 +8409,10 @@ function hashId(value: string): string {
 
 function isCliAgentProvider(provider: string): boolean {
   return provider === "codex" || provider === "claudecode";
+}
+
+function requiresModelSelection(provider: string): boolean {
+  return provider !== "fake" && provider !== "claudecode";
 }
 
 export function notFound(message: string): Error & { statusCode: number } {

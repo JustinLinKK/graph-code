@@ -1,5 +1,6 @@
 import type { AgentStatus, CustomBlockType, GraphNode, GraphNodeReuse } from "@graphcode/graph-model";
 import { Handle, NodeResizer, Position, type NodeProps } from "@xyflow/react";
+import type { CSSProperties } from "react";
 import { agentStatusLabel, gitChangeLabel, gitWorktreeLabel } from "../displayLabels";
 import { iconForCustomBlockType } from "../customBlockIcons";
 import { nodePalette } from "../graphStyles";
@@ -11,6 +12,15 @@ export type GraphNodeCardData = {
   customType?: CustomBlockType | null;
   reuse?: GraphNodeReuse;
   selected: boolean;
+  workflowOverlay?: {
+    workUnitId: string;
+    title: string;
+    wave: number;
+    status: string;
+    scale: string;
+    role: "owned" | "read_halo";
+    color: string;
+  } | null;
   onResizeEnd?: (nodeId: string, size: { width: number; height: number }) => void;
 };
 
@@ -25,10 +35,18 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
   const tags = node.tags ?? [];
 
   const statusBoundaryClass = moduleAgentBoundaryClass(node);
-  const className = ["graph-node-card", palette.className, statusBoundaryClass, isSelected ? "selected" : ""].filter(Boolean).join(" ");
+  const className = ["graph-node-card", palette.className, statusBoundaryClass, cardData.workflowOverlay ? `workflow-${cardData.workflowOverlay.role}` : "", isSelected ? "selected" : ""].filter(Boolean).join(" ");
 
   return (
-    <div className={className} style={{ borderLeftColor: accentColor }}>
+    <div
+      className={className}
+      style={
+        {
+          borderLeftColor: accentColor,
+          "--workflow-partition-color": cardData.workflowOverlay?.color ?? "transparent"
+        } as CSSProperties
+      }
+    >
       <NodeResizer
         isVisible={isSelected}
         minWidth={node.kind === "format" ? 96 : 150}
@@ -45,6 +63,11 @@ export function GraphNodeCard({ data, selected }: NodeProps) {
         <span>{typeLabel}</span>
       </div>
       <div className="node-card-name">{node.name}</div>
+      {cardData.workflowOverlay ? (
+        <div className="workflow-node-overlay" style={{ borderColor: cardData.workflowOverlay.color, color: cardData.workflowOverlay.color }} title={`${cardData.workflowOverlay.title} · ${cardData.workflowOverlay.role}`}>
+          W{cardData.workflowOverlay.wave} · {cardData.workflowOverlay.scale} · {cardData.workflowOverlay.status}
+        </div>
+      ) : null}
       <p>{node.summary}</p>
       {node.agentStatus !== "none" || node.gitStatus ? (
         <div className="node-status-row">

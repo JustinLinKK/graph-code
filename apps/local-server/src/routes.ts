@@ -4,9 +4,11 @@ import {
   boundaryMutationSchema,
   boundaryUpdateSchema,
   codingWorkflowApplyLayerRequestSchema,
+  codingWorkflowControlRequestSchema,
   codingWorkflowPreviewRequestSchema,
   codingWorkflowStartRequestSchema,
   codingAgentRequestSchema,
+  codeProposalApplyRequestSchema,
   createCustomBlockTypeSchema,
   customBlockTypeUpdateSchema,
   edgeMutationSchema,
@@ -14,6 +16,7 @@ import {
   githubDevicePollRequestSchema,
   githubDeviceStartRequestSchema,
   graphNodeKindSchema,
+  indexStateSchema,
   layoutPatchSchema,
   nodeReuseMutationSchema,
   nodeMutationSchema,
@@ -38,6 +41,17 @@ const projectRunParamsSchema = projectParamsSchema.extend({
 
 const projectWorkflowParamsSchema = projectParamsSchema.extend({
   workflowId: z.string().min(1)
+});
+
+const projectWorkUnitParamsSchema = projectWorkflowParamsSchema.extend({
+  workUnitId: z.string().min(1)
+});
+
+const workUnitContextPreviewBodySchema = z.object({
+  task: z.string().min(1),
+  provider: z.enum(["generic", "openai", "anthropic", "google"]).optional().default("generic"),
+  purpose: z.enum(["coding", "review"]).optional().default("coding"),
+  includeLegacyShadow: z.boolean().optional().default(false)
 });
 
 const nodeParamsSchema = z.object({
@@ -85,7 +99,35 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
     service: "graphcode-local-server"
   }));
 
+  app.post("/api/system/pick-folder", async () => runtime.pickWorkspaceFolder());
+
+  app.get("/api/codex/status", async () => runtime.getCodexStatus());
+
+  app.get("/api/codex/models", async () => runtime.listCodexModels());
+
+  app.post("/api/codex/install", async () => runtime.installCodexCli());
+
+  app.post("/api/codex/auth/start", async () => runtime.startCodexAuth());
+
+  app.get("/api/claude/status", async () => runtime.getClaudeStatus());
+
+  app.get("/api/claude/models", async () => runtime.listClaudeModels());
+
+  app.post("/api/claude/install", async () => runtime.installClaudeCli());
+
+  app.post("/api/claude/auth/start", async () => runtime.startClaudeAuth());
+
   app.get("/api/projects", async () => runtime.repo().listProjects());
+
+  app.get("/api/v2/projects/:projectId/index-state", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return indexStateSchema.parse(runtime.getIndexState(projectId));
+  });
+
+  app.delete("/api/v2/projects/:projectId/index-runs/current", async (request) => {
+    const { projectId } = projectParamsSchema.parse(request.params);
+    return indexStateSchema.parse(runtime.cancelIndex(projectId));
+  });
 
   app.post("/api/workspaces/open", async (request, reply) => {
     const body = openWorkspaceSchema.parse(request.body);
@@ -181,14 +223,30 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
     return runtime.getCodingWorkflow(projectId, workflowId);
   });
 
+  app.post("/api/projects/:projectId/coding-workflows/:workflowId/work-units/:workUnitId/context-preview", async (request) => {
+    const { projectId, workflowId, workUnitId } = projectWorkUnitParamsSchema.parse(request.params);
+    const body = workUnitContextPreviewBodySchema.parse(request.body);
+    return runtime.previewCodingWorkUnitContext({ projectId, workflowId, workUnitId, ...body });
+  });
+
   app.post("/api/coding-workflows/apply-layer", async (request) => {
     const body = codingWorkflowApplyLayerRequestSchema.parse(request.body);
     return runtime.applyCodingWorkflowLayer(body);
   });
 
+  app.post("/api/coding-workflows/control", async (request) => {
+    const body = codingWorkflowControlRequestSchema.parse(request.body);
+    return runtime.controlCodingWorkflow(body);
+  });
+
   app.post("/api/agents/review", async (request) => {
     const body = reviewAgentRequestSchema.parse(request.body);
     return runtime.runReview(body);
+  });
+
+  app.post("/api/code-proposals/apply", async (request) => {
+    const body = codeProposalApplyRequestSchema.parse(request.body);
+    return runtime.applyCodeProposal(body);
   });
 
   app.post("/api/agents/scanning", async (request) => {

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { WorkspaceRuntime } from "./workspace";
+import { detectFolderPickerEnvironment, WorkspaceRuntime } from "./workspace";
 
 type SourceReader = {
   readSourceFile(projectId: string, relativePath: string): Promise<string>;
@@ -29,5 +29,18 @@ describe("WorkspaceRuntime source containment", () => {
     await expect(runtime.readSourceFile(project.id, "linked-secrets/token.txt")).rejects.toThrow(/outside workspace/);
 
     runtime.db.close();
+  });
+});
+
+describe("folder picker environment detection", () => {
+  it("keeps WSL separate from native Windows", () => {
+    expect(detectFolderPickerEnvironment("linux", { WSL_DISTRO_NAME: "Ubuntu" }, "Linux version")).toBe("wsl");
+    expect(detectFolderPickerEnvironment("linux", {}, "Linux version microsoft-standard-WSL2")).toBe("wsl");
+    expect(detectFolderPickerEnvironment("win32", { WSL_DISTRO_NAME: "Ubuntu" }, "")).toBe("windows");
+  });
+
+  it("uses native pickers only on supported host platforms", () => {
+    expect(detectFolderPickerEnvironment("darwin", {}, "")).toBe("macos");
+    expect(detectFolderPickerEnvironment("linux", {}, "Linux version 6.8.0")).toBe("unsupported");
   });
 });

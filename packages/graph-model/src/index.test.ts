@@ -35,6 +35,8 @@ import {
   hierarchyBoundaryLabelSchema,
   isAttachmentNodeKind,
   isDomainNodeKind,
+  indexCompletenessSchema,
+  indexStateSchema,
   nodeReuseMutationSchema,
   processKindSchema,
   tagAssignmentSchema,
@@ -635,5 +637,29 @@ describe("graph model enums", () => {
       }).userCode
     ).toBe("ABCD-EFGH");
     expect(githubDevicePollRequestSchema.parse({ deviceCode: "device", clientId: "client" }).deviceCode).toBe("device");
+  });
+
+  it("requires index coverage counts to reconcile and keeps partial state explicit", () => {
+    const completeness = indexCompletenessSchema.parse({
+      status: "partial",
+      discoveredFiles: 2001,
+      indexedFiles: 2000,
+      reasons: ["Configured file limit 2000 reached."]
+    });
+    expect(completeness.status).toBe("partial");
+
+    expect(() =>
+      indexStateSchema.parse({
+        projectId: "project",
+        providerId: "current-parser",
+        indexRevision: null,
+        workspaceRevision: null,
+        generatedAt: new Date().toISOString(),
+        completeness: { status: "complete" },
+        counts: { discovered: 2, supported: 1, indexed: 1, unsupported: 0, excluded: 0, failed: 0 },
+        progress: { phase: "complete", completed: 1, total: 1, message: "Complete", updatedAt: new Date().toISOString() },
+        telemetry: { discoveryMs: 1, parseMs: 1, linkMs: 1, persistMs: 0, peakRssBytes: 1 }
+      })
+    ).toThrow(/reconcile/);
   });
 });

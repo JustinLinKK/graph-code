@@ -6,6 +6,7 @@ import { openDatabase } from "./db/connection";
 import { GraphRepository } from "./db/repository";
 import { migrate } from "./db/schema";
 import { buildServer } from "./server";
+import { resolveAgentFeatureFlags } from "./config";
 
 let app: Awaited<ReturnType<typeof buildServer>>;
 const selfRootPath = path.join(os.tmpdir(), "graphcode-self-routes");
@@ -44,7 +45,14 @@ beforeEach(async () => {
   app = await buildServer({
     dbPath: path.join(os.tmpdir(), `graphcode-routes-${crypto.randomUUID()}.sqlite`),
     seedSelf: true,
-    selfRootPath
+    selfRootPath,
+    agentFeatureFlags: {
+      graphPartitionedWorkflows: false,
+      workUnitContext: false,
+      modelRouterV2: false,
+      edgeContracts: false,
+      integrationGate: false
+    }
   });
 });
 
@@ -71,6 +79,21 @@ describe("graph API routes", () => {
     expect(flat).not.toContain("\"kind\":\"input\"");
     expect(flat).not.toContain("\"kind\":\"output\"");
     expect(flat).not.toContain("\"kind\":\"process\"");
+  });
+
+  it("exposes complete index coverage and progress through the v2 index-state route", async () => {
+    const response = await app.inject({ method: "GET", url: "/api/v2/projects/graphcode-self/index-state" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual(
+      expect.objectContaining({
+        projectId: "graphcode-self",
+        providerId: "current-parser",
+        completeness: { status: "complete" },
+        counts: expect.objectContaining({ discovered: 1, supported: 1, indexed: 1, excluded: 0, failed: 0 }),
+        progress: expect.objectContaining({ phase: "complete", completed: 1, total: 1 })
+      })
+    );
   });
 
   it("returns canvas scope data plus attachments", async () => {
@@ -233,7 +256,8 @@ describe("graph API routes", () => {
           {
             agentKind: "planning",
             provider: "codex",
-            model: command,
+            model: "gpt-5.4",
+            cliCommand: command,
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Plan with Codex." }
@@ -262,7 +286,8 @@ describe("graph API routes", () => {
           {
             agentKind: "planning",
             provider: "codex",
-            model: command,
+            model: "gpt-5.4",
+            cliCommand: command,
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Plan with Codex." }
@@ -441,6 +466,7 @@ describe("graph API routes", () => {
       });
       expect(previewResponse.statusCode).toBe(200);
       expect(previewResponse.json().status).toBe("preview");
+      expect(previewResponse.json()).not.toHaveProperty("orchestration");
       expect(previewResponse.json().items.some((item: { nodeId: string }) => item.nodeId === "function-app")).toBe(true);
 
       const startResponse = await app.inject({
@@ -474,6 +500,351 @@ describe("graph API routes", () => {
       });
       expect(applyResponse.statusCode).toBe(200);
       expect(applyResponse.json().items.some((item: { nodeId: string; status: string }) => item.nodeId === "function-app" && item.status === "applied")).toBe(true);
+    });
+
+    it("exposes MA-2 partition preview metadata only when the graph-partition feature flag is enabled", async () => {
+      const flaggedApp = await buildServer({
+        dbPath: path.join(os.tmpdir(), `graphcode-routes-ma1-${crypto.randomUUID()}.sqlite`),
+        seedSelf: true,
+        selfRootPath,
+        agentFeatureFlags: {
+          graphPartitionedWorkflows: true,
+          workUnitContext: false,
+          modelRouterV2: false,
+          edgeContracts: false,
+          integrationGate: false
+        }
+      });
+      try {
+        const demoteResponse = await flaggedApp.inject({
+          method: "PATCH",
+          url: "/api/nodes/function-app",
+          payload: { summary: "MA-2 feature-flagged workflow preview." }
+        });
+        expect(demoteResponse.statusCode).toBe(200);
+
+        const previewResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/preview",
+          payload: { projectId: "graphcode-self", scopeNodeId: "module-web" }
+        });
+        expect(previewResponse.statusCode).toBe(200);
+        const preview = previewResponse.json();
+        expect(preview.orchestration).toEqual(
+          expect.objectContaining({
+            schemaVersion: 1,
+            featureVersion: "ma2-partition-v1",
+            workflowId: preview.id,
+            projectId: "graphcode-self",
+            workUnits: expect.any(Array),
+            routingDecisions: expect.any(Array)
+          })
+        );
+        expect(preview.orchestration.workUnits).toHaveLength(preview.items.length);
+        expect(preview.orchestration.partitioning).toEqual(
+          expect.objectContaining({
+            policyVersion: "deterministic-v1",
+            targetNodeIds: expect.any(Array),
+            edgeClassifications: expect.any(Array),
+            ignoredEdges: expect.any(Array)
+          })
+        );
+        expect(
+          preview.orchestration.partitioning.targetNodeIds.every(
+            (nodeId: string) => preview.orchestration.workUnits.filter((unit: { ownedNodeIds: string[] }) => unit.ownedNodeIds.includes(nodeId)).length === 1
+          )
+        ).toBe(true);
+        expect(preview.orchestration.workUnits.every((unit: { baseRevision: { indexRevision: string | null } }) => unit.baseRevision.indexRevision)).toBe(true);
+
+        const storedResponse = await flaggedApp.inject({
+          method: "GET",
+          url: `/api/projects/graphcode-self/coding-workflows/${preview.id}`
+        });
+        expect(storedResponse.statusCode).toBe(200);
+        expect(storedResponse.json().orchestration).toEqual(preview.orchestration);
+
+        const startResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/start",
+          payload: {
+            projectId: "graphcode-self",
+            scopeNodeId: "module-web",
+            modeOverrides: [{ nodeId: "function-app", mode: "small" }]
+          }
+        });
+        expect(startResponse.statusCode).toBe(200);
+        const started = startResponse.json();
+        expect(started.orchestration.workUnits).toHaveLength(started.items.length);
+        expect(
+          started.orchestration.workUnits.every((unit: { id: string; status: string }) =>
+            started.items.some((item: { id: string; status: string }) => item.id === unit.id && item.status === unit.status)
+          )
+        ).toBe(true);
+      } finally {
+        await flaggedApp.close();
+      }
+    });
+
+    it("resolves the complete graph-partitioned stack as the default workflow preview", async () => {
+      const defaultApp = await buildServer({
+        dbPath: path.join(os.tmpdir(), `graphcode-routes-ma7-default-${crypto.randomUUID()}.sqlite`),
+        seedSelf: true,
+        selfRootPath,
+        agentFeatureFlags: resolveAgentFeatureFlags({})
+      });
+      try {
+        const demoteResponse = await defaultApp.inject({
+          method: "PATCH",
+          url: "/api/nodes/function-app",
+          payload: { summary: "MA-7 default-on workflow execution evidence." }
+        });
+        expect(demoteResponse.statusCode).toBe(200);
+
+        const response = await defaultApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/preview",
+          payload: { projectId: "graphcode-self", scopeNodeId: "module-web" }
+        });
+        expect(response.statusCode).toBe(200);
+        expect(response.json().orchestration).toEqual(
+          expect.objectContaining({
+            featureVersion: "ma2-partition-v1",
+            workUnits: expect.any(Array),
+            interfaceContracts: expect.any(Array),
+            routingDecisions: expect.arrayContaining([
+              expect.objectContaining({
+                featureVersion: "ma4-deterministic-router-v1",
+                assignment: expect.objectContaining({ providerId: "fake" })
+              })
+            ])
+          })
+        );
+
+        const startResponse = await defaultApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/start",
+          payload: { projectId: "graphcode-self", scopeNodeId: "module-web" }
+        });
+        expect(startResponse.statusCode).toBe(200);
+        const started = startResponse.json();
+        expect(started.orchestration.workUnits).toHaveLength(started.items.length);
+        expect(
+          started.orchestration.routingDecisions.every(
+            (decision: { featureVersion: string; assignment?: unknown; metrics?: unknown }) =>
+              decision.featureVersion === "ma4-deterministic-router-v1" && Boolean(decision.assignment) && Boolean(decision.metrics)
+          )
+        ).toBe(true);
+      } finally {
+        await defaultApp.close();
+      }
+    });
+
+    it("round-trips MA-6 preview controls and exposes per-unit workflow control", async () => {
+      const flaggedApp = await buildServer({
+        dbPath: path.join(os.tmpdir(), `graphcode-routes-ma6-${crypto.randomUUID()}.sqlite`),
+        seedSelf: true,
+        selfRootPath,
+        agentFeatureFlags: {
+          graphPartitionedWorkflows: true,
+          workUnitContext: false,
+          modelRouterV2: false,
+          edgeContracts: false,
+          integrationGate: false
+        }
+      });
+      try {
+        for (const nodeId of ["function-app", "function-app-shell"]) {
+          const response = await flaggedApp.inject({
+            method: "PATCH",
+            url: `/api/nodes/${nodeId}`,
+            payload: { summary: `MA-6 controlled preview for ${nodeId}.` }
+          });
+          expect(response.statusCode).toBe(200);
+        }
+
+        const previewResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/preview",
+          payload: {
+            projectId: "graphcode-self",
+            scopeNodeId: "module-web",
+            partitionConstraints: {
+              keepTogetherNodeGroups: [["function-app", "function-app-shell"]],
+              separateNodePairs: [],
+              approvedIgnoredEdges: []
+            },
+            executionPolicy: { maximumConcurrency: 2, maxEstimatedCost: 1.5, currency: "USD" }
+          }
+        });
+        expect(previewResponse.statusCode).toBe(200);
+        const preview = previewResponse.json();
+        expect(preview.orchestration).toMatchObject({
+          partitionConstraints: { keepTogetherNodeGroups: [["function-app", "function-app-shell"]] },
+          executionPolicy: { maximumConcurrency: 2, maxEstimatedCost: 1.5, currency: "USD" }
+        });
+        expect(
+          preview.orchestration.workUnits.some(
+            (unit: { ownedNodeIds: string[] }) => unit.ownedNodeIds.includes("function-app") && unit.ownedNodeIds.includes("function-app-shell")
+          )
+        ).toBe(true);
+
+        const itemId = preview.items[0].id;
+        const controlResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/control",
+          payload: { projectId: "graphcode-self", workflowId: preview.id, action: "skip", itemId }
+        });
+        expect(controlResponse.statusCode).toBe(200);
+        expect(controlResponse.json().items.find((item: { id: string }) => item.id === itemId).status).toBe("skipped");
+
+        const cancelResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/control",
+          payload: { projectId: "graphcode-self", workflowId: preview.id, action: "cancel" }
+        });
+        expect(cancelResponse.statusCode).toBe(200);
+        expect(cancelResponse.json().status).toBe("cancelled");
+        expect(cancelResponse.json().items.find((item: { id: string }) => item.id === itemId).status).toBe("skipped");
+        expect(cancelResponse.json().items.filter((item: { id: string }) => item.id !== itemId).every((item: { status: string }) => item.status === "cancelled")).toBe(true);
+      } finally {
+        await flaggedApp.close();
+      }
+    });
+
+    it("previews bounded MA-3 work-unit context and optional legacy shadow metrics behind both rollout flags", async () => {
+      const flaggedApp = await buildServer({
+        dbPath: path.join(os.tmpdir(), `graphcode-routes-ma3-${crypto.randomUUID()}.sqlite`),
+        seedSelf: true,
+        selfRootPath,
+        agentFeatureFlags: {
+          graphPartitionedWorkflows: true,
+          workUnitContext: true,
+          modelRouterV2: false,
+          edgeContracts: false,
+          integrationGate: false
+        }
+      });
+      try {
+        const demoteResponse = await flaggedApp.inject({
+          method: "PATCH",
+          url: "/api/nodes/function-app",
+          payload: { summary: "MA-3 isolated context preview." }
+        });
+        expect(demoteResponse.statusCode).toBe(200);
+        const previewResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/preview",
+          payload: { projectId: "graphcode-self", scopeNodeId: "module-web" }
+        });
+        expect(previewResponse.statusCode).toBe(200);
+        const preview = previewResponse.json();
+        const workUnit = preview.orchestration.workUnits.find((unit: { ownedNodeIds: string[] }) => unit.ownedNodeIds.includes("function-app"));
+        expect(workUnit).toBeTruthy();
+
+        const contextResponse = await flaggedApp.inject({
+          method: "POST",
+          url: `/api/projects/graphcode-self/coding-workflows/${preview.id}/work-units/${workUnit.id}/context-preview`,
+          payload: {
+            task: "Update the scoped function without loading the complete project graph.",
+            provider: "openai",
+            purpose: "coding",
+            includeLegacyShadow: true
+          }
+        });
+        expect(contextResponse.statusCode).toBe(200);
+        const result = contextResponse.json();
+        expect(result.context).toEqual(
+          expect.objectContaining({
+            compilerVersion: "ma3-context-v1",
+            workflowId: preview.id,
+            workUnit: expect.objectContaining({ id: workUnit.id }),
+            nodes: expect.any(Array),
+            edges: expect.any(Array),
+            sources: expect.any(Array),
+            omissions: expect.any(Array)
+          })
+        );
+        expect(result.context.nodes.every((node: { role: string; selectionReason: string }) => node.role && node.selectionReason)).toBe(true);
+        expect(result.context.edges.every((edge: { role: string; selectionReason: string }) => edge.role && edge.selectionReason)).toBe(true);
+        expect(result.rendered).toEqual(expect.objectContaining({ provider: "openai", purpose: "coding" }));
+        expect(result.rendered.estimatedInputTokens).toBeLessThanOrEqual(result.context.budget.maxInputTokens);
+        expect(result.shadowComparison).toEqual(expect.objectContaining({ workUnitId: workUnit.id, fullProjectReadUsed: false }));
+      } finally {
+        await flaggedApp.close();
+      }
+    });
+
+    it("routes and schedules bounded MA-4 work units while preserving an explicit mode override", async () => {
+      const flaggedApp = await buildServer({
+        dbPath: path.join(os.tmpdir(), `graphcode-routes-ma4-${crypto.randomUUID()}.sqlite`),
+        seedSelf: true,
+        selfRootPath,
+        agentFeatureFlags: {
+          graphPartitionedWorkflows: true,
+          workUnitContext: true,
+          modelRouterV2: true,
+          edgeContracts: false,
+          integrationGate: false
+        }
+      });
+      try {
+        const demoteResponse = await flaggedApp.inject({
+          method: "PATCH",
+          url: "/api/nodes/function-app",
+          payload: { summary: "MA-4 routed and dynamically scheduled work unit." }
+        });
+        expect(demoteResponse.statusCode).toBe(200);
+
+        const previewResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/preview",
+          payload: { projectId: "graphcode-self", scopeNodeId: "module-web" }
+        });
+        expect(previewResponse.statusCode).toBe(200);
+        const preview = previewResponse.json();
+        expect(preview.orchestration.routingDecisions.every((decision: { featureVersion: string; assignment?: unknown }) =>
+          decision.featureVersion === "ma4-deterministic-router-v1" && Boolean(decision.assignment)
+        )).toBe(true);
+        const targetUnit = preview.orchestration.workUnits.find((unit: { ownedNodeIds: string[] }) => unit.ownedNodeIds.includes("function-app"));
+        const targetDecision = preview.orchestration.routingDecisions.find((decision: { workUnitId: string }) => decision.workUnitId === targetUnit.id);
+        const overrideMode = targetDecision.recommendedScale === "small" ? "medium" : "small";
+
+        const startResponse = await flaggedApp.inject({
+          method: "POST",
+          url: "/api/coding-workflows/start",
+          payload: {
+            projectId: "graphcode-self",
+            scopeNodeId: "module-web",
+            modeOverrides: [{ nodeId: "function-app", mode: overrideMode }]
+          }
+        });
+        expect(startResponse.statusCode).toBe(200);
+        const started = startResponse.json();
+        const startedUnit = started.orchestration.workUnits.find((unit: { ownedNodeIds: string[] }) => unit.ownedNodeIds.includes("function-app"));
+        const startedDecision = started.orchestration.routingDecisions.find((decision: { workUnitId: string }) => decision.workUnitId === startedUnit.id);
+        expect(startedDecision).toEqual(
+          expect.objectContaining({
+            selectedScale: overrideMode,
+            assignment: expect.objectContaining({ providerId: "fake" }),
+            override: expect.objectContaining({ actor: "user" }),
+            metrics: expect.objectContaining({ retryCount: expect.any(Number), escalationCount: expect.any(Number) })
+          })
+        );
+        expect(started.items.find((item: { id: string }) => item.id === startedUnit.id).selectedMode).toBe(overrideMode);
+
+        const storedResponse = await flaggedApp.inject({
+          method: "GET",
+          url: `/api/projects/graphcode-self/coding-workflows/${started.id}`
+        });
+        expect(storedResponse.statusCode).toBe(200);
+        const storedDecision = storedResponse.json().orchestration.routingDecisions.find(
+          (decision: { workUnitId: string }) => decision.workUnitId === startedUnit.id
+        );
+        expect(storedDecision.override).toEqual(startedDecision.override);
+        expect(storedDecision.assignment).toEqual(startedDecision.assignment);
+      } finally {
+        await flaggedApp.close();
+      }
     });
 
     it("updates tags and reusable placements through the API", async () => {
@@ -651,6 +1022,28 @@ describe("graph API routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/dev/seed-self" });
     expect(response.statusCode).toBe(200);
     expect(response.json().id).toBe("graphcode-self");
+  });
+
+  it("reports a manual fallback when the native folder picker is disabled", async () => {
+    const previous = process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER;
+    process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER = "1";
+    try {
+      const response = await app.inject({ method: "POST", url: "/api/system/pick-folder" });
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual(
+        expect.objectContaining({
+          supported: false,
+          selected: false,
+          path: null
+        })
+      );
+    } finally {
+      if (previous === undefined) {
+        delete process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER;
+      } else {
+        process.env.GRAPHCODE_DISABLE_NATIVE_FOLDER_PICKER = previous;
+      }
+    }
   });
 
   it("opens a workspace only after .graphcode exists or first-run scanning context is accepted", async () => {

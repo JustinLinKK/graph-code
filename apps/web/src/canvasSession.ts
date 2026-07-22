@@ -11,6 +11,7 @@ type CanvasSessionProject = {
 
 type CanvasSessionState = {
   lastProjectId: string | null;
+  lastOpenedProjectId: string | null;
   projects: Record<string, CanvasSessionProject>;
 };
 
@@ -18,7 +19,7 @@ const STORAGE_KEY = "graphcode.canvasSession.v1";
 const NULL_SCOPE_KEY = "__project__";
 
 export function getStoredCanvasProjectId(): string | null {
-  return readSession().lastProjectId;
+  return readSession().lastOpenedProjectId;
 }
 
 export function getStoredCanvasScope(projectId: string): string | null | undefined {
@@ -30,6 +31,7 @@ export function rememberCanvasScope(projectId: string, scopeNodeId: string | nul
   const project = ensureProjectSession(session, projectId);
   project.lastScopeNodeId = scopeNodeId;
   session.lastProjectId = projectId;
+  session.lastOpenedProjectId = projectId;
   writeSession(session);
 }
 
@@ -43,6 +45,7 @@ export function rememberCanvasViewport(projectId: string, scopeNodeId: string | 
   project.viewports[scopeKey(scopeNodeId)] = viewport;
   project.lastScopeNodeId = scopeNodeId;
   session.lastProjectId = projectId;
+  session.lastOpenedProjectId = projectId;
   writeSession(session);
 }
 
@@ -103,12 +106,13 @@ function parseSession(value: unknown): CanvasSessionState {
   }
   return {
     lastProjectId: typeof input.lastProjectId === "string" ? input.lastProjectId : null,
+    lastOpenedProjectId: typeof input.lastOpenedProjectId === "string" ? input.lastOpenedProjectId : null,
     projects
   };
 }
 
 function emptySession(): CanvasSessionState {
-  return { lastProjectId: null, projects: {} };
+  return { lastProjectId: null, lastOpenedProjectId: null, projects: {} };
 }
 
 function isViewport(value: unknown): value is CanvasViewport {
