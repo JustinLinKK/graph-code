@@ -172,7 +172,7 @@ const CODING_AGENT_SETTINGS_SQL = `
   CREATE TABLE coding_agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     coding_mode TEXT NOT NULL CHECK (coding_mode IN ('small', 'medium', 'large')),
-    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
@@ -189,7 +189,7 @@ const REVIEW_AGENT_SETTINGS_SQL = `
   CREATE TABLE review_agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     review_mode TEXT NOT NULL CHECK (review_mode IN ('small', 'medium', 'large')),
-    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
@@ -206,7 +206,7 @@ const SCANNING_AGENT_SETTINGS_SQL = `
   CREATE TABLE scanning_agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     scanning_mode TEXT NOT NULL CHECK (scanning_mode IN ('local', 'medium', 'global')),
-    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
@@ -223,7 +223,7 @@ const AGENT_SETTINGS_SQL = `
   CREATE TABLE agent_settings (
     project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
     agent_kind TEXT NOT NULL CHECK (agent_kind IN ('planning', 'coding', 'review', 'scanning')),
-    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter')),
+    provider TEXT NOT NULL DEFAULT 'fake' CHECK (provider IN ('fake', 'codex', 'claudecode', 'openai', 'gemini', 'openrouter', 'deepseek')),
     model TEXT NOT NULL DEFAULT '',
     parallel_limit INTEGER NOT NULL DEFAULT 4,
     api_key_source_type TEXT NOT NULL DEFAULT 'env' CHECK (api_key_source_type IN ('manual', 'file', 'env')),
