@@ -27,6 +27,8 @@ export function providerLabel(provider: AgentProvider): string {
       return "Gemini";
     case "openrouter":
       return "OpenRouter";
+    case "deepseek":
+      return "DeepSeek";
     case "fake":
       return "Fake";
     default:

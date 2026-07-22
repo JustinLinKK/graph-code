@@ -225,7 +225,7 @@ const scanDetailSchema = z.object({
   formatKind: formatKindSchema.optional(),
   spec: z.string().optional(),
   notes: z.string().optional(),
-  extensionDetails: extensionNodeDetailsMutationSchema.optional()
+  extensionDetails: extensionNodeDetailsMutationSchema.nullable().optional()
 });
 
 export const scanNodeDraftSchema = z.object({
@@ -787,13 +787,19 @@ async function runLocalScan(
         `Mode: local`,
         `File: ${file.path}`,
         `Content hash: ${file.contentHash}`,
-        "Return only JSON matching this shape: {filePath, contentHash, summary, nodes:[{stableKey, kind, name, summary, codeContext, source:{path,startLine,endLine}, language, parentStableKey, attachedToStableKey, detail:{..., extensionDetails:{packageId,schemaId,payload}}}], edges:[{stableKey, kind, sourceStableKey, targetStableKey, label, codeContext, source:{path,startLine,endLine}}]}.",
-        "Every source range must be exact and use 1-based inclusive line numbers from this file.",
+        `Valid node kinds: framework, module, website, ui_component, function, object, dependency, input, output, process, format, environment, config, secret, command, file, database, api, event, artifact, custom.`,
+        `Valid edge kinds: calls, imports, uses, owns, impacts, flows, describes_format.`,
+        `For "input"/"output" nodes use detail.ioKind: api, file, user, queue, env, artifact, log, database, service.`,
+        `For "process" nodes use detail.processKind: transform, validate, route, persist, render, orchestrate, analyze, condition.`,
+        `For "format" nodes use detail.formatKind: type, schema, mime, protocol, artifact, event.`,
+        `For "dependency" nodes use dependencyKind: package, runtime, service, env, file, cli, database, external_system, tool.`,
+        "Return only strict JSON (double-quoted property names) matching this shape: {filePath, contentHash, summary, nodes:[{stableKey, kind, name, summary, codeContext, source:{path,startLine,endLine}, language, parentStableKey, attachedToStableKey, detail:{ioKind, channel, schemaHint, processKind, trigger, formatKind, spec, notes}}], edges:[{stableKey, kind, sourceStableKey, targetStableKey, label, codeContext, source:{path,startLine,endLine}}]}.",
+        "Omit optional fields instead of setting them to null. Every source range must be exact and use 1-based inclusive line numbers from this file.",
         numberedSource(source)
       ].join("\n\n")
     }
   ]);
-  return scanLocalOutputSchema.parse(parseJsonResponse(response));
+  return scanLocalOutputSchema.parse(normalizeScanJson(parseJsonResponse(response)));
 }
 
 async function runMediumScan(
@@ -820,11 +826,13 @@ async function runMediumScan(
         `Scope path: ${scopePath}`,
         `Files in scope:\n${inventory.filter((file) => fileInScope(file.path, scopePath)).map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
         `Changed local outputs:\n${JSON.stringify(localOutputs.filter((output) => fileInScope(output.filePath, scopePath)).map(compactLocalOutput), null, 2)}`,
-        "Return only JSON matching this shape: {scopePath, summary, nodes, edges}. Medium nodes should describe directory/package/module grouping and exported surfaces."
+        `Valid node kinds: framework, module, website, ui_component, function, object.`,
+        `Valid edge kinds: calls, imports, uses, owns, impacts, flows, describes_format.`,
+        "Return only JSON matching this shape: {scopePath, summary, nodes, edges}. Medium nodes should describe directory/package/module grouping and exported surfaces. Omit optional fields instead of setting them to null."
       ].join("\n\n")
     }
   ]);
-  return scanMediumOutputSchema.parse(parseJsonResponse(response));
+  return scanMediumOutputSchema.parse(normalizeScanJson(parseJsonResponse(response)));
 }
 
 async function runGlobalScan(
@@ -853,11 +861,13 @@ async function runGlobalScan(
         `Compact unchanged graph summaries:\n${JSON.stringify(unchangedGraphSummary, null, 2)}`,
         `Changed local summaries:\n${JSON.stringify(localOutputs.map(compactLocalOutput), null, 2)}`,
         `Medium outputs:\n${JSON.stringify(mediumOutputs, null, 2)}`,
-        "Return only JSON matching this shape: {summary, nodes, edges}. Global nodes should include the repository root and high-level subsystem modules; edges should wire functions, files, modules, and directories with exact source evidence where available."
+        `Valid node kinds: framework, module, website, ui_component, function, object.`,
+        `Valid edge kinds: calls, imports, uses, owns, impacts, flows, describes_format.`,
+        "Return only JSON matching this shape: {summary, nodes, edges}. Global nodes should include the repository root and high-level subsystem modules; edges should wire functions, files, modules, and directories with exact source evidence where available. Omit optional fields instead of setting them to null."
       ].join("\n\n")
     }
   ]);
-  return scanGlobalOutputSchema.parse(parseJsonResponse(response));
+  return scanGlobalOutputSchema.parse(normalizeScanJson(parseJsonResponse(response)));
 }
 
 function fakeMediumOutput(scopePath: string): ScanMediumOutput {
@@ -960,6 +970,58 @@ function compactLocalOutput(output: ScanLocalOutput): object {
   };
 }
 
+function ensureStableKey(obj: Record<string, unknown>, prefix: string, index: number): void {
+  if (!obj.stableKey || typeof obj.stableKey !== "string" || !obj.stableKey.trim()) {
+    const name = typeof obj.name === "string" && obj.name.trim() ? obj.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") : `item-${index}`;
+    obj.stableKey = `${prefix}-${name}-${index}`;
+  }
+}
+
+function sanitizeNulls(obj: Record<string, unknown>): void {
+  for (const key of Object.keys(obj)) {
+    const value = obj[key];
+    if (value === null) {
+      if (key === "source") {
+        obj[key] = { path: null, startLine: null, endLine: null };
+      } else if (key === "detail" || key === "extensionDetails") {
+        delete obj[key];
+      }
+    } else if (key === "source" && value && typeof value === "object") {
+      const src = value as Record<string, unknown>;
+      if (src.path === undefined) src.path = null;
+      if (src.startLine === undefined) src.startLine = null;
+      if (src.endLine === undefined) src.endLine = null;
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        if (item && typeof item === "object") sanitizeNulls(item as Record<string, unknown>);
+      }
+    } else if (value && typeof value === "object") {
+      sanitizeNulls(value as Record<string, unknown>);
+    }
+  }
+}
+
+function normalizeScanJson(raw: unknown): Record<string, unknown> {
+  const data = raw as Record<string, unknown>;
+  if (Array.isArray(data.nodes)) {
+    data.nodes = data.nodes.map((node: Record<string, unknown>, index: number) => {
+      ensureStableKey(node, "node", index);
+      sanitizeNulls(node);
+      return node;
+    });
+  }
+  if (Array.isArray(data.edges)) {
+    data.edges = data.edges.map((edge: Record<string, unknown>, index: number) => {
+      ensureStableKey(edge, "edge", index);
+      if (!edge.sourceStableKey && edge.sourceNodeId) edge.sourceStableKey = edge.sourceNodeId;
+      if (!edge.targetStableKey && edge.targetNodeId) edge.targetStableKey = edge.targetNodeId;
+      sanitizeNulls(edge);
+      return edge;
+    });
+  }
+  return data;
+}
+
 function numberedSource(source: string): string {
   return source
     .split(/\r?\n/)
@@ -967,19 +1029,27 @@ function numberedSource(source: string): string {
     .join("\n");
 }
 
+function repairJson(text: string): string {
+  return text.replace(/([{,]\s*)([a-zA-Z_]\w*)(\s*:)/g, '$1"$2"$3');
+}
+
 function parseJsonResponse(response: string): unknown {
   const trimmed = response.trim();
+  const tryParse = (text: string): unknown => {
+    try { return JSON.parse(text); } catch { return null; }
+  };
   if (trimmed.startsWith("{")) {
-    return JSON.parse(trimmed);
+    return tryParse(trimmed) ?? JSON.parse(repairJson(trimmed));
   }
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced) {
-    return JSON.parse(fenced[1]);
+    return tryParse(fenced[1]) ?? JSON.parse(repairJson(fenced[1]));
   }
   const start = trimmed.indexOf("{");
   const end = trimmed.lastIndexOf("}");
   if (start >= 0 && end > start) {
-    return JSON.parse(trimmed.slice(start, end + 1));
+    const extracted = trimmed.slice(start, end + 1);
+    return tryParse(extracted) ?? JSON.parse(repairJson(extracted));
   }
   throw new Error("Scanning agent did not return JSON.");
 }
@@ -1382,16 +1452,30 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
   if (config.provider === "codex") {
     return { invoke: (messages) => invokeCodexCli(config, messages, workspaceRoot) };
   }
+  if (config.provider === "deepseek") {
+    const apiKey = resolveApiKey(config);
+    const model = new ChatOpenAI({
+      model: config.model || "deepseek-chat",
+      apiKey,
+      temperature: 0,
+      modelKwargs: { max_tokens: 8192 },
+      configuration: {
+        baseURL: process.env.DEEPSEEK_BASE_URL || "https://api.deepseek.com"
+      }
+    });
+    return { invoke: (messages) => invokeChatModel(model, messages) };
+  }
   if (config.provider === "openai" || config.provider === "openrouter") {
     const apiKey = resolveApiKey(config);
+    const openaiBaseURL = process.env.OPENAI_BASE_URL || undefined;
     const model = new ChatOpenAI({
       model: config.model,
       apiKey,
       temperature: 0,
-      ...(config.provider === "openrouter"
+      ...(config.provider === "openrouter" || openaiBaseURL
         ? {
             configuration: {
-              baseURL: "https://openrouter.ai/api/v1"
+              baseURL: openaiBaseURL || "https://openrouter.ai/api/v1"
             }
           }
         : {})

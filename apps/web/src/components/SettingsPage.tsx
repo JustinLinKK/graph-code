@@ -41,7 +41,7 @@ type SettingsPageProps = {
 };
 
 const agentKinds: AgentKind[] = ["planning"];
-const providers: AgentProvider[] = ["fake", "codex", "claudecode", "openai", "gemini", "openrouter"];
+const providers: AgentProvider[] = ["fake", "codex", "claudecode", "openai", "openrouter", "gemini", "deepseek"];
 
 type AgentSecretDraft = { type: AgentConfig["apiKeySource"]["type"]; value: string };
 type AgentPromptDraft = { type: AgentConfig["systemPromptSource"]["type"]; value: string };
