@@ -37,6 +37,8 @@ import {
   isDomainNodeKind,
   indexCompletenessSchema,
   indexStateSchema,
+  layoutPatchSchema,
+  memoryUpdateSchema,
   nodeReuseMutationSchema,
   processKindSchema,
   tagAssignmentSchema,
@@ -73,6 +75,7 @@ describe("graph model enums", () => {
       "@graphcode/extension-ml-pipeline"
     ]);
     expect(extensionNodeDefinitionForKind("ml_optimizer")?.fields.some((field) => field.key === "optimizerType")).toBe(true);
+    expect(extensionNodeDefinitionForKind("ml_model")?.allowTopLevel).toBe(true);
     expect(
       extensionNodeDetailsMutationSchema.parse({
         packageId: "@graphcode/extension-embedded-systems",
@@ -548,10 +551,13 @@ describe("graph model enums", () => {
     const initialization = workspaceInitializationSchema.parse({
       projectName: "  Compiler Explorer  ",
       projectDescription: "Maps the frontend, API, and execution backends.",
-      scanningInstructions: "Group by user-visible workflow first, then by package ownership."
+      scanningInstructions: "Group by user-visible workflow first, then by package ownership.",
+      topModulePaths: ["configs/student.yaml", "configs/teacher.yaml"],
+      enabledExtensionPackageIds: ["@graphcode/extension-ml-pipeline"]
     });
 
     expect(initialization.projectName).toBe("Compiler Explorer");
+    expect(initialization.topModulePaths).toEqual(["configs/student.yaml", "configs/teacher.yaml"]);
     expect(() =>
       workspaceInitializationSchema.parse({
         projectName: "",
@@ -599,6 +605,37 @@ describe("graph model enums", () => {
         scanningInstructions: "Show architecture boundaries."
       }).projectDescription
     ).toContain("source");
+  });
+
+  it("validates durable memory updates and workspace-scoped layouts", () => {
+    expect(
+      memoryUpdateSchema.parse({
+        action: "upsert",
+        type: "semantic",
+        slug: "teacher-pooling",
+        title: "Teacher pooling",
+        summary: "Attention pooling wins configuration precedence.",
+        content: "The constructor selects AttentionGraphPool when attention_pool is true.",
+        sourcePaths: ["src/model.py"]
+      }).confidence
+    ).toBe("medium");
+    expect(() =>
+      memoryUpdateSchema.parse({
+        action: "upsert",
+        type: "semantic",
+        slug: "../escape",
+        title: "Invalid",
+        summary: "Invalid slug.",
+        content: ""
+      })
+    ).toThrow();
+    expect(
+      layoutPatchSchema.parse({
+        scopeNodeId: null,
+        position: { x: 1, y: 2 },
+        size: { width: 100, height: 80 }
+      }).scopeNodeId
+    ).toBeNull();
   });
 
   it("accepts graph patches and status updates", () => {

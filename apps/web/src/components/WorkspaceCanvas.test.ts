@@ -193,6 +193,7 @@ const project: Project = {
   rootPath: "/tmp/project",
   description: "",
   scanningInstructions: "",
+  topModulePaths: [],
   createdAt: "now",
   updatedAt: "now"
 };
@@ -251,6 +252,7 @@ function canvas(edges: GraphEdge[]): CanvasGraph {
     project,
     rootNodeId: "source",
     scopeNodeId: "source",
+    topModuleIds: ["source"],
     scopeLabel: "Source",
     nodes: [
       node({ id: "source", kind: "process", name: "Source" }),

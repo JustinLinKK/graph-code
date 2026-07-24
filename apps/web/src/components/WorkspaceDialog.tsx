@@ -1,5 +1,10 @@
 import { Button } from "@heroui/react";
-import type { BlankWorkspaceInitialization, WorkspaceInitialization } from "@graphcode/graph-model";
+import {
+  AVAILABLE_EXTENSION_PACKAGES,
+  type BlankWorkspaceInitialization,
+  type ExtensionPackageId,
+  type WorkspaceInitialization
+} from "@graphcode/graph-model";
 import { FolderOpen, Plus, X } from "lucide-react";
 import { FormEvent, useEffect, useState } from "react";
 
@@ -36,6 +41,8 @@ export function WorkspaceDialog({
   const [projectName, setProjectName] = useState("");
   const [projectDescription, setProjectDescription] = useState("");
   const [scanningInstructions, setScanningInstructions] = useState("");
+  const [topModulePaths, setTopModulePaths] = useState("");
+  const [enabledExtensionPackageIds, setEnabledExtensionPackageIds] = useState<ExtensionPackageId[]>([]);
   const [skipCodexDefaultSystemPrompt, setSkipCodexDefaultSystemPrompt] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -44,6 +51,8 @@ export function WorkspaceDialog({
       setRootPath(missingPath);
       setProjectName(folderName(missingPath));
       setSkipCodexDefaultSystemPrompt(false);
+      setTopModulePaths("");
+      setEnabledExtensionPackageIds([]);
       setFormError(null);
     }
   }, [missingPath]);
@@ -67,6 +76,8 @@ export function WorkspaceDialog({
       projectName: projectName.trim(),
       projectDescription: projectDescription.trim(),
       scanningInstructions: scanningInstructions.trim(),
+      topModulePaths: parseTopModulePaths(topModulePaths),
+      enabledExtensionPackageIds,
       skipCodexDefaultSystemPrompt: showCodexScanPromptOption ? skipCodexDefaultSystemPrompt : false
     };
     if (!initialization.projectName || !initialization.projectDescription || !initialization.scanningInstructions) {
@@ -81,7 +92,9 @@ export function WorkspaceDialog({
     const trimmedRootPath = rootPath.trim();
     const initialization = {
       projectName: projectName.trim(),
-      projectDescription: projectDescription.trim()
+      projectDescription: projectDescription.trim(),
+      topModulePaths: parseTopModulePaths(topModulePaths),
+      enabledExtensionPackageIds
     };
     if (!trimmedRootPath) {
       return;
@@ -166,6 +179,35 @@ export function WorkspaceDialog({
               <span>Scanning instructions</span>
               <textarea rows={7} value={scanningInstructions} placeholder="Desired graph grouping, naming, relationships, and areas to emphasize." onChange={(event) => setScanningInstructions(event.target.value)} />
             </label>
+            <label className="form-field">
+              <span>Top modules</span>
+              <textarea
+                rows={3}
+                value={topModulePaths}
+                placeholder={"One repository-relative path per line\nsrc/models/student.yaml\nsrc/models/teacher.yaml"}
+                onChange={(event) => setTopModulePaths(event.target.value)}
+              />
+              <small>Leave empty for legacy automatic root selection.</small>
+            </label>
+            <div className="form-field">
+              <span>Extensions enabled before scanning</span>
+              {AVAILABLE_EXTENSION_PACKAGES.map((extensionPackage) => (
+                <label className="inline-control" key={extensionPackage.id}>
+                  <input
+                    type="checkbox"
+                    checked={enabledExtensionPackageIds.includes(extensionPackage.id)}
+                    onChange={(event) =>
+                      setEnabledExtensionPackageIds((current) =>
+                        event.target.checked
+                          ? [...current, extensionPackage.id]
+                          : current.filter((packageId) => packageId !== extensionPackage.id)
+                      )
+                    }
+                  />
+                  <span>{extensionPackage.name}</span>
+                </label>
+              ))}
+            </div>
             {showCodexScanPromptOption ? (
               <label className="inline-control">
                 <input type="checkbox" checked={skipCodexDefaultSystemPrompt} onChange={(event) => setSkipCodexDefaultSystemPrompt(event.target.checked)} />
@@ -204,4 +246,8 @@ export function WorkspaceDialog({
 function folderName(value: string): string {
   const normalized = value.replace(/[\\/]+$/, "");
   return normalized.split(/[\\/]/).filter(Boolean).at(-1) ?? "Untitled Workspace";
+}
+
+function parseTopModulePaths(value: string): string[] {
+  return [...new Set(value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean))];
 }

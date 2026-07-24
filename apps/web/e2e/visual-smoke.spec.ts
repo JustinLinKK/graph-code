@@ -104,7 +104,9 @@ test("current workspace remains stable across primary user-visible states", asyn
   await attachScreenshot(page, testInfo, "draw-boundary-mode");
   await page.getByRole("button", { name: "Cancel", exact: true }).click();
 
-  await page.locator(".react-flow__edge-interaction").first().click({ force: true });
+  await page.locator(".react-flow__edge-interaction").first().evaluate((edge) => {
+    edge.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  });
   await page.locator(".inspector-edit").click();
   await expect(page.getByRole("heading", { name: "Edit Edge" })).toBeVisible();
   await expectDialogCloseAligned(page, "Close edge editor");

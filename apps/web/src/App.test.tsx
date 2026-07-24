@@ -209,6 +209,7 @@ const project: Project = {
   rootPath: "/home/justin/graph-code",
   description: "GraphCode self workspace.",
   scanningInstructions: "Group by package and runtime boundary.",
+  topModulePaths: [],
   createdAt: "now",
   updatedAt: "now"
 };
@@ -382,6 +383,7 @@ const frameworkCanvas: CanvasGraph = {
   project,
   rootNodeId: "framework",
   scopeNodeId: "framework",
+  topModuleIds: ["framework"],
   scopeLabel: "GraphCode Workspace",
   nodes: [moduleWeb],
   edges: [],
@@ -401,6 +403,7 @@ const moduleCanvasGraph: CanvasGraph = {
   project,
   rootNodeId: "module-web",
   scopeNodeId: "module-web",
+  topModuleIds: ["framework"],
   scopeLabel: "Web Workspace",
   nodes: [inputSelection, processWeb, moduleCanvas, functionRenderWidget, outputWorkspace, formatSelection],
   edges: [
@@ -487,6 +490,7 @@ const functionCanvasGraph: CanvasGraph = {
   project,
   rootNodeId: "function-render-widget",
   scopeNodeId: "function-render-widget",
+  topModuleIds: ["framework"],
   scopeLabel: "renderWidget",
   nodes: [functionRenderWidget, functionInput, functionProcess, functionOutput, functionFormat],
   edges: [
@@ -1518,6 +1522,10 @@ describe("GraphCode app shell", () => {
     fireEvent.change(screen.getByLabelText("Scanning instructions"), {
       target: { value: "Group by runtime boundary and emphasize request/data flow." }
     });
+    fireEvent.change(screen.getByLabelText(/Top modules/), {
+      target: { value: "configs/student.yaml\nconfigs/teacher.yaml" }
+    });
+    fireEvent.click(screen.getByLabelText("ML Pipeline"));
     fireEvent.click(screen.getByText("Create and scan"));
 
     await waitFor(() => {
@@ -1532,6 +1540,8 @@ describe("GraphCode app shell", () => {
               projectName: "new-graphcode-project",
               projectDescription: "A local project with a CLI, API server, and web UI.",
               scanningInstructions: "Group by runtime boundary and emphasize request/data flow.",
+              topModulePaths: ["configs/student.yaml", "configs/teacher.yaml"],
+              enabledExtensionPackageIds: ["@graphcode/extension-ml-pipeline"],
               skipCodexDefaultSystemPrompt: false
             },
             creationMode: "scan"
@@ -1566,7 +1576,9 @@ describe("GraphCode app shell", () => {
             createIfMissing: true,
             initialization: {
               projectName: "empty-graphcode-project",
-              projectDescription: ""
+              projectDescription: "",
+              topModulePaths: [],
+              enabledExtensionPackageIds: []
             },
             creationMode: "blank"
           })

@@ -91,11 +91,13 @@ function canvas(nodes: GraphNode[] = [node], edges: GraphEdge[] = []): CanvasGra
       rootPath: "/tmp/project",
       description: "",
       scanningInstructions: "",
+      topModulePaths: [],
       createdAt: "now",
       updatedAt: "now"
     },
     rootNodeId: nodes[0]?.id ?? null,
     scopeNodeId: nodes[0]?.id ?? null,
+    topModuleIds: nodes[0] ? [nodes[0].id] : [],
     scopeLabel: nodes[0]?.name ?? "Project",
     nodes,
     edges,
@@ -552,6 +554,31 @@ describe("GraphCode agent runtime", () => {
     expect(scanResult.mediumOutputs.map((output) => output.scopePath).sort()).toEqual([".", "src"]);
     expect(scanResult.globalOutput.nodes).toHaveLength(1);
     expect(tools.setStatuses).not.toHaveBeenCalled();
+  });
+
+  it("reads complete configured top modules plus bounded nearby model implementation evidence", async () => {
+    const topModulePath = "src/perfseer/configs/student.yaml";
+    const modelPath = "src/perfseer/model.py";
+    const readSourceFile = vi.fn(async (sourcePath: string) =>
+      sourcePath === modelPath ? Array.from({ length: 1_500 }, (_, index) => `line_${index + 1}`).join("\n") : "model:\n  name: student\n"
+    );
+    const tools = toolbox({
+      listScannableFiles: vi.fn(async () => [
+        { path: topModulePath, contentHash: "yaml-hash", size: 24, language: "yaml" },
+        { path: modelPath, contentHash: "model-hash", size: 24_000, language: "python" },
+        { path: "other/model.py", contentHash: "other-model-hash", size: 12, language: "python" }
+      ]),
+      readSourceFile
+    });
+
+    await runScanningAgent(
+      { projectId: "project", topModulePaths: [topModulePath] },
+      { config: { ...baseConfig, agentKind: "scanning" }, runId: "run-model-evidence", toolbox: tools }
+    );
+
+    expect(readSourceFile).toHaveBeenCalledWith(topModulePath);
+    expect(readSourceFile).toHaveBeenCalledWith(modelPath);
+    expect(readSourceFile).toHaveBeenCalledWith("other/model.py");
   });
 
   it("rescans only changed files while consolidating affected medium and global passes", async () => {

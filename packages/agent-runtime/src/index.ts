@@ -28,6 +28,8 @@ import {
   type GraphStatusPatch,
   type IndexState,
   type InterfaceContract,
+  type MemoryContext,
+  type MemoryUpdate,
   type NodeDetail,
   type WorkUnitProposal,
   workUnitProposalSchema,
@@ -46,6 +48,7 @@ import {
   formatKindSchema,
   codeProposalArtifactManifestSchema,
   sourceRangeSchema,
+  memoryUpdateSchema,
   SCANNING_AGENT_MODES,
   graphPatchSchema,
   isAttachmentNodeKind,
@@ -107,6 +110,8 @@ export type GraphCodeToolbox = {
   ) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
   readGitDiff?: (projectId: string) => Promise<string>;
+  readMemory?: (projectId: string, query: { agentKind: AgentKind; prompt: string; scopePaths: string[] }) => Promise<MemoryContext>;
+  applyMemoryUpdates?: (projectId: string, runId: string | null, agentKind: AgentKind, updates: MemoryUpdate[]) => Promise<void>;
   refreshCodeGraph: (
     projectId: string,
     rootPath?: string
@@ -160,6 +165,7 @@ export type AgentResult = {
   diff?: string;
   graphPatch?: GraphPatch | null;
   touched?: GraphStatusPatch[];
+  memoryUpdates?: MemoryUpdate[];
 };
 
 export type IntegrationAgentContext = {
@@ -269,8 +275,10 @@ export const scanMediumOutputSchema = z.object({
 
 export const scanGlobalOutputSchema = z.object({
   summary: z.string().default(""),
+  topModuleStableKeys: z.array(z.string().min(1)).default([]),
   nodes: z.array(scanNodeDraftSchema).default([]),
-  edges: z.array(scanEdgeDraftSchema).default([])
+  edges: z.array(scanEdgeDraftSchema).default([]),
+  memoryUpdates: z.array(memoryUpdateSchema).default([])
 });
 
 export const scanPipelineResultSchema = z.object({
@@ -292,7 +300,8 @@ export type ScanPipelineResult = z.infer<typeof scanPipelineResultSchema>;
 
 const planningAgentOutputSchema = z.object({
   response: z.string().default(""),
-  graphPatch: graphPatchSchema
+  graphPatch: graphPatchSchema,
+  memoryUpdates: z.array(memoryUpdateSchema).default([])
 });
 
 const AgentState = Annotation.Root({
@@ -309,10 +318,11 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
     prompt: input.prompt,
     execute: async () => {
       const provider = createProvider(options.config, options.workspaceRoot);
-      const [fallbackGraph, scopedCanvas, indexState] = await Promise.all([
+      const [fallbackGraph, scopedCanvas, indexState, memory] = await Promise.all([
         input.scopeNodeId ? Promise.resolve(null) : options.toolbox.readGraph(input.projectId),
         input.scopeNodeId ? options.toolbox.getCanvasGraph(input.projectId, input.scopeNodeId, true).catch(() => null) : Promise.resolve(null),
-        options.toolbox.getIndexState(input.projectId)
+        options.toolbox.getIndexState(input.projectId),
+        readAgentMemory(options, input.projectId, "planning", input.prompt, [])
       ]);
       const graph = scopedCanvas
         ? { nodes: scopedCanvas.nodes, edges: scopedCanvas.edges }
@@ -324,7 +334,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
           role: "system",
           content: resolveSystemPrompt(
             options.config,
-            "Plan safe GraphCode graph patches from user intent. Return only strict JSON with {response, graphPatch:{summary, operations}}."
+            "Plan safe GraphCode graph patches from user intent. Return only strict JSON with {response, graphPatch:{summary, operations}, memoryUpdates:[]}."
           )
         },
         {
@@ -332,6 +342,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
           content: [
             `Prompt: ${input.prompt}`,
             coverageNotice,
+            formatMemoryContext(memory),
             scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
             `Writable node ids:\n${graph.nodes.slice(0, 120).map((node) => `${node.id}: ${node.name} (${node.kind})`).join("\n")}`,
             `Writable edge ids:\n${graph.edges.slice(0, 160).map((edge) => `${edge.id}: ${edge.sourceNodeId}->${edge.targetNodeId} (${edge.kind})`).join("\n")}`,
@@ -343,7 +354,8 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
     "operations": [
       { "entityType": "node", "entityId": "existing-node-id", "action": "update", "fields": { "summary": "planned summary" } }
     ]
-  }
+  },
+  "memoryUpdates": []
 }`,
             "Emit at least one graphPatch operation when a scoped or root node can represent the plan. Prefer updating existing node summaries or codeContext over creating speculative new nodes.",
             `Topology-scoped planning evidence:\nNodes:\n${graph.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}\nEdges:\n${graph.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
@@ -352,6 +364,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
       ]);
       const output = parsePlanningAgentOutput(response, input.prompt, graph, scope);
       const patch = output.graphPatch;
+      await applyAgentMemory(options, input.projectId, "planning", output.memoryUpdates);
       if (input.scopeNodeId) {
         await options.toolbox.setStatuses(input.projectId, [
           {
@@ -366,6 +379,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
       return {
         response: output.response,
         graphPatch: patch,
+        memoryUpdates: output.memoryUpdates,
         touched: input.scopeNodeId
           ? [
               {
@@ -402,6 +416,7 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
         const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
         const gitStatus = await options.toolbox.readGitStatus(input.projectId);
         const execution = await options.toolbox.resolveExecutionMetadata(input.nodeId);
+        const memory = await readAgentMemory(options, input.projectId, "coding", input.prompt ?? detail.node.summary, allowedPath ? [allowedPath] : []);
         const context = buildCodingContextBundle({
           mode,
           detail,
@@ -417,10 +432,17 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
           coverageNotice: formatIndexCoverageForPrompt(indexState)
         });
         const response = await provider.invoke([
-          { role: "system", content: resolveSystemPrompt(options.config, "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest.") },
-          { role: "user", content: context }
+          {
+            role: "system",
+            content: resolveSystemPrompt(
+              options.config,
+              "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates."
+            )
+          },
+          { role: "user", content: `${context}\n\n${formatMemoryContext(memory)}\n\n${memoryUpdateInstructions()}` }
         ]);
-        const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(response);
+        const { content: responseWithoutMemory, updates: memoryUpdates } = extractMemoryUpdates(response);
+        const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMemory);
         const directEditMode = usesCliDirectEditMode(options.config);
         const directDiff = directEditMode ? await (options.toolbox.readGitDiff?.(input.projectId) ?? Promise.resolve("")) : "";
         if (directEditMode && directDiff.trim()) {
@@ -431,17 +453,18 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
           assertDiffInScope(diff, allowedPath);
         }
         await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
-      const touched: GraphStatusPatch[] = [
-        {
-          entityType: "node",
-          entityId: input.nodeId,
-          status: "coded",
-          note: usesCliDirectEditMode(options.config) ? "Coding agent applied or captured direct workspace edits." : "Coding agent produced a patch proposal.",
-          agentRunId: options.runId ?? null
-        }
-      ];
-      await options.toolbox.setStatuses(input.projectId, touched);
-      return { response, diff, touched };
+        await applyAgentMemory(options, input.projectId, "coding", memoryUpdates);
+        const touched: GraphStatusPatch[] = [
+          {
+            entityType: "node",
+            entityId: input.nodeId,
+            status: "coded",
+            note: usesCliDirectEditMode(options.config) ? "Coding agent applied or captured direct workspace edits." : "Coding agent produced a patch proposal.",
+            agentRunId: options.runId ?? null
+          }
+        ];
+        await options.toolbox.setStatuses(input.projectId, touched);
+        return { response: responseWithoutMemory, diff, touched, memoryUpdates };
     }
   });
 }
@@ -475,17 +498,25 @@ export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, optio
         options.config.systemPromptSource.value?.trim()
           ? `\n\nAdditional workspace policy:\n${options.config.systemPromptSource.value.trim()}`
           : "";
+      const memory = await readAgentMemory(
+        options,
+        input.projectId,
+        "coding",
+        context.task,
+        context.allowedWrites.map((scope) => scope.path)
+      );
       const response = await provider.invoke([
         {
           role: "system",
           content: `${rendered.systemPrompt}${customSystemPrompt}\n\nReturn a unified diff. Append GRAPHCODE_WORK_UNIT_METADATA_JSON followed by JSON containing ${
             input.allowContractUpdates === false ? "discoveredDependencies, assumptions, unresolvedIssues, and confidence" : "contractUpdates, discoveredDependencies, assumptions, unresolvedIssues, and confidence"
-          }.`
+          }. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates.`
         },
-        { role: "user", content: rendered.userPrompt }
+        { role: "user", content: `${rendered.userPrompt}\n\n${formatMemoryContext(memory)}\n\n${memoryUpdateInstructions()}` }
       ]);
       throwIfAgentCancelled(options.signal);
-      const { content: responseWithoutMetadata, metadata } = extractWorkUnitProposalMetadata(response);
+      const { content: responseWithoutMemory, updates: memoryUpdates } = extractMemoryUpdates(response);
+      const { content: responseWithoutMetadata, metadata } = extractWorkUnitProposalMetadata(responseWithoutMemory);
       const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMetadata);
       const diff =
         options.config.provider === "fake"
@@ -507,6 +538,7 @@ export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, optio
         confidence: metadata?.confidence ?? "medium"
       });
       await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.targetNodeId, diff, artifactManifest, workUnitProposal);
+      await applyAgentMemory(options, input.projectId, "coding", memoryUpdates);
       const touched = context.workUnit.ownedNodeIds.map((nodeId) => ({
         entityType: "node" as const,
         entityId: nodeId,
@@ -515,7 +547,7 @@ export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, optio
         agentRunId: options.runId ?? null
       }));
       await options.toolbox.setStatuses(input.projectId, touched);
-      return { response, diff, touched };
+      return { response: responseWithoutMemory, diff, touched, memoryUpdates };
     }
   });
 }
@@ -601,6 +633,7 @@ export async function runReviewAgent(
       const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath).catch(() => "") : "";
       const gitStatus = await options.toolbox.readGitStatus(input.projectId);
       const execution = input.targetNodeId ? await options.toolbox.resolveExecutionMetadata(input.targetNodeId) : null;
+      const memory = await readAgentMemory(options, input.projectId, "review", input.runId, allowedPath ? [allowedPath] : []);
       const context = buildReviewContextBundle({
         mode,
         targetRun: input.targetRun ?? null,
@@ -620,13 +653,14 @@ export async function runReviewAgent(
           role: "system",
           content: resolveSystemPrompt(
             options.config,
-            "Review GraphCode coding proposals for bugs, verification gaps, and scope leaks. End with GRAPHCODE_REVIEW_VERDICT: reviewed or GRAPHCODE_REVIEW_VERDICT: bugged."
+            "Review GraphCode coding proposals for bugs, verification gaps, and scope leaks. End with GRAPHCODE_REVIEW_VERDICT: reviewed or GRAPHCODE_REVIEW_VERDICT: bugged. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates."
           )
         },
-        { role: "user", content: context }
+        { role: "user", content: `${context}\n\n${formatMemoryContext(memory)}\n\n${memoryUpdateInstructions()}` }
       ]);
+      const { content: responseWithoutMemory, updates: memoryUpdates } = extractMemoryUpdates(response);
       const forcedBug = diffEscapesScope(diff, allowedPath);
-      const parsedVerdict = parseReviewVerdict(response);
+      const parsedVerdict = parseReviewVerdict(responseWithoutMemory);
       const status: AgentStatus = forcedBug || parsedVerdict !== "reviewed" ? "bugged" : "reviewed";
       const touched = input.targetNodeId
         ? [
@@ -642,7 +676,10 @@ export async function runReviewAgent(
       if (touched.length > 0) {
         await options.toolbox.setStatuses(options.runId ? input.projectId : input.projectId, touched);
       }
-      return { response, touched };
+      if (status === "reviewed") {
+        await applyAgentMemory(options, input.projectId, "review", memoryUpdates);
+      }
+      return { response: responseWithoutMemory, touched, memoryUpdates };
     }
   });
 }
@@ -657,6 +694,17 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
       const inventory = await options.toolbox.listScannableFiles(input.projectId);
       const indexState = await options.toolbox.getIndexState(input.projectId);
       const coverageNotice = formatIndexCoverageForPrompt(indexState);
+      const topModulePaths = input.topModulePaths ?? [];
+      const memory = await readAgentMemory(options, input.projectId, "scanning", input.scanningInstructions ?? input.projectDescription ?? "", topModulePaths);
+      const memoryGuidance = formatMemoryContext(memory);
+      const topModuleSources = await Promise.all(
+        topModulePaths.map(async (sourcePath) => ({
+          path: sourcePath,
+          content: await options.toolbox.readSourceFile(sourcePath)
+        }))
+      );
+      const implementationSources =
+        topModulePaths.length > 0 ? await readModelImplementationEvidence(inventory, topModulePaths, options.toolbox) : [];
       throwIfAgentCancelled(options.signal);
       const previousStates = await options.toolbox.getScanFileStates(input.projectId);
       const previousByPath = new Map(previousStates.map((state) => [state.filePath, state.contentHash]));
@@ -668,14 +716,14 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
       const localOutputs = await boundedMap(
         localTargets,
         scanConfigs.local.parallelLimit,
-        (file) => runLocalScan(input, file, scanConfigs.local, options.toolbox, coverageNotice, options.workspaceRoot),
+        (file) => runLocalScan(input, file, scanConfigs.local, options.toolbox, coverageNotice, memoryGuidance, options.workspaceRoot),
         options.signal
       );
       const mediumScopes = directoriesForScan(initial ? inventory : [...changedFiles, ...deletedFiles.map((file) => ({ path: file.filePath, contentHash: file.contentHash, size: 0, language: "unknown" }))]);
       const mediumOutputs = await boundedMap(
         mediumScopes,
         scanConfigs.medium.parallelLimit,
-        (scopePath) => runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium, coverageNotice, options.workspaceRoot),
+        (scopePath) => runMediumScan(input, scopePath, inventory, localOutputs, scanConfigs.medium, coverageNotice, memoryGuidance, options.workspaceRoot),
         options.signal
       );
       const unchangedGraphSummary = initial
@@ -685,7 +733,19 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
             ...deletedFiles.map((file) => file.filePath)
           ]);
       throwIfAgentCancelled(options.signal);
-      const globalOutput = await runGlobalScan(input, inventory, localOutputs, mediumOutputs, unchangedGraphSummary, scanConfigs.global, coverageNotice, options.workspaceRoot);
+      const globalOutput = await runGlobalScan(
+        input,
+        inventory,
+        localOutputs,
+        mediumOutputs,
+        unchangedGraphSummary,
+        topModuleSources,
+        implementationSources,
+        scanConfigs.global,
+        coverageNotice,
+        memoryGuidance,
+        options.workspaceRoot
+      );
       const pipeline = scanPipelineResultSchema.parse({
         initial,
         inventory,
@@ -696,6 +756,7 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
         globalOutput
       });
       const result = await options.toolbox.applyScanResult(input.projectId, pipeline, options.runId ?? null);
+      await applyAgentMemory(options, input.projectId, "scanning", globalOutput.memoryUpdates);
       const finalIndexState = await options.toolbox.getIndexState(input.projectId);
       return {
         response: [
@@ -706,7 +767,8 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
             ? "Index coverage is complete for the discovered supported files."
             : `Index coverage is ${finalIndexState.completeness.status}; repository-wide coverage must not be claimed.`
         ].join(" "),
-        touched: []
+        touched: [],
+        memoryUpdates: globalOutput.memoryUpdates
       };
     }
   });
@@ -719,6 +781,9 @@ function scanningPrompt(input: ScanningAgentRequest): string {
       input.rootPath ? `Root path: ${input.rootPath}` : `Project: ${input.projectId}`,
       input.projectDescription ? `Project description:\n${input.projectDescription}` : "",
       input.scanningInstructions ? `Scanning instructions:\n${input.scanningInstructions}` : "",
+      (input.topModulePaths ?? []).length > 0
+        ? `Ordered explicit top modules:\n${(input.topModulePaths ?? []).map((sourcePath, index) => `${index + 1}. ${sourcePath}`).join("\n")}`
+        : "No explicit top modules are configured.",
       enabledExtensions.length > 0
         ? [
             "Enabled extension packages:",
@@ -770,6 +835,7 @@ async function runLocalScan(
   config: ScanningAgentConfig,
   toolbox: GraphCodeToolbox,
   coverageNotice: string,
+  memoryGuidance: string,
   workspaceRoot?: string
 ): Promise<ScanLocalOutput> {
   if (config.provider === "fake") {
@@ -784,6 +850,7 @@ async function runLocalScan(
       content: [
         scanningPrompt(input),
         coverageNotice,
+        memoryGuidance,
         `Mode: local`,
         `File: ${file.path}`,
         `Content hash: ${file.contentHash}`,
@@ -803,6 +870,7 @@ async function runMediumScan(
   localOutputs: ScanLocalOutput[],
   config: ScanningAgentConfig,
   coverageNotice: string,
+  memoryGuidance: string,
   workspaceRoot?: string
 ): Promise<ScanMediumOutput> {
   if (config.provider === "fake") {
@@ -816,6 +884,7 @@ async function runMediumScan(
       content: [
         scanningPrompt(input),
         coverageNotice,
+        memoryGuidance,
         `Mode: medium`,
         `Scope path: ${scopePath}`,
         `Files in scope:\n${inventory.filter((file) => fileInScope(file.path, scopePath)).map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
@@ -833,8 +902,11 @@ async function runGlobalScan(
   localOutputs: ScanLocalOutput[],
   mediumOutputs: ScanMediumOutput[],
   unchangedGraphSummary: { nodes: object[]; edges: object[] },
+  topModuleSources: Array<{ path: string; content: string }>,
+  implementationSources: Array<{ path: string; content: string; truncated: boolean }>,
   config: ScanningAgentConfig,
   coverageNotice: string,
+  memoryGuidance: string,
   workspaceRoot?: string
 ): Promise<ScanGlobalOutput> {
   if (config.provider === "fake") {
@@ -848,12 +920,24 @@ async function runGlobalScan(
       content: [
         scanningPrompt(input),
         coverageNotice,
+        memoryGuidance,
         `Mode: global`,
         `Repository inventory:\n${inventory.map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
         `Compact unchanged graph summaries:\n${JSON.stringify(unchangedGraphSummary, null, 2)}`,
         `Changed local summaries:\n${JSON.stringify(localOutputs.map(compactLocalOutput), null, 2)}`,
         `Medium outputs:\n${JSON.stringify(mediumOutputs, null, 2)}`,
-        "Return only JSON matching this shape: {summary, nodes, edges}. Global nodes should include the repository root and high-level subsystem modules; edges should wire functions, files, modules, and directories with exact source evidence where available."
+        topModuleSources.length > 0
+          ? `Complete explicit top-module sources:\n${topModuleSources.map((source) => `FILE ${source.path}\n${numberedSource(source.content)}`).join("\n\n")}`
+          : "",
+        implementationSources.length > 0
+          ? `Bounded model implementation evidence:\n${implementationSources
+              .map(
+                (source) =>
+                  `FILE ${source.path}${source.truncated ? " (truncated to the bounded evidence limit)" : ""}\n${numberedSource(source.content)}`
+              )
+              .join("\n\n")}`
+          : "",
+        "Return only JSON matching this shape: {summary, topModuleStableKeys, nodes, edges, memoryUpdates}. Return one ordered topModuleStableKeys entry for each configured top-module path. Each configured top module must be a distinct parentless ml_model node sourced from the corresponding file. Do not invent a repository wrapper around explicit top modules. Resolve configuration through make_model_config/make_model into concrete implementations such as SeerNetMulti, SeerTrunk, and SeerBlock, and distinguish configured instances from shared class definitions. Decompose ML models layer by layer, use flows edges for forward data flow, and give compound layers nested workflows. Preserve exact source evidence. memoryUpdates may contain only durable, source-grounded facts."
       ].join("\n\n")
     }
   ]);
@@ -885,6 +969,7 @@ function fakeMediumOutput(scopePath: string): ScanMediumOutput {
 function fakeGlobalOutput(input: ScanningAgentRequest): ScanGlobalOutput {
   return scanGlobalOutputSchema.parse({
     summary: "Whole-repository scan synthesis.",
+    topModuleStableKeys: ["root"],
     nodes: [
       {
         stableKey: "root",
@@ -896,7 +981,8 @@ function fakeGlobalOutput(input: ScanningAgentRequest): ScanGlobalOutput {
         language: "unknown"
       }
     ],
-    edges: []
+    edges: [],
+    memoryUpdates: []
   });
 }
 
@@ -955,8 +1041,26 @@ function compactLocalOutput(output: ScanLocalOutput): object {
     filePath: output.filePath,
     contentHash: output.contentHash,
     summary: output.summary,
-    nodes: output.nodes.map((node) => ({ stableKey: node.stableKey, kind: node.kind, name: node.name, source: node.source })),
-    edges: output.edges.map((edge) => ({ stableKey: edge.stableKey, kind: edge.kind, sourceStableKey: edge.sourceStableKey, targetStableKey: edge.targetStableKey, source: edge.source }))
+    nodes: output.nodes.map((node) => ({
+      stableKey: node.stableKey,
+      kind: node.kind,
+      name: node.name,
+      summary: node.summary,
+      codeContext: node.codeContext,
+      parentStableKey: node.parentStableKey,
+      attachedToStableKey: node.attachedToStableKey,
+      detail: node.detail,
+      source: node.source
+    })),
+    edges: output.edges.map((edge) => ({
+      stableKey: edge.stableKey,
+      kind: edge.kind,
+      sourceStableKey: edge.sourceStableKey,
+      targetStableKey: edge.targetStableKey,
+      label: edge.label,
+      codeContext: edge.codeContext,
+      source: edge.source
+    }))
   };
 }
 
@@ -965,6 +1069,132 @@ function numberedSource(source: string): string {
     .split(/\r?\n/)
     .map((line, index) => `${String(index + 1).padStart(5, " ")} | ${line}`)
     .join("\n");
+}
+
+async function readModelImplementationEvidence(
+  inventory: ScannableFile[],
+  topModulePaths: string[],
+  toolbox: GraphCodeToolbox
+): Promise<Array<{ path: string; content: string; truncated: boolean }>> {
+  const candidates = inventory
+    .filter((file) => file.path === "model.py" || file.path.endsWith("/model.py"))
+    .sort(
+      (left, right) =>
+        modelPathRelevance(right.path, topModulePaths) - modelPathRelevance(left.path, topModulePaths) ||
+        left.path.localeCompare(right.path)
+    )
+    .slice(0, 3);
+  return Promise.all(
+    candidates.map(async (file) => {
+      const source = await toolbox.readSourceFile(file.path);
+      const lines = source.split(/\r?\n/);
+      const boundedLines: string[] = [];
+      let characters = 0;
+      for (const line of lines) {
+        if (boundedLines.length >= 1_200 || characters + line.length + 1 > 120_000) {
+          break;
+        }
+        boundedLines.push(line);
+        characters += line.length + 1;
+      }
+      return {
+        path: file.path,
+        content: boundedLines.join("\n"),
+        truncated: boundedLines.length < lines.length
+      };
+    })
+  );
+}
+
+function modelPathRelevance(modelPath: string, topModulePaths: string[]): number {
+  const modelSegments = modelPath.split("/");
+  return Math.max(
+    0,
+    ...topModulePaths.map((topModulePath) => {
+      const topSegments = topModulePath.replaceAll("\\", "/").split("/");
+      let shared = 0;
+      while (shared < modelSegments.length && shared < topSegments.length && modelSegments[shared] === topSegments[shared]) {
+        shared += 1;
+      }
+      return shared;
+    })
+  );
+}
+
+async function readAgentMemory(
+  options: AgentRuntimeOptions,
+  projectId: string,
+  agentKind: AgentKind,
+  prompt: string,
+  scopePaths: string[]
+): Promise<MemoryContext> {
+  if (!options.toolbox.readMemory) {
+    return { summary: "", entries: [] };
+  }
+  return options.toolbox.readMemory(projectId, { agentKind, prompt, scopePaths });
+}
+
+async function applyAgentMemory(
+  options: AgentRuntimeOptions,
+  projectId: string,
+  agentKind: AgentKind,
+  updates: MemoryUpdate[]
+): Promise<void> {
+  if (updates.length === 0 || !options.toolbox.applyMemoryUpdates) {
+    return;
+  }
+  await options.toolbox.applyMemoryUpdates(projectId, options.runId ?? null, agentKind, updates);
+}
+
+function formatMemoryContext(memory: MemoryContext): string {
+  if (!memory.summary.trim() && memory.entries.length === 0) {
+    return "Durable workspace memory: no relevant active entries.";
+  }
+  return [
+    "Durable workspace memory (guidance only; current source and graph evidence are authoritative):",
+    memory.summary.trim(),
+    ...memory.entries.map((entry) =>
+      [
+        `MEMORY ${entry.id} [${entry.type}; confidence=${entry.confidence}] ${entry.title}`,
+        entry.summary,
+        entry.content
+      ]
+        .filter(Boolean)
+        .join("\n")
+    )
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+function memoryUpdateInstructions(): string {
+  return [
+    "Only propose durable memory when it will prevent future rescans or repeat mistakes.",
+    "Use GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array.",
+    'Each item must match {"action":"upsert|supersede","type":"semantic|procedural|episodic","slug":"kebab-case","title":"...","summary":"...","content":"distilled facts only","tags":[],"scopePaths":[],"sourcePaths":[],"confidence":"low|medium|high","supersedes":null}.',
+    "Never include raw prompts, hidden reasoning, secrets, or transcript dumps."
+  ].join(" ");
+}
+
+function extractMemoryUpdates(response: string): { content: string; updates: MemoryUpdate[] } {
+  const marker = "GRAPHCODE_MEMORY_UPDATES_JSON";
+  const lines = response.split(/\r?\n/);
+  let markerLineIndex = -1;
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    if (lines[index]?.trim() === marker) {
+      markerLineIndex = index;
+      break;
+    }
+  }
+  if (markerLineIndex < 0) {
+    return { content: response, updates: [] };
+  }
+  const raw = lines.slice(markerLineIndex + 1).join("\n").trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  const updates = z.array(memoryUpdateSchema).max(32).parse(JSON.parse(raw));
+  return {
+    content: lines.slice(0, markerLineIndex).join("\n").trimEnd(),
+    updates
+  };
 }
 
 function parseJsonResponse(response: string): unknown {

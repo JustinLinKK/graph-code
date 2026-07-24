@@ -51,7 +51,8 @@ import {
   type ScanningAgentRequest,
   type SettingsValidationResult,
   type WorkspaceSettings,
-  type WorkspaceSettingsMutation
+  type WorkspaceSettingsMutation,
+  type WorkspaceInitialization
 } from "@graphcode/graph-model";
 import {
   benchmarkLegacyCodingContexts,
@@ -91,6 +92,7 @@ import {
   validateCombinedPatchInTemporaryWorkspace
 } from "./services/integration-runner";
 import { createWorkflowScheduler, WorkspaceRevisionApplyLock, WorkflowScheduler, WorkflowSchedulerFailure } from "./services/workflow-scheduler";
+import { WorkspaceMemoryStore } from "./memory";
 
 const execFileAsync = promisify(execFile);
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
@@ -158,6 +160,7 @@ export class WorkspaceRuntime {
   private readonly indexControllers = new Map<string, AbortController>();
   private readonly revisionApplyLock = new WorkspaceRevisionApplyLock();
   private readonly workflowSchedulers = new Map<string, WorkflowScheduler>();
+  private readonly memoryStore = new WorkspaceMemoryStore();
 
   constructor(
     private readonly fallbackDbPath: string,
@@ -1166,6 +1169,7 @@ export class WorkspaceRuntime {
           timeoutMs: 60000
         });
         const implemented = this.repository.updateAgentRun(run.id, { implementedAt: new Date().toISOString() });
+        await this.memoryStore.promoteRun(project.rootPath, run.id);
         await Promise.resolve(this.refreshCodeGraph(input.projectId)).catch(() => undefined);
         if (implemented.targetNodeId) {
           try {
@@ -1192,6 +1196,7 @@ export class WorkspaceRuntime {
       ...input,
       projectDescription: input.projectDescription ?? project.description,
       scanningInstructions: input.scanningInstructions ?? project.scanningInstructions,
+      topModulePaths: input.topModulePaths?.length ? input.topModulePaths : project.topModulePaths,
       enabledExtensionPackageIds: settings.extensions.enabledPackageIds
     };
     const prompt = scanningPrompt(enrichedInput);
@@ -1260,6 +1265,7 @@ export class WorkspaceRuntime {
       }
       fs.mkdirSync(graphcodePath, { recursive: true });
     }
+    this.memoryStore.ensureSync(rootPath);
 
     this.switchDatabase(path.join(graphcodePath, "graphcode.sqlite"));
     const existingProject = this.repository.listProjects()[0] ?? null;
@@ -1289,9 +1295,11 @@ export class WorkspaceRuntime {
       name: initialization.projectName,
       rootPath,
       description: initialization.projectDescription,
-      scanningInstructions: initialization.scanningInstructions
+      scanningInstructions: initialization.scanningInstructions,
+      topModulePaths: initialization.topModulePaths
     });
 
+    this.repository.setEnabledExtensionPackages(project.id, initialization.enabledExtensionPackageIds);
     this.writeWorkspaceManifest(graphcodePath, project, rootPath);
     if (creationMode === "scan") {
       void this.runScanning({
@@ -1299,6 +1307,7 @@ export class WorkspaceRuntime {
         rootPath,
         projectDescription: project.description,
         scanningInstructions: project.scanningInstructions,
+        topModulePaths: project.topModulePaths,
         skipCodexDefaultSystemPrompt: initialization.skipCodexDefaultSystemPrompt,
         background: true
       });
@@ -1320,6 +1329,12 @@ export class WorkspaceRuntime {
           projectName: project.name,
           projectDescription: project.description,
           scanningInstructions: project.scanningInstructions,
+          topModulePaths: project.topModulePaths,
+          enabledExtensionPackageIds: this.repository.getWorkspaceSettings(project.id).extensions.enabledPackageIds,
+          memory: {
+            schemaVersion: 1,
+            path: "memory"
+          },
           rootPath,
           graphcodePath,
           updatedAt: new Date().toISOString()
@@ -1787,6 +1802,14 @@ export class WorkspaceRuntime {
       },
       readGitStatus: async (inputProjectId) => this.readGitStatus(inputProjectId),
       readGitDiff: async (inputProjectId) => this.readGitDiff(inputProjectId),
+      readMemory: async (inputProjectId, query) => {
+        const project = this.repository.getProject(inputProjectId);
+        return this.memoryStore.read(project.rootPath, query);
+      },
+      applyMemoryUpdates: async (inputProjectId, runId, agentKind, updates) => {
+        const project = this.repository.getProject(inputProjectId);
+        await this.memoryStore.apply(project.rootPath, { runId, agentKind, updates });
+      },
       refreshCodeGraph: async (inputProjectId, rootPath) => this.refreshCodeGraph(inputProjectId, rootPath)
     };
   }
@@ -2344,7 +2367,14 @@ function workspaceProjectId(rootPath: string): string {
 function normalizeCreationInitialization(
   initialization: OpenWorkspaceRequest["initialization"],
   creationMode: NonNullable<OpenWorkspaceRequest["creationMode"]>
-): { projectName: string; projectDescription: string; scanningInstructions: string; skipCodexDefaultSystemPrompt: boolean } {
+): {
+  projectName: string;
+  projectDescription: string;
+  scanningInstructions: string;
+  topModulePaths: string[];
+  enabledExtensionPackageIds: WorkspaceInitialization["enabledExtensionPackageIds"];
+  skipCodexDefaultSystemPrompt: boolean;
+} {
   if (!initialization?.projectName?.trim()) {
     throw validationError("Project name is required to create a GraphCode workspace.");
   }
@@ -2356,6 +2386,8 @@ function normalizeCreationInitialization(
       projectName: initialization.projectName.trim(),
       projectDescription: initialization.projectDescription.trim(),
       scanningInstructions: initialization.scanningInstructions.trim(),
+      topModulePaths: initialization.topModulePaths ?? [],
+      enabledExtensionPackageIds: initialization.enabledExtensionPackageIds ?? [],
       skipCodexDefaultSystemPrompt: initialization.skipCodexDefaultSystemPrompt ?? false
     };
   }
@@ -2364,6 +2396,8 @@ function normalizeCreationInitialization(
     projectName: initialization.projectName.trim(),
     projectDescription: initialization.projectDescription?.trim() ?? "",
     scanningInstructions: "",
+    topModulePaths: initialization.topModulePaths ?? [],
+    enabledExtensionPackageIds: initialization.enabledExtensionPackageIds ?? [],
     skipCodexDefaultSystemPrompt: false
   };
 }
@@ -2372,7 +2406,8 @@ function scanningPrompt(input: ScanningAgentRequest): string {
   return [
     input.rootPath ? `Root path: ${input.rootPath}` : "",
     input.projectDescription ? `Project description:\n${input.projectDescription}` : "",
-    input.scanningInstructions ? `Scanning instructions:\n${input.scanningInstructions}` : ""
+    input.scanningInstructions ? `Scanning instructions:\n${input.scanningInstructions}` : "",
+    input.topModulePaths?.length ? `Top modules:\n${input.topModulePaths.join("\n")}` : ""
   ]
     .filter(Boolean)
     .join("\n\n");
