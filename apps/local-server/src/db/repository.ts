@@ -129,6 +129,7 @@ type ProjectRow = {
   root_path: string;
   description: string;
   scanning_instructions: string;
+  top_module_paths_json: string;
   created_at: string;
   updated_at: string;
 };
@@ -613,6 +614,17 @@ type ProjectLayoutRow = LayoutRow & {
   scope_node_id: string;
 };
 
+type WorkspaceProjectLayoutRow = LayoutRow & {
+  project_id: string;
+};
+
+type ProjectTopModuleRow = {
+  project_id: string;
+  node_id: string;
+  ordinal: number;
+  source_path: string;
+};
+
 export type NewGraphNode = {
   id: string;
   projectId: string;
@@ -856,6 +868,19 @@ export class GraphRepository {
       return defaultScanningAgentConfig(mode);
     }
     return mapScanningAgentSettings(row);
+  }
+
+  setEnabledExtensionPackages(projectId: string, packageIds: ExtensionPackageId[]): void {
+    this.ensureDefaultSettings(projectId);
+    const enabled = new Set(packageIds);
+    for (const extensionPackage of AVAILABLE_EXTENSION_PACKAGES) {
+      const existing = this.listWorkspaceExtensionRows(projectId).find((row) => row.package_id === extensionPackage.id);
+      this.upsertWorkspaceExtensionSettings(projectId, {
+        packageId: extensionPackage.id,
+        enabled: enabled.has(extensionPackage.id),
+        config: existing ? parseExtensionConfig(existing.config_json) : {}
+      });
+    }
   }
 
   saveWorkspaceSettings(projectId: string, input: WorkspaceSettingsMutation): WorkspaceSettings {
@@ -2928,18 +2953,26 @@ export class GraphRepository {
     return mapNodeReuse(row);
   }
 
-  createProject(input: { id: string; name: string; rootPath: string; description?: string; scanningInstructions?: string }): Project {
+  createProject(input: {
+    id: string;
+    name: string;
+    rootPath: string;
+    description?: string;
+    scanningInstructions?: string;
+    topModulePaths?: string[];
+  }): Project {
     this.db
       .prepare(
         `
-        INSERT INTO projects (id, name, root_path, description, scanning_instructions)
-        VALUES (@id, @name, @rootPath, @description, @scanningInstructions)
+        INSERT INTO projects (id, name, root_path, description, scanning_instructions, top_module_paths_json)
+        VALUES (@id, @name, @rootPath, @description, @scanningInstructions, @topModulePathsJson)
       `
       )
       .run({
         ...input,
         description: input.description ?? "",
-        scanningInstructions: input.scanningInstructions ?? ""
+        scanningInstructions: input.scanningInstructions ?? "",
+        topModulePathsJson: JSON.stringify(input.topModulePaths ?? [])
       });
     return this.getProject(input.id);
   }
@@ -3729,6 +3762,7 @@ export class GraphRepository {
     const project = this.getProject(projectId);
     const save = this.db.transaction(() => {
       const preservedLayouts = this.snapshotProjectLayouts(projectId);
+      const preservedWorkspaceLayouts = this.snapshotWorkspaceLayouts(projectId);
       const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
       this.deleteGeneratedCodeGraph(projectId);
       const frameworkId = this.findOrCreateScanFramework(projectId);
@@ -3834,6 +3868,7 @@ export class GraphRepository {
         });
       }
       this.restoreExistingProjectLayouts(projectId, preservedLayouts);
+      this.restoreExistingWorkspaceLayouts(projectId, preservedWorkspaceLayouts);
 
       this.db
         .prepare("INSERT OR REPLACE INTO graph_revisions (id, project_id, revision, note) VALUES (?, ?, ?, ?)")
@@ -3862,9 +3897,11 @@ export class GraphRepository {
   }
 
   applyScanPipelineResult(projectId: string, result: ScanPipelineResult, runId?: string | null): CodeGraphRefreshResult {
-    this.getProject(projectId);
+    const project = this.getProject(projectId);
+    this.validateScanSourceEvidence(project, result);
     const save = this.db.transaction(() => {
       const preservedLayouts = this.snapshotProjectLayouts(projectId);
+      const preservedWorkspaceLayouts = this.snapshotWorkspaceLayouts(projectId);
       const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
       if (result.initial) {
         this.deleteGeneratedCodeGraph(projectId);
@@ -3902,6 +3939,8 @@ export class GraphRepository {
         throw validationError(`Scanner emitted nodes with unresolved parents: ${pending.map((node) => node.stableKey).join(", ")}`);
       }
 
+      this.persistProjectTopModules(projectId, result.globalOutput.topModuleStableKeys, stableIdByKey);
+
       const edgeDrafts = uniqueScanEdges([
         ...result.globalOutput.edges,
         ...result.mediumOutputs.flatMap((output) => output.edges),
@@ -3924,6 +3963,7 @@ export class GraphRepository {
         stateInsert.run(projectId, file.path, file.contentHash, runId ?? null);
       }
       this.restoreExistingProjectLayouts(projectId, preservedLayouts);
+      this.restoreExistingWorkspaceLayouts(projectId, preservedWorkspaceLayouts);
 
       this.bumpGraphEntities(
         projectId,
@@ -3952,6 +3992,18 @@ export class GraphRepository {
       `
       )
       .all(projectId) as ProjectLayoutRow[];
+  }
+
+  private snapshotWorkspaceLayouts(projectId: string): WorkspaceProjectLayoutRow[] {
+    return this.db
+      .prepare(
+        `
+        SELECT project_id, node_id, ui_x, ui_y, ui_width, ui_height
+        FROM graph_workspace_node_layouts
+        WHERE project_id = ?
+      `
+      )
+      .all(projectId) as WorkspaceProjectLayoutRow[];
   }
 
   private restoreExistingProjectLayouts(projectId: string, layouts: ProjectLayoutRow[]): void {
@@ -3984,6 +4036,39 @@ export class GraphRepository {
       restore.run({
         projectId,
         scopeNodeId: layout.scope_node_id,
+        nodeId: layout.node_id,
+        uiX: layout.ui_x,
+        uiY: layout.ui_y,
+        uiWidth: layout.ui_width,
+        uiHeight: layout.ui_height
+      });
+    }
+  }
+
+  private restoreExistingWorkspaceLayouts(projectId: string, layouts: WorkspaceProjectLayoutRow[]): void {
+    if (layouts.length === 0) {
+      return;
+    }
+    const nodeExists = this.db.prepare("SELECT 1 FROM graph_nodes WHERE project_id = ? AND id = ?");
+    const restore = this.db.prepare(
+      `
+      INSERT INTO graph_workspace_node_layouts (project_id, node_id, ui_x, ui_y, ui_width, ui_height, updated_at)
+      VALUES (@projectId, @nodeId, @uiX, @uiY, @uiWidth, @uiHeight, datetime('now'))
+      ON CONFLICT(project_id, node_id)
+      DO UPDATE SET
+        ui_x = excluded.ui_x,
+        ui_y = excluded.ui_y,
+        ui_width = excluded.ui_width,
+        ui_height = excluded.ui_height,
+        updated_at = datetime('now')
+    `
+    );
+    for (const layout of layouts) {
+      if (layout.project_id !== projectId || !nodeExists.get(projectId, layout.node_id)) {
+        continue;
+      }
+      restore.run({
+        projectId,
         nodeId: layout.node_id,
         uiX: layout.ui_x,
         uiY: layout.ui_y,
@@ -4038,6 +4123,110 @@ export class GraphRepository {
       return stableKey;
     }
     return `code-node-${hashId(stableKey)}`;
+  }
+
+  private persistProjectTopModules(projectId: string, stableKeys: string[], stableIdByKey: Map<string, string>): void {
+    const project = this.getProject(projectId);
+    const configuredPaths = project.topModulePaths.map(normalizeRepositoryPath);
+    if (configuredPaths.length > 0 && stableKeys.length !== configuredPaths.length) {
+      throw validationError(
+        `Scanner must map every configured top module: expected ${configuredPaths.length} keys, received ${stableKeys.length}.`
+      );
+    }
+    if (new Set(stableKeys).size !== stableKeys.length) {
+      throw validationError("Scanner top module keys must be distinct.");
+    }
+
+    const rows: ProjectTopModuleRow[] = stableKeys.map((stableKey, ordinal) => {
+      const nodeId = stableIdByKey.get(stableKey);
+      if (!nodeId) {
+        throw validationError(`Scanner top module key does not resolve to a node: ${stableKey}`);
+      }
+      const node = this.getNode(nodeId);
+      if (!isDomainNodeKind(node.kind) || node.parentId || node.attachedToId) {
+        throw validationError(`Scanner top module must resolve to a parentless domain node: ${stableKey}`);
+      }
+      if (configuredPaths.length > 0 && node.kind !== "ml_model") {
+        throw validationError(`Configured top modules must resolve to parentless ml_model nodes; received ${node.kind} for ${stableKey}.`);
+      }
+      const extensionDefinition = extensionNodeDefinitionForKind(node.kind);
+      if (extensionDefinition && !extensionDefinition.allowTopLevel) {
+        throw validationError(`Scanner node kind cannot be used as a top module: ${node.kind}`);
+      }
+      const configuredPath = configuredPaths[ordinal];
+      const sourcePath = normalizeRepositoryPath(node.source.path ?? "");
+      if (configuredPath && sourcePath !== configuredPath) {
+        throw validationError(
+          `Scanner top module ${stableKey} must be sourced from ${configuredPath}; received ${sourcePath || "no source path"}.`
+        );
+      }
+      return {
+        project_id: projectId,
+        node_id: nodeId,
+        ordinal,
+        source_path: configuredPath || sourcePath
+      };
+    });
+
+    this.db.prepare("DELETE FROM project_top_modules WHERE project_id = ?").run(projectId);
+    const insert = this.db.prepare(
+      "INSERT INTO project_top_modules (project_id, node_id, ordinal, source_path) VALUES (@project_id, @node_id, @ordinal, @source_path)"
+    );
+    for (const row of rows) {
+      insert.run(row);
+    }
+  }
+
+  private validateScanSourceEvidence(project: Project, result: ScanPipelineResult): void {
+    const lineCounts = new Map<string, number>();
+    const sources = [
+      ...result.globalOutput.nodes.map((draft) => ({ stableKey: draft.stableKey, source: draft.source })),
+      ...result.globalOutput.edges.map((draft) => ({ stableKey: draft.stableKey, source: draft.source })),
+      ...result.mediumOutputs.flatMap((output) => [
+        ...output.nodes.map((draft) => ({ stableKey: draft.stableKey, source: draft.source })),
+        ...output.edges.map((draft) => ({ stableKey: draft.stableKey, source: draft.source }))
+      ]),
+      ...result.localOutputs.flatMap((output) => [
+        ...output.nodes.map((draft) => ({ stableKey: draft.stableKey, source: draft.source })),
+        ...output.edges.map((draft) => ({ stableKey: draft.stableKey, source: draft.source }))
+      ])
+    ];
+    for (const { stableKey, source } of sources) {
+      const hasStart = source.startLine !== null;
+      const hasEnd = source.endLine !== null;
+      if (hasStart !== hasEnd) {
+        throw validationError(`Scanner source range must provide both startLine and endLine: ${stableKey}.`);
+      }
+      if (!hasStart || !hasEnd) {
+        continue;
+      }
+      if (!source.path) {
+        throw validationError(`Scanner source range is missing its source path: ${stableKey}.`);
+      }
+      const sourcePath = normalizeRepositoryPath(source.path);
+      const absolutePath = path.resolve(project.rootPath, sourcePath);
+      if (!sourcePath || path.isAbsolute(source.path) || path.win32.isAbsolute(source.path) || !isPathInside(project.rootPath, absolutePath)) {
+        throw validationError(`Scanner source path must stay inside the workspace: ${source.path}.`);
+      }
+      let lineCount = lineCounts.get(sourcePath);
+      if (lineCount === undefined) {
+        try {
+          assertExistingPathInside(project.rootPath, absolutePath, `Scanner source path must stay inside the workspace: ${source.path}.`);
+          if (!fs.statSync(absolutePath).isFile()) {
+            throw new Error("not a file");
+          }
+          lineCount = fs.readFileSync(absolutePath, "utf8").split(/\r?\n/).length;
+          lineCounts.set(sourcePath, lineCount);
+        } catch {
+          throw validationError(`Scanner source file does not exist or cannot be read: ${source.path}.`);
+        }
+      }
+      if (source.startLine! > source.endLine! || source.endLine! > lineCount) {
+        throw validationError(
+          `Scanner source range ${source.path}:${source.startLine}-${source.endLine} is outside the verified 1-${lineCount} line range for ${stableKey}.`
+        );
+      }
+    }
   }
 
   private scanStableEdgeId(edge: ScanEdgeDraft): string {
@@ -4636,14 +4825,20 @@ export class GraphRepository {
     const scopeNode = this.resolveScopeNode(project, allNodes, input.rootNodeId ?? null);
     let canvas = this.buildCanvasGraph(project, allNodes, scopeNode?.id ?? null, input.includeAttachments ?? true, true);
 
-    if (scopeNode && canvas.nodes.length > 0) {
+    if (canvas.nodes.length > 0) {
       const nodeIds = canvas.nodes.map((node) => node.id);
-      const savedLayouts = this.getSavedLayouts(project.id, scopeNode.id, nodeIds);
+      const savedLayouts = scopeNode
+        ? this.getSavedLayouts(project.id, scopeNode.id, nodeIds)
+        : this.getSavedWorkspaceLayouts(project.id, nodeIds);
       if (savedLayouts.size === 0) {
-        canvas = await this.autoLayoutScope({ projectId: project.id, scopeNodeId: scopeNode.id, includeAttachments: input.includeAttachments ?? true });
+        canvas = await this.autoLayoutScope({
+          projectId: project.id,
+          scopeNodeId: scopeNode?.id ?? null,
+          includeAttachments: input.includeAttachments ?? true
+        });
       } else if (savedLayouts.size < nodeIds.length) {
-        this.backfillMissingScopeLayouts(project.id, scopeNode.id, canvas.nodes, savedLayouts);
-        canvas = this.buildCanvasGraph(project, this.listNodes(project.id), scopeNode.id, input.includeAttachments ?? true, true);
+        this.backfillMissingScopeLayouts(project.id, scopeNode?.id ?? null, canvas.nodes, savedLayouts);
+        canvas = this.buildCanvasGraph(project, this.listNodes(project.id), scopeNode?.id ?? null, input.includeAttachments ?? true, true);
       }
     }
 
@@ -4660,7 +4855,7 @@ export class GraphRepository {
     const save = this.db.transaction(() => {
       for (const [nodeId, value] of layout.nodeLayouts.entries()) {
         this.upsertNodeLayout(nodeId, {
-          scopeNodeId: canvas.scopeNodeId ?? nodeId,
+          scopeNodeId: canvas.scopeNodeId,
           position: value.position,
           size: value.size
         });
@@ -5912,11 +6107,25 @@ export class GraphRepository {
 
   private buildCanvasGraph(project: Project, allNodes: GraphNode[], scopeNodeId: string | null, includeAttachments: boolean, applySavedLayout: boolean): CanvasGraph {
     const scopeNode = scopeNodeId ? allNodes.find((node) => node.id === scopeNodeId) ?? null : null;
+    const configuredTopModuleIds = this.listProjectTopModuleIds(project.id);
+    const legacyTopModule =
+      configuredTopModuleIds.length === 0
+        ? allNodes.find((node) => node.kind === "framework" && !node.parentId) ??
+          allNodes.find((node) => isDomainNodeKind(node.kind) && !node.parentId) ??
+          null
+        : null;
+    const topModuleIds = configuredTopModuleIds.length > 0 ? configuredTopModuleIds : legacyTopModule ? [legacyTopModule.id] : [];
     const allEdges = this.listEdges(project.id);
     const includedIds = this.collectCanvasNodeIds(project.id, allNodes, scopeNode, includeAttachments);
     const scopeLabel = scopeNode?.name ?? project.name;
     const scopedNodes = allNodes.filter((node) => includedIds.has(node.id));
-    const nodes = applySavedLayout && scopeNode ? this.applyScopeLayouts(project.id, scopeNode.id, scopedNodes) : scopedNodes;
+    const nodes = applySavedLayout
+      ? scopeNode
+        ? this.applyScopeLayouts(project.id, scopeNode.id, scopedNodes)
+        : topModuleIds.length > 0
+          ? this.applyWorkspaceLayouts(project.id, scopedNodes)
+          : scopedNodes
+      : scopedNodes;
     const edges = allEdges.filter((edge) => includedIds.has(edge.sourceNodeId) && includedIds.has(edge.targetNodeId));
     const nodeIds = nodes.map((node) => node.id);
     const reuses = scopeNode ? this.listReusesForScope(project.id, scopeNode.id).filter((reuse) => includedIds.has(reuse.nodeId)) : [];
@@ -5925,6 +6134,7 @@ export class GraphRepository {
       project,
       rootNodeId: scopeNode?.id ?? null,
       scopeNodeId: scopeNode?.id ?? null,
+      topModuleIds,
       scopeLabel,
       nodes,
       edges,
@@ -5943,7 +6153,12 @@ export class GraphRepository {
 
   private collectCanvasNodeIds(projectId: string, allNodes: GraphNode[], scopeNode: GraphNode | null, includeAttachments: boolean): Set<string> {
     if (!scopeNode) {
-      return new Set(allNodes.filter((node) => isDomainNodeKind(node.kind) && !node.parentId).map((node) => node.id));
+      const topModuleIds = this.listProjectTopModuleIds(projectId);
+      return new Set(
+        topModuleIds.length > 0
+          ? topModuleIds
+          : allNodes.filter((node) => isDomainNodeKind(node.kind) && !node.parentId).map((node) => node.id)
+      );
     }
 
     const included = new Set<string>();
@@ -5998,6 +6213,10 @@ export class GraphRepository {
       return node;
     }
 
+    if (this.listProjectTopModuleIds(project.id).length > 0) {
+      return null;
+    }
+
     return (
       allNodes.find((node) => node.kind === "framework" && node.projectId === project.id) ??
       allNodes.find((node) => isDomainNodeKind(node.kind) && !node.parentId) ??
@@ -6010,6 +6229,13 @@ export class GraphRepository {
     const childCounts = buildChildCountMap(rows);
     const tagsByNodeId = this.getTagsForEntityIds("node", rows.map((row) => row.id));
     return rows.map((row) => mapNode(row, childCounts.get(row.id) ?? 0, tagsByNodeId.get(row.id) ?? []));
+  }
+
+  private listProjectTopModuleIds(projectId: string): string[] {
+    const rows = this.db
+      .prepare("SELECT node_id FROM project_top_modules WHERE project_id = ? ORDER BY ordinal ASC")
+      .all(projectId) as Array<{ node_id: string }>;
+    return rows.map((row) => row.node_id);
   }
 
   private listEdges(projectId: string): GraphEdge[] {
@@ -6636,7 +6862,24 @@ export class GraphRepository {
     });
   }
 
-  private backfillMissingScopeLayouts(projectId: string, scopeNodeId: string, nodes: GraphNode[], savedLayouts: Map<string, LayoutRow>): void {
+  private applyWorkspaceLayouts(projectId: string, nodes: GraphNode[]): GraphNode[] {
+    if (nodes.length === 0) {
+      return nodes;
+    }
+    const layouts = this.getSavedWorkspaceLayouts(projectId, nodes.map((node) => node.id));
+    return nodes.map((node) => {
+      const layout = layouts.get(node.id);
+      return layout
+        ? {
+            ...node,
+            position: { x: layout.ui_x, y: layout.ui_y },
+            size: { width: layout.ui_width, height: layout.ui_height }
+          }
+        : node;
+    });
+  }
+
+  private backfillMissingScopeLayouts(projectId: string, scopeNodeId: string | null, nodes: GraphNode[], savedLayouts: Map<string, LayoutRow>): void {
     const missingNodes = nodes.filter((node) => !savedLayouts.has(node.id));
     if (missingNodes.length === 0) {
       return;
@@ -6686,8 +6929,51 @@ export class GraphRepository {
     return new Map(rows.map((row) => [row.node_id, row]));
   }
 
+  private getSavedWorkspaceLayouts(projectId: string, nodeIds: string[]): Map<string, LayoutRow> {
+    if (nodeIds.length === 0) {
+      return new Map();
+    }
+    const placeholders = nodeIds.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `
+        SELECT node_id, ui_x, ui_y, ui_width, ui_height
+        FROM graph_workspace_node_layouts
+        WHERE project_id = ?
+          AND node_id IN (${placeholders})
+      `
+      )
+      .all(projectId, ...nodeIds) as LayoutRow[];
+    return new Map(rows.map((row) => [row.node_id, row]));
+  }
+
   private upsertNodeLayout(nodeId: string, patch: LayoutPatch): void {
     const node = this.getNode(nodeId);
+    if (patch.scopeNodeId === null) {
+      this.db
+        .prepare(
+          `
+          INSERT INTO graph_workspace_node_layouts (project_id, node_id, ui_x, ui_y, ui_width, ui_height, updated_at)
+          VALUES (@projectId, @nodeId, @uiX, @uiY, @uiWidth, @uiHeight, datetime('now'))
+          ON CONFLICT(project_id, node_id)
+          DO UPDATE SET
+            ui_x = excluded.ui_x,
+            ui_y = excluded.ui_y,
+            ui_width = excluded.ui_width,
+            ui_height = excluded.ui_height,
+            updated_at = datetime('now')
+        `
+        )
+        .run({
+          projectId: node.projectId,
+          nodeId,
+          uiX: patch.position.x,
+          uiY: patch.position.y,
+          uiWidth: patch.size.width,
+          uiHeight: patch.size.height
+        });
+      return;
+    }
     const scopeNode = this.getNode(patch.scopeNodeId);
     if (node.projectId !== scopeNode.projectId) {
       throw validationError("Layout scope and node must belong to the same project.");
@@ -6891,8 +7177,15 @@ export class GraphRepository {
     if (extensionDefinition) {
       this.assertExtensionPackageEnabledForNode(input.projectId, input.kind, updatingNodeId);
       if (extensionDefinition.category === "domain") {
+        if (!parentId && !attachedToId && extensionDefinition.allowTopLevel) {
+          return;
+        }
         if (!parentId || attachedToId) {
-          throw validationError(`${extensionDefinition.label} nodes must use parent_id and no attached_to_id.`);
+          throw validationError(
+            extensionDefinition.allowTopLevel
+              ? `${extensionDefinition.label} nodes must be top-level or use parent_id with no attached_to_id.`
+              : `${extensionDefinition.label} nodes must use parent_id and no attached_to_id.`
+          );
         }
         const parent = this.getNode(parentId);
         if (parent.projectId !== input.projectId || !extensionDefinition.parentKinds.includes(parent.kind)) {
@@ -7076,6 +7369,7 @@ function mapProject(row: ProjectRow): Project {
     rootPath: row.root_path,
     description: row.description ?? "",
     scanningInstructions: row.scanning_instructions ?? "",
+    topModulePaths: parseStringArray(row.top_module_paths_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   };
@@ -7581,6 +7875,19 @@ function parseJson(value: string): any {
   } catch {
     throw validationError("Stored workflow orchestration contains malformed JSON.");
   }
+}
+
+function parseStringArray(value: string | null | undefined): string[] {
+  try {
+    const parsed = JSON.parse(value ?? "[]");
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeRepositoryPath(value: string): string {
+  return value.replaceAll("\\", "/").replace(/^\.\/+/, "").replace(/\/+/g, "/");
 }
 
 function mapCodeProposal(row: CodeProposalRow): StoredCodeProposal {

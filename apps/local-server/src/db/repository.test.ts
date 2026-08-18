@@ -57,6 +57,8 @@ describe("SQLite graph repository", () => {
         "format_details",
         "extension_node_details",
         "graph_node_layouts",
+        "graph_workspace_node_layouts",
+        "project_top_modules",
           "graph_node_type_styles",
           "graph_revisions",
           "graph_entity_versions",
@@ -195,6 +197,7 @@ describe("SQLite graph repository", () => {
         mediumOutputs: [],
         globalOutput: {
           summary: "",
+          topModuleStableKeys: ["root"],
           nodes: [
             {
               stableKey: "root",
@@ -216,7 +219,8 @@ describe("SQLite graph repository", () => {
               parentStableKey: "root"
             }
           ],
-          edges: []
+          edges: [],
+          memoryUpdates: []
         }
       };
       expect(() => repo.applyScanPipelineResult(project.id, disabledScan)).toThrow(/extension package is disabled/);
@@ -267,6 +271,145 @@ describe("SQLite graph repository", () => {
       expect(detail.extensionDetails.find((row) => row.node.id === uart.id)?.details.payload.baud).toBe(115200);
       expect(canvas.extensionDetails.map((row) => row.nodeId)).toContain(uart.id);
       expect(repo.getWorkspaceSettings(project.id).extensions.enabledPackageIds).toEqual(["@graphcode/extension-embedded-systems"]);
+    });
+
+    it("persists ordered top modules and workspace-scoped layouts", async () => {
+      const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-multi-top-"));
+      const studentPath = "src/configs/student.yaml";
+      const teacherPath = "src/configs/teacher.yaml";
+      fs.mkdirSync(path.join(rootPath, "src", "configs"), { recursive: true });
+      fs.writeFileSync(path.join(rootPath, studentPath), "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n", "utf8");
+      fs.writeFileSync(path.join(rootPath, teacherPath), "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\n", "utf8");
+      const project = repo.createProject({
+        id: "multi-top-project",
+        name: "Multi Top Project",
+        rootPath,
+        topModulePaths: [studentPath, teacherPath]
+      });
+      repo.setEnabledExtensionPackages(project.id, ["@graphcode/extension-ml-pipeline"]);
+      const scan: ScanPipelineResult = {
+        initial: true,
+        inventory: [
+          { path: studentPath, contentHash: "student-hash", size: 10, language: "yaml" },
+          { path: teacherPath, contentHash: "teacher-hash", size: 10, language: "yaml" }
+        ],
+        changedFiles: [
+          { path: studentPath, contentHash: "student-hash", size: 10, language: "yaml" },
+          { path: teacherPath, contentHash: "teacher-hash", size: 10, language: "yaml" }
+        ],
+        deletedFiles: [],
+        localOutputs: [],
+        mediumOutputs: [],
+        globalOutput: {
+          summary: "Two configured model roots.",
+          topModuleStableKeys: ["model:student", "model:teacher"],
+          nodes: [
+            {
+              stableKey: "model:student",
+              kind: "ml_model",
+              name: "Student",
+              summary: "Student model",
+              codeContext: "Configured student instance.",
+              source: { path: studentPath, startLine: 1, endLine: 10 },
+              language: "yaml",
+              detail: {
+                extensionDetails: {
+                  packageId: "@graphcode/extension-ml-pipeline",
+                  schemaId: "ml_model",
+                  payload: { modelName: "Student" }
+                }
+              }
+            },
+            {
+              stableKey: "model:teacher",
+              kind: "ml_model",
+              name: "Teacher",
+              summary: "Teacher model",
+              codeContext: "Configured teacher instance.",
+              source: { path: teacherPath, startLine: 1, endLine: 10 },
+              language: "yaml",
+              detail: {
+                extensionDetails: {
+                  packageId: "@graphcode/extension-ml-pipeline",
+                  schemaId: "ml_model",
+                  payload: { modelName: "Teacher" }
+                }
+              }
+            },
+            {
+              stableKey: "layer:student",
+              kind: "ml_layer",
+              name: "Student block",
+              summary: "",
+              codeContext: "",
+              source: { path: studentPath, startLine: 3, endLine: 4 },
+              language: "yaml",
+              parentStableKey: "model:student"
+            }
+          ],
+          edges: [
+            {
+              stableKey: "distillation",
+              kind: "uses",
+              sourceStableKey: "model:teacher",
+              targetStableKey: "model:student",
+              label: "soft-target distillation",
+              codeContext: "Training-only relationship.",
+              source: { path: studentPath, startLine: 6, endLine: 6 }
+            }
+          ],
+          memoryUpdates: []
+        }
+      };
+
+      repo.applyScanPipelineResult(project.id, scan);
+      const overview = await repo.getCanvasGraph({ projectId: project.id });
+      const namesById = new Map(overview.nodes.map((node) => [node.id, node.name]));
+      expect(overview.scopeNodeId).toBeNull();
+      expect(overview.topModuleIds.map((nodeId) => namesById.get(nodeId))).toEqual(["Student", "Teacher"]);
+      expect(overview.edges.map((edge) => edge.label)).toContain("soft-target distillation");
+
+      const studentId = overview.topModuleIds[0]!;
+      repo.updateNodeLayout(studentId, {
+        scopeNodeId: null,
+        position: { x: 321, y: 123 },
+        size: overview.nodes.find((node) => node.id === studentId)!.size
+      });
+      const refreshed = await repo.getCanvasGraph({ projectId: project.id });
+      expect(refreshed.nodes.find((node) => node.id === studentId)?.position).toEqual({ x: 321, y: 123 });
+      expect(
+        (
+          db
+            .prepare("SELECT COUNT(*) AS count FROM graph_workspace_node_layouts WHERE project_id = ?")
+            .get(project.id) as { count: number }
+        ).count
+      ).toBe(2);
+
+      repo.applyScanPipelineResult(project.id, scan);
+      const rescanned = await repo.getCanvasGraph({ projectId: project.id });
+      expect(rescanned.nodes.find((node) => node.id === studentId)?.position).toEqual({ x: 321, y: 123 });
+
+      const invalidEvidence: ScanPipelineResult = {
+        ...scan,
+        globalOutput: {
+          ...scan.globalOutput,
+          nodes: scan.globalOutput.nodes.map((node, index) =>
+            index === 0 ? { ...node, source: { ...node.source, endLine: 99 } } : node
+          )
+        }
+      };
+      expect(() => repo.applyScanPipelineResult(project.id, invalidEvidence)).toThrow(/outside the verified/);
+
+      const unsupportedTopModule: ScanPipelineResult = {
+        ...scan,
+        globalOutput: {
+          ...scan.globalOutput,
+          nodes: scan.globalOutput.nodes
+            .filter((node) => node.stableKey !== "layer:student")
+            .map((node, index) => (index === 0 ? { ...node, kind: "framework", detail: undefined } : node))
+        }
+      };
+      expect(() => repo.applyScanPipelineResult(project.id, unsupportedTopModule)).toThrow(/must resolve to parentless ml_model/);
     });
 
     it("plans layered coding workflows, resolves execution metadata, and stores test artifacts", () => {
@@ -797,7 +940,11 @@ describe("SQLite graph repository", () => {
   });
 
   it("persists scan file state and source evidence while cleaning generated rows incrementally", () => {
-    const project = repo.createProject({ id: "scan-project", name: "Scan Project", rootPath: "/tmp/scan-project" });
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-scan-project-"));
+    fs.mkdirSync(path.join(rootPath, "src"), { recursive: true });
+    fs.writeFileSync(path.join(rootPath, "src", "a.ts"), "one\ntwo\nthree\nfour\n", "utf8");
+    fs.writeFileSync(path.join(rootPath, "src", "b.ts"), "one\ntwo\nthree\nfour\n", "utf8");
+    const project = repo.createProject({ id: "scan-project", name: "Scan Project", rootPath });
     const initialScan: ScanPipelineResult = {
       initial: true,
       inventory: [
@@ -811,6 +958,7 @@ describe("SQLite graph repository", () => {
       deletedFiles: [],
       globalOutput: {
         summary: "Initial global graph",
+        topModuleStableKeys: ["scan-framework-test"],
         nodes: [
           {
             stableKey: "scan-framework-test",
@@ -822,7 +970,8 @@ describe("SQLite graph repository", () => {
             language: "unknown"
           }
         ],
-        edges: []
+        edges: [],
+        memoryUpdates: []
       },
       mediumOutputs: [
         {

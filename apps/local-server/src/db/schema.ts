@@ -453,6 +453,8 @@ const GRAPH_TABLES = [
   "coding_workflow_items",
   "coding_workflows",
   "graph_tags",
+  "project_top_modules",
+  "graph_workspace_node_layouts",
   "graph_node_layouts",
   "graph_node_type_styles",
   "graph_boundary_nodes",
@@ -492,6 +494,7 @@ export function migrate(db: GraphDatabase): void {
         root_path TEXT NOT NULL,
         description TEXT NOT NULL DEFAULT '',
         scanning_instructions TEXT NOT NULL DEFAULT '',
+        top_module_paths_json TEXT NOT NULL DEFAULT '[]',
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
@@ -552,6 +555,27 @@ export function migrate(db: GraphDatabase): void {
     );
 
     ${EXTENSION_NODE_DETAILS_SQL.replace("CREATE TABLE", "CREATE TABLE IF NOT EXISTS")}
+
+    CREATE TABLE IF NOT EXISTS project_top_modules (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+      ordinal INTEGER NOT NULL,
+      source_path TEXT NOT NULL,
+      PRIMARY KEY (project_id, node_id),
+      UNIQUE (project_id, ordinal),
+      UNIQUE (project_id, source_path)
+    );
+
+    CREATE TABLE IF NOT EXISTS graph_workspace_node_layouts (
+      project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      node_id TEXT NOT NULL REFERENCES graph_nodes(id) ON DELETE CASCADE,
+      ui_x REAL NOT NULL,
+      ui_y REAL NOT NULL,
+      ui_width REAL NOT NULL,
+      ui_height REAL NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (project_id, node_id)
+    );
 
     CREATE TABLE IF NOT EXISTS graph_node_layouts (
       project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -683,6 +707,8 @@ export function migrate(db: GraphDatabase): void {
     CREATE INDEX IF NOT EXISTS idx_graph_edges_source ON graph_edges(source_node_id);
     CREATE INDEX IF NOT EXISTS idx_graph_edges_target ON graph_edges(target_node_id);
     CREATE INDEX IF NOT EXISTS idx_graph_node_layouts_scope ON graph_node_layouts(project_id, scope_node_id);
+    CREATE INDEX IF NOT EXISTS idx_project_top_modules_order ON project_top_modules(project_id, ordinal);
+    CREATE INDEX IF NOT EXISTS idx_graph_workspace_node_layouts_project ON graph_workspace_node_layouts(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_node_type_styles_project ON graph_node_type_styles(project_id);
     CREATE INDEX IF NOT EXISTS idx_graph_boundaries_project_scope ON graph_boundaries(project_id, scope_node_id);
     CREATE INDEX IF NOT EXISTS idx_graph_boundary_nodes_node ON graph_boundary_nodes(node_id);
@@ -727,6 +753,9 @@ function ensureProjectsTable(db: GraphDatabase): void {
   }
   if (!tableHasColumn(db, "projects", "scanning_instructions")) {
     db.exec("ALTER TABLE projects ADD COLUMN scanning_instructions TEXT NOT NULL DEFAULT '';");
+  }
+  if (!tableHasColumn(db, "projects", "top_module_paths_json")) {
+    db.exec("ALTER TABLE projects ADD COLUMN top_module_paths_json TEXT NOT NULL DEFAULT '[]';");
   }
 }
 
@@ -1204,6 +1233,8 @@ function resetGraphStorage(db: GraphDatabase): void {
   db.pragma("foreign_keys = OFF");
   db.exec(`
     DROP TABLE IF EXISTS graph_node_layouts;
+    DROP TABLE IF EXISTS graph_workspace_node_layouts;
+    DROP TABLE IF EXISTS project_top_modules;
     DROP TABLE IF EXISTS graph_boundary_tags;
     DROP TABLE IF EXISTS graph_edge_tags;
     DROP TABLE IF EXISTS graph_node_tags;

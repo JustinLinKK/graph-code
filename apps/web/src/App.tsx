@@ -632,14 +632,14 @@ export default function App() {
     if (!selectedProjectId) {
       return;
     }
-    // When canvas scope is missing (e.g. background scan has not finished),
+    // When the canvas is empty (e.g. background scan has not finished),
     // try reloading the project first so fresh scan data is available.
-    if (!canvas?.scopeNodeId) {
+    if (!canvas || canvas.nodes.length === 0) {
       setLoading(true);
       setError(null);
       try {
         const refreshed = await loadProject(selectedProjectId);
-        if (!refreshed?.scopeNodeId) {
+        if (!refreshed || refreshed.nodes.length === 0) {
           setError("Nothing to auto-layout yet. Run a Scan first to populate the graph, or create nodes manually with the Add button.");
           return;
         }
@@ -669,11 +669,11 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [canvas?.scopeNodeId, selectedProjectId, loadProject]);
+  }, [canvas, selectedProjectId, loadProject]);
 
   const handlePersistLayout = useCallback(
     (nodeId: string, position: { x: number; y: number }, size: { width: number; height: number }) => {
-      if (!canvas?.scopeNodeId) {
+      if (!canvas) {
         return;
       }
 
@@ -1889,7 +1889,7 @@ type LayoutValue = {
 type UndoEntry =
   | {
       type: "node-layout";
-      scopeNodeId: string;
+      scopeNodeId: string | null;
       nodeId: string;
       before: LayoutValue;
     }

@@ -224,6 +224,8 @@ export const SECRET_SOURCE_TYPES = ["manual", "file", "env"] as const;
 export const PROMPT_SOURCE_TYPES = ["manual", "file"] as const;
 export const GRAPH_PATCH_ENTITY_TYPES = ["node", "edge", "boundary"] as const;
 export const WORKSPACE_CREATION_MODES = ["scan", "blank"] as const;
+export const MEMORY_ENTRY_TYPES = ["semantic", "procedural", "episodic"] as const;
+export const MEMORY_ENTRY_STATUSES = ["proposed", "active", "stale", "superseded"] as const;
 
 export const graphNodeKindSchema = z.enum(GRAPH_NODE_KINDS);
 export const domainNodeKindSchema = z.enum(DOMAIN_NODE_KINDS);
@@ -259,6 +261,8 @@ export const secretSourceTypeSchema = z.enum(SECRET_SOURCE_TYPES);
 export const promptSourceTypeSchema = z.enum(PROMPT_SOURCE_TYPES);
 export const graphPatchEntityTypeSchema = z.enum(GRAPH_PATCH_ENTITY_TYPES);
 export const workspaceCreationModeSchema = z.enum(WORKSPACE_CREATION_MODES);
+export const memoryEntryTypeSchema = z.enum(MEMORY_ENTRY_TYPES);
+export const memoryEntryStatusSchema = z.enum(MEMORY_ENTRY_STATUSES);
 export const extensionPackageIdSchema = z.enum(EXTENSION_PACKAGE_IDS);
 export const extensionFieldTypeSchema = z.enum(EXTENSION_FIELD_TYPES);
 
@@ -296,6 +300,8 @@ export type SecretSourceType = z.infer<typeof secretSourceTypeSchema>;
 export type PromptSourceType = z.infer<typeof promptSourceTypeSchema>;
 export type GraphPatchEntityType = z.infer<typeof graphPatchEntityTypeSchema>;
 export type WorkspaceCreationMode = z.infer<typeof workspaceCreationModeSchema>;
+export type MemoryEntryType = z.infer<typeof memoryEntryTypeSchema>;
+export type MemoryEntryStatus = z.infer<typeof memoryEntryStatusSchema>;
 export type ExtensionPackageId = z.infer<typeof extensionPackageIdSchema>;
 export type ExtensionFieldType = z.infer<typeof extensionFieldTypeSchema>;
 
@@ -358,6 +364,7 @@ export const extensionNodeKindDefinitionSchema = z.object({
   color: styleColorSchema,
   sortOrder: z.number().int().nonnegative(),
   defaultSize: sizeSchema,
+  allowTopLevel: z.boolean().default(false),
   parentKinds: z.array(graphNodeKindSchema).default([]),
   attachableToKinds: z.array(graphNodeKindSchema).default([]),
   detailSchemaId: z.string().min(1),
@@ -440,6 +447,7 @@ export const projectSchema = z.object({
   rootPath: z.string(),
   description: z.string(),
   scanningInstructions: z.string(),
+  topModulePaths: z.array(z.string()).default([]),
   createdAt: z.string(),
   updatedAt: z.string()
 });
@@ -574,7 +582,7 @@ export const basicBlockDetailsSchema = z.object({
 });
 
 export const layoutPatchSchema = z.object({
-  scopeNodeId: z.string(),
+  scopeNodeId: z.string().nullable(),
   position: positionSchema,
   size: sizeSchema
 });
@@ -1007,16 +1015,54 @@ export const codeProposalApplyRequestSchema = z.object({
   runId: z.string().min(1)
 });
 
+const repositoryRelativePathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .refine(
+    (value) =>
+      !value.startsWith("/") &&
+      !value.startsWith("\\") &&
+      !/^[a-zA-Z]:[\\/]/.test(value) &&
+      !value.split(/[\\/]+/).includes(".."),
+    {
+    message: "Path must be repository-relative and cannot contain parent traversal."
+    }
+  );
+
+const topModulePathsSchema = z
+  .array(repositoryRelativePathSchema)
+  .max(32)
+  .default([])
+  .superRefine((paths, context) => {
+    const seen = new Set<string>();
+    for (const [index, value] of paths.entries()) {
+      const normalized = value.replaceAll("\\", "/").replace(/^\.\/+/, "");
+      if (seen.has(normalized)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: [index],
+          message: "Top module paths must be unique."
+        });
+      }
+      seen.add(normalized);
+    }
+  });
+
 export const workspaceInitializationSchema = z.object({
   projectName: z.string().trim().min(1),
   projectDescription: z.string().trim().min(1),
   scanningInstructions: z.string().trim().min(1),
+  topModulePaths: topModulePathsSchema,
+  enabledExtensionPackageIds: z.array(extensionPackageIdSchema).default([]),
   skipCodexDefaultSystemPrompt: z.boolean().optional().default(false)
 });
 
 export const blankWorkspaceInitializationSchema = z.object({
   projectName: z.string().trim().min(1),
-  projectDescription: z.string().trim().optional().default("")
+  projectDescription: z.string().trim().optional().default(""),
+  topModulePaths: topModulePathsSchema,
+  enabledExtensionPackageIds: z.array(extensionPackageIdSchema).default([])
 });
 
 export const scanningAgentRequestSchema = z.object({
@@ -1024,9 +1070,44 @@ export const scanningAgentRequestSchema = z.object({
   rootPath: z.string().optional(),
   projectDescription: z.string().optional(),
   scanningInstructions: z.string().optional(),
+  topModulePaths: topModulePathsSchema,
   skipCodexDefaultSystemPrompt: z.boolean().optional().default(false),
   enabledExtensionPackageIds: z.array(extensionPackageIdSchema).optional().default([]),
   background: z.boolean().optional().default(false)
+});
+
+export const memoryUpdateSchema = z.object({
+  action: z.enum(["upsert", "supersede"]),
+  type: memoryEntryTypeSchema,
+  slug: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(96),
+  title: z.string().trim().min(1).max(160),
+  summary: z.string().trim().min(1).max(600),
+  content: z.string().max(32_768),
+  tags: z.array(z.string().trim().min(1).max(48)).max(24).default([]),
+  scopePaths: z.array(repositoryRelativePathSchema).max(32).default([]),
+  sourcePaths: z.array(repositoryRelativePathSchema).max(32).default([]),
+  confidence: z.enum(["low", "medium", "high"]).default("medium"),
+  supersedes: z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/).max(96).nullable().default(null)
+});
+
+export const memoryContextSchema = z.object({
+  summary: z.string().default(""),
+  entries: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        type: memoryEntryTypeSchema,
+        title: z.string(),
+        summary: z.string(),
+        content: z.string(),
+        tags: z.array(z.string()),
+        scopePaths: z.array(z.string()),
+        sourcePaths: z.array(z.string()),
+        status: memoryEntryStatusSchema,
+        confidence: z.enum(["low", "medium", "high"])
+      })
+    )
+    .default([])
 });
 
 export const graphPatchOperationSchema = z.object({
@@ -1119,6 +1200,8 @@ export type Project = z.infer<typeof projectSchema>;
 export type WorkspaceInitialization = z.infer<typeof workspaceInitializationSchema>;
 export type BlankWorkspaceInitialization = z.infer<typeof blankWorkspaceInitializationSchema>;
 export type OpenWorkspaceRequest = z.infer<typeof openWorkspaceSchema>;
+export type MemoryUpdate = z.infer<typeof memoryUpdateSchema>;
+export type MemoryContext = z.infer<typeof memoryContextSchema>;
 export type GitStatusInfo = z.infer<typeof gitStatusInfoSchema>;
 export type BlockExecutionMetadata = z.infer<typeof blockExecutionMetadataSchema>;
 export type GraphNode = z.infer<typeof graphNodeSchema>;
@@ -1311,7 +1394,7 @@ export const AVAILABLE_EXTENSION_PACKAGES: GraphExtensionPackage[] = [
         textField("modelName", "Model Name", "ResNet, Transformer"),
         textField("frameworkClass", "Framework Class", "torch.nn.Module"),
         textField("inputShape", "Input Shape", "N,C,H,W")
-      ]),
+      ], true),
       extensionDomain("@graphcode/extension-ml-pipeline", "ml_layer", "ML Layer", "Layer or operation inside an ML model.", "layers", "#db2777", 43, ["ml_model", "ml_layer"], [
         enumField("layerType", "Layer Type", [
           "linear",
@@ -1400,6 +1483,7 @@ export type CanvasGraph = {
   project: Project;
   rootNodeId: string | null;
   scopeNodeId: string | null;
+  topModuleIds: string[];
   scopeLabel: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
@@ -1470,7 +1554,8 @@ function extensionDomain(
   color: string,
   sortOrder: number,
   parentKinds: GraphNodeKind[],
-  fields: ExtensionFieldDefinition[]
+  fields: ExtensionFieldDefinition[],
+  allowTopLevel = false
 ): ExtensionNodeKindDefinition {
   return {
     packageId,
@@ -1482,6 +1567,7 @@ function extensionDomain(
     color,
     sortOrder,
     defaultSize: { width: 272, height: 140 },
+    allowTopLevel,
     parentKinds,
     attachableToKinds: [],
     detailSchemaId: kind,
@@ -1510,6 +1596,7 @@ function extensionAttachment(
     color,
     sortOrder,
     defaultSize: { width: 224, height: 112 },
+    allowTopLevel: false,
     parentKinds: [],
     attachableToKinds,
     detailSchemaId: kind,
