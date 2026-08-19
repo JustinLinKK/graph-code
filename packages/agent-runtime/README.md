@@ -7,7 +7,7 @@ Agent runs stay reviewable. Providers return text, graph patches, diffs, or scan
 ## Providers
 
 - `fake`: deterministic local provider for tests and demos.
-- `openai`, `gemini`, `openrouter`: hosted chat providers that require API-key settings.
+- `openai`, `gemini`, `deepseek`, `openrouter`: hosted chat providers that require API-key settings. DeepSeek uses its OpenAI-compatible API endpoint.
 - `codex`: account-based Codex CLI provider. The configured model field is the CLI command, defaulting to `codex`.
 - `claudecode`: account-based Claude Code CLI provider. The configured model field is the CLI command, defaulting to `claude`.
 

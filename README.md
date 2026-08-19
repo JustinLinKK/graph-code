@@ -246,7 +246,7 @@ Scanning is split into local, medium, and global passes. Local scans analyze sou
 
 ### Local and Account-Based Providers
 
-GraphCode supports deterministic fake providers for tests and demos, hosted providers such as OpenAI/Gemini/OpenRouter through API-key settings, and account-based Codex or Claude Code CLI providers. CLI providers are invoked so they return proposals to GraphCode rather than editing files directly.
+GraphCode supports deterministic fake providers for tests and demos, hosted OpenAI, Gemini, DeepSeek, and OpenRouter providers through API-key settings, and account-based Codex or Claude Code CLI providers. CLI providers are invoked so they return proposals to GraphCode rather than editing files directly.
 
 ## Examples
 

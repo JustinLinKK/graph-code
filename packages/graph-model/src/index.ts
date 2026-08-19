@@ -207,7 +207,7 @@ export type IndexTelemetry = z.infer<typeof indexTelemetrySchema>;
 export type IndexState = z.infer<typeof indexStateSchema>;
 export const AGENT_KINDS = ["planning", "coding", "review", "scanning"] as const;
 export const AGENT_RUN_STATUSES = ["queued", "running", "succeeded", "failed", "conflicted"] as const;
-export const AGENT_PROVIDERS = ["fake", "codex", "claudecode", "openai", "gemini", "openrouter"] as const;
+export const AGENT_PROVIDERS = ["fake", "codex", "claudecode", "openai", "gemini", "deepseek", "openrouter"] as const;
 export const CODEX_REASONING_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultra"] as const;
 export const CODEX_SPEED_TIERS = ["standard", "fast"] as const;
 export const CODEX_PERMISSION_MODES = ["ask_for_permission", "approve_for_me", "full_access"] as const;
@@ -1110,17 +1110,67 @@ export const memoryContextSchema = z.object({
     .default([])
 });
 
-export const graphPatchOperationSchema = z.object({
-  entityType: graphPatchEntityTypeSchema,
-  entityId: z.string().min(1),
-  action: z.enum(["create", "update"]),
-  fields: z.record(z.unknown()).default({})
-});
+const MAX_GRAPH_PATCH_OPERATIONS = 256;
+const MAX_GRAPH_PATCH_CHARACTERS = 1_000_000;
 
-export const graphPatchSchema = z.object({
-  summary: z.string(),
-  operations: z.array(graphPatchOperationSchema).default([])
-});
+export const graphPatchOperationSchema = z
+  .object({
+    entityType: graphPatchEntityTypeSchema,
+    entityId: z.string().min(1).max(256),
+    action: z.enum(["create", "update"]),
+    fields: z.record(z.unknown()).default({})
+  })
+  .strict()
+  .superRefine((operation, context) => {
+    if (operation.action === "update" && Object.keys(operation.fields).length === 0) {
+      context.addIssue({ code: z.ZodIssueCode.custom, path: ["fields"], message: "Update operations require at least one field." });
+      return;
+    }
+    const fieldsSchema = (
+      operation.entityType === "node"
+        ? operation.action === "create" ? nodeMutationSchema : nodeUpdateSchema
+        : operation.entityType === "edge"
+          ? operation.action === "create" ? edgeMutationSchema : edgeUpdateSchema
+          : operation.action === "create" ? boundaryMutationSchema : boundaryUpdateSchema
+    ).strict();
+    const parsed = fieldsSchema.safeParse(operation.fields);
+    if (parsed.success) return;
+    for (const issue of parsed.error.issues) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["fields", ...issue.path],
+        message: issue.message
+      });
+    }
+  });
+
+export const graphPatchSchema = z
+  .object({
+    summary: z.string().trim().min(1).max(2_000),
+    operations: z.array(graphPatchOperationSchema).max(MAX_GRAPH_PATCH_OPERATIONS).default([])
+  })
+  .strict()
+  .superRefine((patch, context) => {
+    const seenEntities = new Set<string>();
+    for (const [index, operation] of patch.operations.entries()) {
+      const key = `${operation.entityType}\0${operation.entityId}`;
+      if (seenEntities.has(key)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["operations", index, "entityId"],
+          message: "A graph patch can mutate each entity only once."
+        });
+      }
+      seenEntities.add(key);
+    }
+    try {
+      if (JSON.stringify(patch).length > MAX_GRAPH_PATCH_CHARACTERS) {
+        context.addIssue({ code: z.ZodIssueCode.custom, message: "Graph patch payload is too large." });
+      }
+    } catch {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "Graph patch payload must be JSON-serializable." });
+    }
+  });
 
 export const agentRunSchema = z.object({
   id: z.string(),

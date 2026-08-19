@@ -1,6 +1,7 @@
 import { fileURLToPath } from "node:url";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { ZodError } from "zod";
 import { resolveAgentFeatureFlags, resolveDbPath, resolveRepoRoot, resolveServerHost, resolveServerPort, type AgentFeatureFlags } from "./config";
 import { registerApiRoutes } from "./routes";
 import { WorkspaceRuntime } from "./workspace";
@@ -31,14 +32,25 @@ export async function buildServer(options: { dbPath?: string; seedSelf?: boolean
 
   app.setErrorHandler((error, _request, reply) => {
     const caughtError = error as Error & { statusCode?: number };
-    const statusCode = typeof caughtError.statusCode === "number" ? caughtError.statusCode : 500;
+    const zodError = caughtError instanceof ZodError ? caughtError : null;
+    const statusCode = zodError ? 400 : typeof caughtError.statusCode === "number" ? caughtError.statusCode : 500;
     reply.status(statusCode).send({
       error: statusCode >= 500 ? "Internal Server Error" : "Request Error",
-      message: caughtError.message
+      message: zodError
+        ? `Invalid request: ${zodError.issues.slice(0, 5).map((issue) => `${formatIssuePath(issue.path)}: ${issue.message}`).join(" ")}`
+        : caughtError.message
     });
   });
 
   return app;
+}
+
+function formatIssuePath(path: Array<string | number>): string {
+  if (path.length === 0) return "request";
+  return path.reduce<string>((formatted, segment) => {
+    if (typeof segment === "number") return `${formatted}[${segment}]`;
+    return formatted ? `${formatted}.${segment}` : segment;
+  }, "");
 }
 
 async function main(): Promise<void> {

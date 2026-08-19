@@ -2068,6 +2068,31 @@ describe("GraphCode app shell", () => {
     expect(within(planningCard).queryByLabelText("API Key Source")).not.toBeInTheDocument();
   });
 
+  it("configures hosted API providers with provider-specific defaults", async () => {
+    render(<App />);
+
+    fireEvent.click(await screen.findByLabelText("Settings"));
+    fireEvent.click(await screen.findByRole("tab", { name: /Agents/i }));
+    const planningCard = screen.getByRole("heading", { name: "Planning" }).closest(".agent-settings-card") as HTMLElement;
+    const providerSelect = within(planningCard).getByLabelText("Provider");
+
+    expect(within(providerSelect).getByRole("option", { name: "OpenAI API" })).toBeInTheDocument();
+    expect(within(providerSelect).getByRole("option", { name: "Gemini API" })).toBeInTheDocument();
+    expect(within(providerSelect).getByRole("option", { name: "DeepSeek API" })).toBeInTheDocument();
+
+    fireEvent.change(providerSelect, { target: { value: "openai" } });
+    expect(within(planningCard).getByLabelText("OpenAI Model")).toHaveValue("gpt-5.6");
+    expect(within(planningCard).getByLabelText("Environment Variable Name")).toHaveValue("OPENAI_API_KEY");
+
+    fireEvent.change(providerSelect, { target: { value: "gemini" } });
+    expect(within(planningCard).getByLabelText("Gemini Model")).toHaveValue("gemini-3.7-flash");
+    expect(within(planningCard).getByLabelText("Environment Variable Name")).toHaveValue("GEMINI_API_KEY");
+
+    fireEvent.change(providerSelect, { target: { value: "deepseek" } });
+    expect(within(planningCard).getByLabelText("DeepSeek Model")).toHaveValue("deepseek-v4-pro");
+    expect(within(planningCard).getByLabelText("Environment Variable Name")).toHaveValue("DEEPSEEK_API_KEY");
+  });
+
   it("shows scanning runs in the activity feed", async () => {
     render(<App />);
 

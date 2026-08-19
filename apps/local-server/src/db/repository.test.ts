@@ -653,6 +653,73 @@ describe("SQLite graph repository", () => {
     expect(repo.getNode("module-web").summary).toBe("First planning edit.");
   });
 
+  it("rejects malformed graph patches at persistence and fails closed for corrupt stored patches", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const malformedPatch = {
+      summary: "Create malformed node",
+      operations: [{ entityType: "node" as const, entityId: "malformed-node", action: "create" as const, fields: { name: "Malformed" } }]
+    };
+
+    expect(() => repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      status: "succeeded",
+      graphPatch: malformedPatch
+    })).toThrow(/Invalid graph patch.*fields\.kind.*Required/);
+
+    const run = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Valid initial patch",
+        operations: [{ entityType: "node", entityId: "module-web", action: "update", fields: { summary: "Valid update" } }]
+      }
+    });
+    expect(() => repo.updateAgentRun(run.id, { graphPatch: malformedPatch })).toThrow(/Invalid graph patch.*fields\.kind.*Required/);
+
+    db.prepare("UPDATE agent_runs SET graph_patch_json = ? WHERE id = ?").run(JSON.stringify(malformedPatch), run.id);
+    const revisionBeforeApply = repo.currentGraphRevision(project.id);
+    const conflicted = repo.applyAgentGraphPatch(project.id, run.id);
+
+    expect(conflicted.status).toBe("conflicted");
+    expect(conflicted.appliedGraphRevision).toBeNull();
+    expect(conflicted.conflictReason).toContain("operations[0].fields.kind: Required");
+    expect(repo.currentGraphRevision(project.id)).toBe(revisionBeforeApply);
+    expect(repo.getNode("module-web").summary).not.toBe("Valid update");
+  });
+
+  it("rolls back every graph operation when transactional apply validation fails", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const originalSummary = repo.getNode("module-web").summary;
+    const revisionBeforeApply = repo.currentGraphRevision(project.id);
+    const run = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Partially invalid patch",
+        operations: [
+          { entityType: "node", entityId: "module-web", action: "update", fields: { summary: "Must roll back" } },
+          {
+            entityType: "node",
+            entityId: "orphan-module",
+            action: "create",
+            fields: { kind: "module", name: "Orphan", parentId: "missing-parent" }
+          }
+        ]
+      }
+    });
+
+    const conflicted = repo.applyAgentGraphPatch(project.id, run.id);
+
+    expect(conflicted.status).toBe("conflicted");
+    expect(conflicted.conflictReason).toContain("No graph changes were committed");
+    expect(repo.getNode("module-web").summary).toBe(originalSummary);
+    expect(() => repo.getNode("orphan-module")).toThrow(/not found/i);
+    expect(repo.currentGraphRevision(project.id)).toBe(revisionBeforeApply);
+  });
+
   it("lets earlier planning agents take priority over later overlapping edits", () => {
     const project = repo.seedSelfGraph(selfRootPath);
     const early = repo.createAgentRun({
@@ -874,7 +941,12 @@ describe("SQLite graph repository", () => {
     expect(oldRepo.getAgentConfig("provider-project", "planning").model).toBe("planner");
     expect(
       (oldDb.prepare("SELECT sql FROM sqlite_master WHERE name = 'coding_agent_settings'").get() as { sql: string }).sql
-    ).toContain("'codex'");
+    ).toContain("'deepseek'");
+
+    expect(() =>
+      oldDb.prepare("UPDATE coding_agent_settings SET provider = 'deepseek', model = 'deepseek-v4-pro' WHERE project_id = 'provider-project'").run()
+    ).not.toThrow();
+    expect(oldRepo.getCodingAgentConfig("provider-project", "small").provider).toBe("deepseek");
 
     expect(() =>
       oldRepo.saveWorkspaceSettings("provider-project", {

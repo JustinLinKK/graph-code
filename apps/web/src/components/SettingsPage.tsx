@@ -1,4 +1,5 @@
 import {
+    AGENT_PROVIDERS,
     CODING_AGENT_MODES,
     REVIEW_AGENT_MODES,
     SCANNING_AGENT_MODES,
@@ -41,7 +42,7 @@ type SettingsPageProps = {
 };
 
 const agentKinds: AgentKind[] = ["planning"];
-const providers: AgentProvider[] = ["fake", "codex", "claudecode", "openai", "gemini", "openrouter"];
+const providers: AgentProvider[] = [...AGENT_PROVIDERS];
 
 type AgentSecretDraft = { type: AgentConfig["apiKeySource"]["type"]; value: string };
 type AgentPromptDraft = { type: AgentConfig["systemPromptSource"]["type"]; value: string };
@@ -887,7 +888,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateAgent(agentKind, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
+                          <select value={agent.provider} onChange={(event) => updateAgent(agentKind, providerPatch(event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -979,7 +980,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateCodingAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
+                          <select value={agent.provider} onChange={(event) => updateCodingAgent(mode, providerPatch(event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -1071,7 +1072,7 @@ export function SettingsPage({
                         <div className="form-grid">
                           <label className="form-field">
                             <span>Provider</span>
-                            <select value={agent.provider} onChange={(event) => updateReviewAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
+                            <select value={agent.provider} onChange={(event) => updateReviewAgent(mode, providerPatch(event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                               {providers.map((provider) => (
                                 <option key={provider} value={provider}>
                                   {providerLabel(provider)}
@@ -1163,7 +1164,7 @@ export function SettingsPage({
                       <div className="form-grid">
                         <label className="form-field">
                           <span>Provider</span>
-                          <select value={agent.provider} onChange={(event) => updateScanningAgent(mode, providerPatch(agent.model, event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
+                          <select value={agent.provider} onChange={(event) => updateScanningAgent(mode, providerPatch(event.target.value as AgentProvider, codexModels[0], claudeModels[0]))}>
                             {providers.map((provider) => (
                               <option key={provider} value={provider}>
                                 {providerLabel(provider)}
@@ -1354,9 +1355,24 @@ function ApiKeyEntry({
     return <FilePicker label="Select Key File" accept=".env,.txt,*/*" onFile={onFile} />;
   }
   if (agent.apiKeySource.type === "env") {
-    return <input value={agent.apiKeySource.value ?? ""} placeholder="OPENAI_API_KEY" onChange={(event) => onChange(event.target.value)} />;
+    return (
+      <input
+        aria-label={apiKeyEntryLabel(agent.apiKeySource.type)}
+        value={agent.apiKeySource.value ?? ""}
+        placeholder={defaultApiKeyEnvironmentVariable(agent.provider)}
+        onChange={(event) => onChange(event.target.value)}
+      />
+    );
   }
-  return <input type="password" value={agent.apiKeySource.value ?? ""} placeholder={configured ? "Configured - leave blank to keep" : "Paste API key"} onChange={(event) => onChange(event.target.value)} />;
+  return (
+    <input
+      aria-label={apiKeyEntryLabel(agent.apiKeySource.type)}
+      type="password"
+      value={agent.apiKeySource.value ?? ""}
+      placeholder={configured ? "Configured - leave blank to keep" : "Paste API key"}
+      onChange={(event) => onChange(event.target.value)}
+    />
+  );
 }
 
 function FilePicker({ label, accept, onFile }: { label: string; accept: string; onFile: (file: File | null) => void }) {
@@ -1406,7 +1422,22 @@ function readFileText(file: File): Promise<string> {
 }
 
 function modelFieldLabel(provider: AgentProvider): string {
-  return provider === "claudecode" ? "Claude Model" : "Model";
+  switch (provider) {
+    case "codex":
+      return "Codex Model";
+    case "claudecode":
+      return "Claude Model";
+    case "openai":
+      return "OpenAI Model";
+    case "gemini":
+      return "Gemini Model";
+    case "deepseek":
+      return "DeepSeek Model";
+    case "openrouter":
+      return "OpenRouter Model";
+    default:
+      return "Model";
+  }
 }
 
 function authEntryLabel(provider: AgentProvider, type: AgentConfig["apiKeySource"]["type"]): string {
@@ -1423,7 +1454,7 @@ function apiKeyEntryLabel(type: AgentConfig["apiKeySource"]["type"]): string {
   return "API Key Entry";
 }
 
-function providerPatch(currentModel: string, provider: AgentProvider, firstCodexModel?: CodexModelInfo, firstClaudeModel?: ClaudeModelInfo): AgentSettingsPatch {
+function providerPatch(provider: AgentProvider, firstCodexModel?: CodexModelInfo, firstClaudeModel?: ClaudeModelInfo): AgentSettingsPatch {
   if (provider === "codex") {
     return {
       provider,
@@ -1452,9 +1483,42 @@ function providerPatch(currentModel: string, provider: AgentProvider, firstCodex
   }
   return {
     provider,
-    model: currentModel,
-    cliCommand: ""
+    model: defaultModelForProvider(provider),
+    cliCommand: "",
+    apiKeySource: { type: "env", value: defaultApiKeyEnvironmentVariable(provider) }
   };
+}
+
+function defaultModelForProvider(provider: AgentProvider): string {
+  switch (provider) {
+    case "fake":
+      return "graphcode-fake-v1";
+    case "openai":
+      return "gpt-5.6";
+    case "gemini":
+      return "gemini-3.7-flash";
+    case "deepseek":
+      return "deepseek-v4-pro";
+    case "openrouter":
+      return "openai/gpt-4.1-mini";
+    default:
+      return "";
+  }
+}
+
+function defaultApiKeyEnvironmentVariable(provider: AgentProvider): string {
+  switch (provider) {
+    case "openai":
+      return "OPENAI_API_KEY";
+    case "gemini":
+      return "GEMINI_API_KEY";
+    case "deepseek":
+      return "DEEPSEEK_API_KEY";
+    case "openrouter":
+      return "OPENROUTER_API_KEY";
+    default:
+      return "";
+  }
 }
 
 function isCliProvider(provider: AgentProvider): provider is "codex" | "claudecode" {

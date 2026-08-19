@@ -1413,6 +1413,7 @@ export class GraphRepository {
     if (input.targetNodeId) {
       this.assertNodeInProject(input.projectId, input.targetNodeId);
     }
+    const graphPatchJson = serializeGraphPatchForPersistence(input.graphPatch);
     const id = `run-${crypto.randomUUID()}`;
     this.db
       .prepare(
@@ -1443,7 +1444,7 @@ export class GraphRepository {
         prompt: input.prompt ?? "",
         response: input.response ?? "",
         diff: input.diff ?? "",
-        graphPatchJson: input.graphPatch ? JSON.stringify(input.graphPatch) : null,
+        graphPatchJson,
         error: input.error ?? null
       });
     return this.getAgentRun(id);
@@ -1454,6 +1455,10 @@ export class GraphRepository {
     input: Partial<Pick<AgentRun, "status" | "response" | "diff" | "error" | "appliedGraphRevision" | "implementedAt" | "conflictReason">> & { graphPatch?: GraphPatch | null }
   ): AgentRun {
     const existing = this.getAgentRun(runId);
+    const existingRow = this.db.prepare("SELECT graph_patch_json FROM agent_runs WHERE id = ?").get(runId) as { graph_patch_json: string | null };
+    const graphPatchJson = input.graphPatch === undefined
+      ? existingRow.graph_patch_json
+      : serializeGraphPatchForPersistence(input.graphPatch);
     this.db
       .prepare(
         `
@@ -1476,7 +1481,7 @@ export class GraphRepository {
         status: input.status ?? existing.status,
         response: input.response ?? existing.response,
         diff: input.diff ?? existing.diff,
-        graphPatchJson: input.graphPatch === undefined ? (existing.graphPatch ? JSON.stringify(existing.graphPatch) : null) : input.graphPatch ? JSON.stringify(input.graphPatch) : null,
+        graphPatchJson,
         error: input.error === undefined ? existing.error : input.error,
         appliedGraphRevision: input.appliedGraphRevision === undefined ? existing.appliedGraphRevision : input.appliedGraphRevision,
         implementedAt: input.implementedAt === undefined ? existing.implementedAt : input.implementedAt,
@@ -1592,7 +1597,12 @@ export class GraphRepository {
     if (run.appliedGraphRevision !== null) {
       return run;
     }
-    const operations = run.graphPatch?.operations ?? [];
+    const storedRow = this.db.prepare("SELECT graph_patch_json FROM agent_runs WHERE id = ?").get(run.id) as { graph_patch_json: string | null };
+    const storedPatch = inspectStoredGraphPatch(storedRow.graph_patch_json);
+    if (storedPatch.error) {
+      return this.markAgentGraphPatchConflict(run.id, storedPatch.error);
+    }
+    const operations = storedPatch.patch?.operations ?? [];
     if (operations.length === 0) {
       return this.updateAgentRun(run.id, {
         appliedGraphRevision: this.currentGraphRevision(projectId),
@@ -1632,7 +1642,18 @@ export class GraphRepository {
       });
     });
 
-    return apply();
+    try {
+      return apply();
+    } catch (error) {
+      return this.markAgentGraphPatchConflict(run.id, graphPatchApplyFailureMessage(error));
+    }
+  }
+
+  private markAgentGraphPatchConflict(runId: string, conflictReason: string): AgentRun {
+    this.db
+      .prepare("UPDATE agent_runs SET status = 'conflicted', conflict_reason = ?, updated_at = datetime('now') WHERE id = ?")
+      .run(conflictReason, runId);
+    return this.getAgentRun(runId);
   }
 
   private findGraphPatchConflict(projectId: string, run: AgentRun, operations: GraphPatchOperation[]): string | null {
@@ -7828,14 +7849,55 @@ function mapAgentRun(row: AgentRunRow): AgentRun {
 }
 
 function parseGraphPatch(value: string | null): GraphPatch | null {
-  if (!value) {
-    return null;
+  return inspectStoredGraphPatch(value).patch;
+}
+
+function serializeGraphPatchForPersistence(value: GraphPatch | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const parsed = graphPatchSchema.safeParse(value);
+  if (!parsed.success) {
+    throw validationError(`Invalid graph patch: ${formatGraphPatchIssues(parsed.error.issues)}`);
   }
+  return JSON.stringify(parsed.data);
+}
+
+function inspectStoredGraphPatch(value: string | null): { patch: GraphPatch | null; error: string | null } {
+  if (!value) return { patch: null, error: null };
+  let decoded: unknown;
   try {
-    return graphPatchSchema.parse(JSON.parse(value));
+    decoded = JSON.parse(value);
   } catch {
-    return null;
+    return { patch: null, error: "Stored graph patch is not valid JSON. Generate a new planning proposal." };
   }
+  const parsed = graphPatchSchema.safeParse(decoded);
+  if (!parsed.success) {
+    return {
+      patch: null,
+      error: `Stored graph patch is invalid: ${formatGraphPatchIssues(parsed.error.issues)} Generate a new planning proposal.`
+    };
+  }
+  return { patch: parsed.data, error: null };
+}
+
+function formatGraphPatchIssues(issues: Array<{ path: Array<string | number>; message: string }>): string {
+  return issues
+    .slice(0, 5)
+    .map((issue) => `${formatGraphPatchIssuePath(issue.path)}: ${issue.message}`)
+    .join(" ");
+}
+
+function formatGraphPatchIssuePath(path: Array<string | number>): string {
+  if (path.length === 0) return "patch";
+  return path.reduce<string>((formatted, segment) => {
+    if (typeof segment === "number") return `${formatted}[${segment}]`;
+    return formatted ? `${formatted}.${segment}` : segment;
+  }, "");
+}
+
+function graphPatchApplyFailureMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message.trim() : "Unknown graph patch validation failure.";
+  const detail = message.startsWith("[") ? "A graph operation failed validation." : message.slice(0, 500);
+  return `Graph patch could not be applied safely: ${detail} No graph changes were committed.`;
 }
 
 function parseExtensionConfig(value: string | null): Record<string, string | number | boolean | null> {

@@ -22,9 +22,11 @@ export function providerLabel(provider: AgentProvider): string {
     case "claudecode":
       return "Claude Code";
     case "openai":
-      return "OpenAI";
+      return "OpenAI API";
     case "gemini":
-      return "Gemini";
+      return "Gemini API";
+    case "deepseek":
+      return "DeepSeek API";
     case "openrouter":
       return "OpenRouter";
     case "fake":

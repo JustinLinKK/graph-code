@@ -1214,7 +1214,7 @@ function parseJsonResponse(response: string): unknown {
   throw new Error("Scanning agent did not return JSON.");
 }
 
-function parsePlanningAgentOutput(response: string, prompt: string, graph: PlanningGraph, scope: GraphNode | null): z.infer<typeof planningAgentOutputSchema> {
+export function parsePlanningAgentOutput(response: string, prompt: string, graph: PlanningGraph, scope: GraphNode | null): z.infer<typeof planningAgentOutputSchema> {
   try {
     const parsed = planningAgentOutputSchema.parse(parseJsonResponse(response));
     if (parsed.graphPatch.operations.length > 0 && graphPatchOperationsReferenceKnownEntities(parsed.graphPatch, graph)) {
@@ -1612,16 +1612,22 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
   if (config.provider === "codex") {
     return { invoke: (messages) => invokeCodexCli(config, messages, workspaceRoot) };
   }
-  if (config.provider === "openai" || config.provider === "openrouter") {
+  if (config.provider === "openai" || config.provider === "openrouter" || config.provider === "deepseek") {
     const apiKey = resolveApiKey(config);
+    const baseURL =
+      config.provider === "openrouter"
+        ? "https://openrouter.ai/api/v1"
+        : config.provider === "deepseek"
+          ? "https://api.deepseek.com"
+          : undefined;
     const model = new ChatOpenAI({
       model: config.model,
       apiKey,
       temperature: 0,
-      ...(config.provider === "openrouter"
+      ...(baseURL
         ? {
             configuration: {
-              baseURL: "https://openrouter.ai/api/v1"
+              baseURL
             }
           }
         : {})

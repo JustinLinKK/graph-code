@@ -1018,6 +1018,20 @@ describe("graph API routes", () => {
     expect(customStyleResponse.json().color).toBe("#0f766e");
   });
 
+  it("returns concise field errors instead of raw schema issue arrays", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/projects/graphcode-self/nodes",
+      payload: { name: "Missing kind" }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({
+      error: "Request Error",
+      message: "Invalid request: kind: Required"
+    });
+  });
+
   it("resets the self graph from the development endpoint", async () => {
     const response = await app.inject({ method: "POST", url: "/api/dev/seed-self" });
     expect(response.statusCode).toBe(200);
