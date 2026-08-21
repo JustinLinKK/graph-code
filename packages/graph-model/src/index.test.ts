@@ -264,6 +264,16 @@ describe("graph model enums", () => {
         systemPromptSource: { type: "manual", value: "Stay scoped." }
       }).provider
     ).toBe("openrouter");
+    expect(
+      agentConfigSchema.parse({
+        agentKind: "coding",
+        provider: "deepseek",
+        model: "deepseek-v4-pro",
+        parallelLimit: 3,
+        apiKeySource: { type: "env", value: "DEEPSEEK_API_KEY" },
+        systemPromptSource: { type: "manual", value: "Stay scoped." }
+      }).provider
+    ).toBe("deepseek");
       expect(
         codingAgentConfigSchema.parse({
           mode: "large",
@@ -660,6 +670,51 @@ describe("graph model enums", () => {
         status: "implemented"
       }).status
     ).toBe("implemented");
+  });
+
+  it("validates graph patch fields against the entity action", () => {
+    const invalidCreate = graphPatchSchema.safeParse({
+      summary: "Create a reset task",
+      operations: [{ entityType: "node", entityId: "reset-the-game", action: "create", fields: { name: "reset the game" } }]
+    });
+    expect(invalidCreate.success).toBe(false);
+    if (!invalidCreate.success) {
+      expect(invalidCreate.error.issues).toEqual([
+        expect.objectContaining({ path: ["operations", 0, "fields", "kind"], message: "Required" })
+      ]);
+    }
+    expect(
+      graphPatchSchema.parse({
+        summary: "Update an existing task",
+        operations: [{ entityType: "node", entityId: "reset-the-game", action: "update", fields: { summary: "Reset safely." } }]
+      }).operations[0].fields
+    ).toEqual({ summary: "Reset safely." });
+  });
+
+  it("rejects ambiguous, unknown, and empty graph patch operations", () => {
+    const unknownField = graphPatchSchema.safeParse({
+      summary: "Unknown update",
+      operations: [{ entityType: "node", entityId: "node-1", action: "update", fields: { madeUpField: true } }]
+    });
+    expect(unknownField.success).toBe(false);
+
+    const emptyUpdate = graphPatchSchema.safeParse({
+      summary: "Empty update",
+      operations: [{ entityType: "node", entityId: "node-1", action: "update", fields: {} }]
+    });
+    expect(emptyUpdate.success).toBe(false);
+
+    const duplicateMutation = graphPatchSchema.safeParse({
+      summary: "Duplicate update",
+      operations: [
+        { entityType: "node", entityId: "node-1", action: "update", fields: { summary: "First" } },
+        { entityType: "node", entityId: "node-1", action: "update", fields: { summary: "Second" } }
+      ]
+    });
+    expect(duplicateMutation.success).toBe(false);
+
+    const unknownEnvelopeField = graphPatchSchema.safeParse({ summary: "Strict patch", operations: [], unexpected: true });
+    expect(unknownEnvelopeField.success).toBe(false);
   });
 
   it("accepts GitHub device flow payloads", () => {

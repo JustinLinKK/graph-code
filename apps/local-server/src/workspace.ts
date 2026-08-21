@@ -2519,7 +2519,7 @@ function isCliProvider(provider: AgentProvider): provider is "codex" | "claudeco
 function renderProviderForAgent(provider: string): RenderedWorkUnitContext["provider"] {
   if (provider === "gemini") return "google";
   if (provider === "claudecode") return "anthropic";
-  if (provider === "openai" || provider === "openrouter" || provider === "codex") return "openai";
+  if (provider === "openai" || provider === "openrouter" || provider === "deepseek" || provider === "codex") return "openai";
   return "generic";
 }
 
