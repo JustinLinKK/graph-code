@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { detectFolderPickerEnvironment, WorkspaceRuntime } from "./workspace";
+import { detectFolderPickerEnvironment, resolveKnownWindowsCliPath, WorkspaceRuntime } from "./workspace";
 
 type SourceReader = {
   readSourceFile(projectId: string, relativePath: string): Promise<string>;
@@ -42,5 +42,26 @@ describe("folder picker environment detection", () => {
   it("uses native pickers only on supported host platforms", () => {
     expect(detectFolderPickerEnvironment("darwin", {}, "")).toBe("macos");
     expect(detectFolderPickerEnvironment("linux", {}, "Linux version 6.8.0")).toBe("unsupported");
+  });
+});
+
+describe("Windows CLI resolution", () => {
+  it("finds Claude's native per-user executable when the server PATH is stale", () => {
+    const userProfile = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-windows-user-"));
+    const executable = path.join(userProfile, ".local", "bin", "claude.exe");
+    fs.mkdirSync(path.dirname(executable), { recursive: true });
+    fs.writeFileSync(executable, "");
+
+    expect(resolveKnownWindowsCliPath("claude", { USERPROFILE: userProfile })).toBe(executable);
+  });
+
+  it("finds the npm command shim and ignores custom command paths", () => {
+    const appData = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-windows-appdata-"));
+    const commandShim = path.join(appData, "npm", "claude.cmd");
+    fs.mkdirSync(path.dirname(commandShim), { recursive: true });
+    fs.writeFileSync(commandShim, "");
+
+    expect(resolveKnownWindowsCliPath("claude.cmd", { APPDATA: appData })).toBe(commandShim);
+    expect(resolveKnownWindowsCliPath("C:\\custom\\claude.exe", { APPDATA: appData })).toBeNull();
   });
 });

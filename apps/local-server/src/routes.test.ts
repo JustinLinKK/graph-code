@@ -156,7 +156,8 @@ describe("graph API routes", () => {
           {
             agentKind: "planning",
             provider: "claudecode",
-            model: "definitely-missing-claude-command",
+            model: "sonnet",
+            cliCommand: "definitely-missing-claude-command",
             parallelLimit: 1,
             apiKeySource: { type: "env", value: "" },
             systemPromptSource: { type: "manual", value: "Plan." }

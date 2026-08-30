@@ -5,6 +5,8 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, IndexState, NodeDetail } from "@graphcode/graph-model";
 import {
   extractWorkUnitProposalMetadata,
+  normalizeOpenRouterResponse,
+  resolveKnownWindowsAgentCliPath,
   runCodingAgent,
   runPlanningAgent,
   runReviewAgent,
@@ -228,11 +230,191 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
 
+describe("Windows agent CLI resolution", () => {
+  it("uses Claude's per-user native binary when it is not present on the inherited PATH", () => {
+    const userProfile = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-agent-windows-user-"));
+    const executable = path.join(userProfile, ".local", "bin", "claude.exe");
+    fs.mkdirSync(path.dirname(executable), { recursive: true });
+    fs.writeFileSync(executable, "");
+
+    expect(resolveKnownWindowsAgentCliPath("claude", "claude", { USERPROFILE: userProfile }, "win32")).toBe(executable);
+    expect(resolveKnownWindowsAgentCliPath("claude", "claude", { USERPROFILE: userProfile }, "linux")).toBeNull();
+  });
+});
+
 function normalizeNewlines(value: string): string {
   return value.replace(/\r\n/g, "\n");
 }
 
 describe("GraphCode agent runtime", () => {
+  it("runs OpenRouter chat completions with typed text content blocks", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-openrouter",
+          object: "chat.completion",
+          created: 1,
+          model: "openai/gpt-4.1-mini",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: [
+                  {
+                    type: "text",
+                    text: JSON.stringify({
+                      response: "OpenRouter plan",
+                      graphPatch: {
+                        summary: "Update the selected block",
+                        operations: [
+                          {
+                            entityType: "node",
+                            entityId: "node-1",
+                            action: "update",
+                            fields: { summary: "Updated by OpenRouter" }
+                          }
+                        ]
+                      },
+                      memoryUpdates: []
+                    })
+                  }
+                ]
+              }
+            }
+          ],
+          usage: { prompt_tokens: 10, completion_tokens: 10, total_tokens: 20 }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    try {
+      const result = await runPlanningAgent(
+        { projectId: "project", prompt: "Update the block", scopeNodeId: "node-1" },
+        {
+          config: {
+            ...baseConfig,
+            provider: "openrouter",
+            model: "openai/gpt-4.1-mini",
+            apiKeySource: { type: "manual", value: "test-openrouter-key" },
+            systemPromptSource: { type: "manual", value: "" }
+          },
+          runId: "run-openrouter",
+          toolbox: toolbox()
+        }
+      );
+
+      expect(result.response).toBe("OpenRouter plan");
+      expect(result.graphPatch?.operations).toEqual([
+        expect.objectContaining({ entityType: "node", entityId: "node-1", action: "update" })
+      ]);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      const [requestUrl, requestInit] = fetchMock.mock.calls[0];
+      expect(String(requestUrl)).toBe("https://openrouter.ai/api/v1/chat/completions");
+      expect(new Headers(requestInit?.headers).get("authorization")).toBe("Bearer test-openrouter-key");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("turns OpenRouter HTTP-200 error envelopes into actionable HTTP errors", async () => {
+    const normalized = await normalizeOpenRouterResponse(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            message: "Rate limit exceeded",
+            metadata: { error_type: "rate_limit_exceeded", provider_code: "rate_limited" }
+          }
+        }),
+        { status: 200, headers: { "content-type": "application/json", "retry-after": "12" } }
+      )
+    );
+
+    expect(normalized.status).toBe(429);
+    expect(normalized.headers.get("retry-after")).toBe("12");
+    await expect(normalized.json()).resolves.toEqual({
+      error: {
+        code: 429,
+        message: "Rate limit exceeded",
+        metadata: { error_type: "rate_limit_exceeded", provider_code: "rate_limited" }
+      }
+    });
+  });
+
+  it("surfaces OpenRouter refusals instead of returning empty assistant text", async () => {
+    const normalized = await normalizeOpenRouterResponse(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: { role: "assistant", content: null, refusal: "Request blocked by policy." }
+            }
+          ]
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+
+    expect(normalized.status).toBe(422);
+    await expect(normalized.json()).resolves.toEqual({
+      error: {
+        code: 422,
+        message: "OpenRouter refused the request: Request blocked by policy.",
+        metadata: { error_type: "invalid_response" }
+      }
+    });
+  });
+
+  it("makes reasoning-only and missing-message OpenRouter responses retryable", async () => {
+    const reasoningOnly = await normalizeOpenRouterResponse(
+      new Response(
+        JSON.stringify({
+          choices: [
+            {
+              index: 0,
+              finish_reason: "length",
+              message: { role: "assistant", content: null, reasoning: "Partial reasoning" }
+            }
+          ]
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      )
+    );
+    const missingMessage = await normalizeOpenRouterResponse(
+      new Response(JSON.stringify({ choices: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" }
+      })
+    );
+
+    expect(reasoningOnly.status).toBe(502);
+    await expect(reasoningOnly.json()).resolves.toEqual({
+      error: {
+        code: 502,
+        message: "OpenRouter returned reasoning without final assistant text.",
+        metadata: { error_type: "invalid_response" }
+      }
+    });
+    expect(missingMessage.status).toBe(502);
+  });
+
+  it("leaves ordinary OpenRouter string responses unchanged", async () => {
+    const response = new Response(
+      JSON.stringify({
+        choices: [{ index: 0, finish_reason: "stop", message: { role: "assistant", content: "ok" } }]
+      }),
+      { status: 200, headers: { "content-type": "application/json" } }
+    );
+
+    await expect(normalizeOpenRouterResponse(response)).resolves.toBe(response);
+  });
+
   it("extracts typed work-unit contract metadata without contaminating the unified diff", () => {
     const response = [
       "diff --git a/src/module.ts b/src/module.ts",
@@ -267,7 +449,7 @@ describe("GraphCode agent runtime", () => {
     }));
   });
 
-  it("runs the planning agent through LangGraph and marks scoped status", async () => {
+  it("runs the planning agent without mutating scoped status before its graph patch is applied", async () => {
     const tools = toolbox();
     const result = await runPlanningAgent(
       {
@@ -280,10 +462,13 @@ describe("GraphCode agent runtime", () => {
 
     expect(result.response).toContain("Fake planning response");
     expect(result.response).toContain("Topology-scoped planning evidence");
+    expect(result.response).toContain("source=src/module.ts:1-4");
+    expect(result.response).toContain('"codeDirectory": "src/existing-or-new-file.ts"');
     expect(result.graphPatch?.operations).toEqual([
       expect.objectContaining({ entityType: "node", entityId: "node-1", action: "update" })
     ]);
-    expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ entityId: "node-1", status: "planning" })]);
+    expect(tools.setStatuses).not.toHaveBeenCalled();
+    expect(result.touched).toEqual([]);
     expect(tools.readGraph).not.toHaveBeenCalled();
   });
 
@@ -331,6 +516,7 @@ describe("GraphCode agent runtime", () => {
 
     it("stores parsed test artifact manifests with coding proposals", async () => {
       const argsLog = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.args`);
+      const stdinLog = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.stdin`);
       const command = writeFakeCli(
         [
           "diff --git a/src/module.ts b/src/module.ts",
@@ -341,7 +527,7 @@ describe("GraphCode agent runtime", () => {
           "GRAPHCODE_TEST_ARTIFACTS_JSON",
           "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}"
         ],
-        { argsLog }
+        { argsLog, stdinLog }
       );
       const tools = toolbox();
 
@@ -370,7 +556,10 @@ describe("GraphCode agent runtime", () => {
       expect(args).toContain("--disallowedTools\nEdit\n--disallowedTools\nMultiEdit\n--disallowedTools\nWrite\n--disallowedTools\nNotebookEdit");
       expect(args).toContain("--model\nsonnet");
       expect(args).toContain("--effort\nmedium");
-      expect(args).toContain("GraphCode Claude Code CLI account-plan invocation.");
+      expect(args).not.toContain("GraphCode Claude Code CLI account-plan invocation.");
+      const stdin = fs.readFileSync(stdinLog, "utf8");
+      expect(stdin).toContain("GraphCode Claude Code CLI account-plan invocation.");
+      expect(stdin).toContain("Update value and test it");
     });
 
     it("runs Claude Code direct-edit modes with model, effort, fast settings, and git diff capture", async () => {
@@ -556,6 +745,66 @@ describe("GraphCode agent runtime", () => {
     expect(tools.setStatuses).not.toHaveBeenCalled();
   });
 
+  it("clears scan source evidence that points at a directory instead of an inventoried file", async () => {
+    const tools = toolbox({
+      buildFakeLocalScanOutput: vi.fn(async (_projectId, file) => ({
+        filePath: file.path,
+        contentHash: file.contentHash,
+        summary: "Directory-like source evidence",
+        nodes: [
+          {
+            stableKey: `module:${file.path}`,
+            kind: "module" as const,
+            name: file.path,
+            summary: "Directory-backed module",
+            codeContext: "Invalid directory source evidence",
+            source: { path: "src", startLine: 1, endLine: 2 },
+            language: "typescript" as const
+          }
+        ],
+        edges: []
+      }))
+    });
+
+    await runScanningAgent(
+      { projectId: "project" },
+      { config: { ...baseConfig, agentKind: "scanning" }, runId: "run-directory-source", toolbox: tools }
+    );
+
+    const scanResult = vi.mocked(tools.applyScanResult).mock.calls[0]?.[1] as ScanPipelineResult;
+    expect(scanResult.localOutputs[0]?.nodes[0]?.source).toEqual({ path: null, startLine: null, endLine: null });
+  });
+
+  it("drops unresolved standalone attachment drafts before graph merge", async () => {
+    const tools = toolbox({
+      buildFakeLocalScanOutput: vi.fn(async (_projectId, file) => ({
+        filePath: file.path,
+        contentHash: file.contentHash,
+        summary: "Orphan attachment",
+        nodes: [
+          {
+            stableKey: `input:${file.path}:orphan`,
+            kind: "input" as const,
+            name: "orphan",
+            summary: "Missing owner",
+            codeContext: "No attachment target",
+            source: { path: file.path, startLine: 1, endLine: 1 },
+            language: "typescript" as const
+          }
+        ],
+        edges: []
+      }))
+    });
+
+    await runScanningAgent(
+      { projectId: "project" },
+      { config: { ...baseConfig, agentKind: "scanning" }, runId: "run-orphan-attachment", toolbox: tools }
+    );
+
+    const scanResult = vi.mocked(tools.applyScanResult).mock.calls[0]?.[1] as ScanPipelineResult;
+    expect(scanResult.localOutputs.flatMap((output) => output.nodes).some((draft) => draft.name === "orphan")).toBe(false);
+  });
+
   it("reads complete configured top modules plus bounded nearby model implementation evidence", async () => {
     const topModulePath = "src/perfseer/configs/student.yaml";
     const modelPath = "src/perfseer/model.py";
@@ -682,6 +931,36 @@ describe("GraphCode agent runtime", () => {
     expect(tools.buildFakeLocalScanOutput).toHaveBeenCalledTimes(5);
   });
 
+  it("constrains provider scans to the GraphCode node and edge vocabularies", async () => {
+    const stdinLog = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-scan-prompt-")), "stdin.log");
+    const command = writeFakeCli(
+      [
+        `${JSON.stringify({ scopePath: ".", summary: "Empty repository with a } brace", topModuleStableKeys: [], nodes: [], edges: [], memoryUpdates: [] })} trailing provider text`
+      ],
+      { stdinLog }
+    );
+    const tools = toolbox({
+      listScannableFiles: vi.fn(async () => [])
+    });
+
+    await runScanningAgent(
+      { projectId: "project" },
+      {
+        config: { ...baseConfig, agentKind: "scanning", provider: "codex", cliCommand: command, model: "gpt-5.4" },
+        runId: "run-scan-vocabulary",
+        toolbox: tools
+      }
+    );
+
+    const stdin = fs.readFileSync(stdinLog, "utf8");
+    expect(stdin).toContain("Every node kind must be exactly one of: framework, module, website, ui_component, function, object");
+    expect(stdin).toContain("Every edge kind must be exactly one of: calls, imports, uses, owns, impacts, flows, describes_format.");
+    expect(stdin).toContain("Every node language must be exactly one of: unknown, typescript, javascript");
+    expect(stdin).toContain("The ML Pipeline extension is not enabled. Do not emit ML-specific nodes");
+    expect(stdin).toContain("use framework for ordinary repositories");
+    expect(stdin).toContain("Never invent kind values.");
+  });
+
   it("rejects inverted source ranges in structured scan output", () => {
     expect(() =>
       scanLocalOutputSchema.parse({
@@ -723,6 +1002,67 @@ describe("GraphCode agent runtime", () => {
     });
 
     expect(parsed.nodes[0]?.detail?.extensionDetails?.schemaId).toBe("ml_optimizer");
+  });
+
+  it("normalizes absent provider source evidence and optional text", () => {
+    const parsed = scanLocalOutputSchema.parse({
+      filePath: "src/module.ts",
+      contentHash: "hash-module",
+      summary: null,
+      nodes: [
+        {
+          stableKey: "module:src/module.ts",
+          kind: "module",
+          name: "module.ts",
+          summary: null,
+          codeContext: null,
+          source: null,
+          language: "diff",
+          detail: {
+            processKind: "review",
+            notes: null,
+            extensionDetails: { packageId: "", schemaId: "", payload: {} }
+          }
+        }
+      ],
+      edges: [
+        {
+          stableKey: "owns:root:module",
+          kind: "owns",
+          sourceStableKey: "module:root",
+          targetStableKey: "module:src/module.ts",
+          codeContext: null,
+          source: null
+        }
+      ]
+    });
+
+    expect(parsed.summary).toBe("");
+    expect(parsed.nodes[0]).toMatchObject({ summary: "", codeContext: "", language: "other", source: { path: null, startLine: null, endLine: null } });
+    expect(parsed.nodes[0]?.detail?.processKind).toBeUndefined();
+    expect(parsed.nodes[0]?.detail?.notes).toBeUndefined();
+    expect(parsed.nodes[0]?.detail?.extensionDetails).toBeUndefined();
+    expect(parsed.edges[0]).toMatchObject({ codeContext: "", source: { path: null, startLine: null, endLine: null } });
+  });
+
+  it("normalizes workflow attachment containment to attachedToStableKey", () => {
+    const parsed = scanLocalOutputSchema.parse({
+      filePath: "src/module.ts",
+      contentHash: "hash-module",
+      nodes: [
+        {
+          stableKey: "input:module:value",
+          kind: "input",
+          name: "value",
+          parentStableKey: "function:module:wrong-parent",
+          attachedToStableKey: "function:module:run"
+        }
+      ],
+      edges: []
+    });
+
+    expect(parsed.nodes[0]?.parentStableKey).toBeUndefined();
+    expect(parsed.nodes[0]?.attachedToStableKey).toBe("function:module:run");
   });
 
       it("marks reviewed or bugged after review", async () => {

@@ -142,6 +142,90 @@ describe("WorkspaceRuntime MA-5 integration gate", () => {
     }
   }, 20000);
 
+  it("returns a failed work-unit retry immediately and continues it in the background", async () => {
+    const fixture = setupWorkflow();
+    let releaseRetry!: () => void;
+    const retryGate = new Promise<void>((resolve) => {
+      releaseRetry = resolve;
+    });
+    const mutableRuntime = fixture.runtime as unknown as {
+      runCodingWorkflowCurrentLayer: (workflowId: string) => Promise<void>;
+    };
+    mutableRuntime.runCodingWorkflowCurrentLayer = async () => {
+      await retryGate;
+      throw new Error("OpenRouter retry failed.");
+    };
+    fixture.repo.saveCodingWorkUnitContextDiagnostics({
+      projectId: fixture.project.id,
+      workflowId: fixture.workflow.id,
+      workUnitId: fixture.item.id,
+      compilerVersion: "test",
+      diagnostics: {
+        runtimeFailure: {
+          status: "failed",
+          reason: "OpenRouter request failed.",
+          attempts: 2,
+          providerId: "openrouter",
+          modelId: "test/model"
+        }
+      }
+    });
+    fixture.repo.updateCodingWorkflowItem({ itemId: fixture.item.id, status: "failed" });
+    fixture.repo.updateCodingWorkflowStatus(fixture.workflow.id, "failed", fixture.item.layerIndex);
+
+    const retryRequest = fixture.runtime
+      .controlCodingWorkflow({
+        projectId: fixture.project.id,
+        workflowId: fixture.workflow.id,
+        action: "retry",
+        itemId: fixture.item.id
+      });
+    let retryTimeout: ReturnType<typeof setTimeout> | undefined;
+    let retryReleased = false;
+
+    try {
+      const retried = await Promise.race([
+        retryRequest,
+        new Promise<null>((resolve) => {
+          retryTimeout = setTimeout(() => resolve(null), 100);
+        })
+      ]);
+      expect(retried, "Retry should return before background coding completes.").not.toBeNull();
+      if (!retried) return;
+      expect(retried).toMatchObject({
+        status: "running",
+        items: [expect.objectContaining({ id: fixture.item.id, status: "pending", agentRunId: null, proposalId: null })]
+      });
+      expect(retried?.items[0].contextDiagnostics).not.toHaveProperty("runtimeFailure");
+
+      releaseRetry();
+      retryReleased = true;
+      let failed = fixture.repo.getCodingWorkflow(fixture.workflow.id);
+      for (let attempt = 0; attempt < 20 && failed.status !== "failed"; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        failed = fixture.repo.getCodingWorkflow(fixture.workflow.id);
+      }
+      expect(failed).toMatchObject({
+        status: "failed",
+        items: [
+          expect.objectContaining({
+            id: fixture.item.id,
+            status: "failed",
+            contextDiagnostics: expect.objectContaining({
+              runtimeFailure: expect.objectContaining({ reason: "OpenRouter retry failed.", status: "failed" })
+            })
+          })
+        ]
+      });
+    } finally {
+      if (retryTimeout) clearTimeout(retryTimeout);
+      if (!retryReleased) releaseRetry();
+      await retryRequest;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      fixture.runtime.close();
+    }
+  });
+
   it("validates without mutation, then applies a clean layer only after checks pass", async () => {
     const fixture = setupWorkflow();
     try {

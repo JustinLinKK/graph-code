@@ -212,9 +212,11 @@ export function partitionGraphTask(rawInput: GraphPartitionInput): CodingWorkflo
   const cutRelationshipEdges = relatedClassifications.filter((edge) => edge.cut).length;
   const estimatedTokensByWorkUnit = Object.fromEntries([...partitions.values()].map((partition) => [partition.id, partition.estimatedTokens]));
   const warnings = [
-    "MA-2 partition output is preview-only; production dispatch remains on the legacy hierarchy/conflict-group scheduler.",
     ...(subgraph.omissions.length > 0 ? [`Scoped subgraph omitted ${subgraph.omissions.length} nodes or edges with explicit reasons.`] : []),
-    ...(input.indexState === "complete" ? [] : ["Index evidence is not complete; omissions and routing risk retain that state."])
+    ...(input.indexState === "complete" ? [] : ["Index evidence is not complete; omissions and routing risk retain that state."]),
+    ...(workUnits.some((unit) => unit.plannedWriteScopes.length === 0)
+      ? ["At least one work unit has no safe write scope. Link every planned coding block to a workspace-relative source path before starting."]
+      : [])
   ];
   const result = {
     schemaVersion: 1 as const,

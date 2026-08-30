@@ -549,19 +549,42 @@ export async function applyCombinedPatchToWorkspace(input: {
   const patchPath = path.join(temporaryDirectory, "layer.patch");
   try {
     await fsp.writeFile(patchPath, normalizeUnifiedDiffFormatting(input.combinedDiff), "utf8");
-    await execFileAsync("git", ["apply", "--check", "--whitespace=nowarn", patchPath], {
-      cwd: workspaceRoot,
+    const application = await resolveGitApplyContext(workspaceRoot);
+    const directoryArgs = application.directory ? [`--directory=${application.directory}`] : [];
+    await execFileAsync("git", ["apply", "--check", "--whitespace=nowarn", ...directoryArgs, patchPath], {
+      cwd: application.cwd,
       timeout: input.timeoutMs ?? 60000,
       maxBuffer: 10 * 1024 * 1024
     });
-    await execFileAsync("git", ["apply", "--whitespace=nowarn", patchPath], {
-      cwd: workspaceRoot,
+    await execFileAsync("git", ["apply", "--whitespace=nowarn", ...directoryArgs, patchPath], {
+      cwd: application.cwd,
       timeout: input.timeoutMs ?? 60000,
       maxBuffer: 10 * 1024 * 1024
     });
   } finally {
     await fsp.rm(temporaryDirectory, { recursive: true, force: true });
   }
+}
+
+async function resolveGitApplyContext(workspaceRoot: string): Promise<{ cwd: string; directory: string | null }> {
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: workspaceRoot,
+      timeout: 10000,
+      maxBuffer: 1024 * 1024
+    });
+    const gitRoot = path.resolve(stdout.trim());
+    const relativeWorkspace = path.relative(gitRoot, workspaceRoot);
+    if (relativeWorkspace && !relativeWorkspace.startsWith("..") && !path.isAbsolute(relativeWorkspace)) {
+      return { cwd: gitRoot, directory: relativeWorkspace.split(path.sep).join("/") };
+    }
+    if (!relativeWorkspace) {
+      return { cwd: gitRoot, directory: null };
+    }
+  } catch {
+    // A standalone workspace without Git metadata can still use git apply in no-repository mode.
+  }
+  return { cwd: workspaceRoot, directory: null };
 }
 
 type MutableDiffFile = {

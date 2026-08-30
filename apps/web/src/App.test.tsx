@@ -742,12 +742,14 @@ function settingsViewFromMutation(input: any) {
 }
 
 describe("GraphCode app shell", () => {
+    let failStartedWorkflow = false;
     beforeEach(() => {
         vi.restoreAllMocks();
         reactFlowMock.fitView.mockClear();
         reactFlowMock.setCenter.mockClear();
         reactFlowMock.setViewport.mockClear();
         window.localStorage.clear();
+        failStartedWorkflow = false;
         rememberExplicitProjectSession();
         document.documentElement.dataset.theme = "system";
       const agentRuns: AgentRun[] = [];
@@ -1052,13 +1054,24 @@ describe("GraphCode app shell", () => {
             const overrides = new Map((payload.modeOverrides ?? []).map((item: { nodeId: string; mode: string }) => [item.nodeId, item.mode]));
             return json({
               ...workflowResponse,
-              status: "blocked",
+              status: failStartedWorkflow ? "failed" : "blocked",
               items: workflowResponse.items.map((item) => ({
                 ...item,
                 selectedMode: overrides.get(item.nodeId) ?? item.selectedMode,
-                status: "proposed",
-                agentRunId: "run-coding-workflow",
-                proposalId: "proposal-coding-workflow"
+                status: failStartedWorkflow ? "failed" : "proposed",
+                agentRunId: failStartedWorkflow ? "run-coding-workflow-failed" : "run-coding-workflow",
+                proposalId: failStartedWorkflow ? null : "proposal-coding-workflow",
+                contextDiagnostics: failStartedWorkflow
+                  ? {
+                      runtimeFailure: {
+                        status: "failed",
+                        reason: "OpenRouter rejected the work-unit response.",
+                        attempts: 2,
+                        providerId: "openrouter",
+                        modelId: "test/model"
+                      }
+                    }
+                  : {}
               }))
             });
           }
@@ -1071,7 +1084,15 @@ describe("GraphCode app shell", () => {
           }
           if (url === "/api/coding-workflows/control") {
             const payload = JSON.parse(String(init?.body ?? "{}"));
-            return json({ ...workflowResponse, status: payload.action === "cancel" ? "cancelled" : "blocked" });
+            return json({
+              ...workflowResponse,
+              status: payload.action === "cancel" ? "cancelled" : payload.action === "retry" ? "running" : "blocked",
+              items: workflowResponse.items.map((item) => ({
+                ...item,
+                status: payload.action === "retry" ? "pending" : item.status,
+                contextDiagnostics: {}
+              }))
+            });
           }
           if (url === "/api/projects/graphcode-self/coding-workflows/workflow-1") {
             return json(workflowResponse);
@@ -1934,6 +1955,34 @@ describe("GraphCode app shell", () => {
         })
       );
     });
+  });
+
+  it("shows a work-unit failure reason and starts retry without leaving the failed card stuck", async () => {
+    failStartedWorkflow = true;
+    render(<App />);
+
+    fireEvent.click(await screen.findByText("Web Workspace"));
+    fireEvent.click(await screen.findByRole("button", { name: /Preview workflow/i }));
+    fireEvent.click(await screen.findByRole("button", { name: /Start workflow/i }));
+
+    expect(await screen.findByText(/OpenRouter rejected the work-unit response/)).toHaveTextContent(
+      "OpenRouter rejected the work-unit response. (openrouter/test/model, 2 attempts)"
+    );
+    const retry = await screen.findByRole("button", { name: "Retry" });
+    expect(retry).toBeEnabled();
+    fireEvent.click(retry);
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/coding-workflows/control",
+        expect.objectContaining({
+          method: "POST",
+          body: expect.stringContaining('"action":"retry"')
+        })
+      );
+      expect(screen.getByText(/Web Workspace · Running · layer 1/i)).toBeInTheDocument();
+    });
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
   });
 
   it("starts a small direct coding run for leaf function actions", async () => {

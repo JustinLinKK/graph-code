@@ -458,4 +458,27 @@ describe("MA-5 integration runner", () => {
       await fsp.rm(root, { recursive: true, force: true });
     }
   }, 15000);
+
+  it("applies workspace-relative patches when the workspace is nested inside a parent Git repository", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-nested-git-"));
+    const workspace = path.join(root, "examples", "fixture");
+    try {
+      await fsp.mkdir(path.join(workspace, "src"), { recursive: true });
+      await fsp.writeFile(path.join(workspace, "src/a.ts"), "export const a = 1;\n", "utf8");
+      const { execFile } = await import("node:child_process");
+      await new Promise<void>((resolve, reject) =>
+        execFile("git", ["init", "--quiet"], { cwd: root }, (error) => (error ? reject(error) : resolve()))
+      );
+
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: workspace,
+        combinedDiff: editDiff("src/a.ts", 1, "export const a = 1;", "export const a = 2;"),
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+
+      expect(await fsp.readFile(path.join(workspace, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
 });

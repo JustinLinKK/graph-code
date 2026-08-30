@@ -7,6 +7,10 @@ export type DiscountInput = {
 };
 
 export function calculateDiscount(input: DiscountInput): number {
+  if (input.subtotal < 50) {
+    return 0;
+  }
+
   let discount = 0;
 
   if (input.tier === "member") {
@@ -15,10 +19,6 @@ export function calculateDiscount(input: DiscountInput): number {
 
   if (input.tier === "vip") {
     discount += 0.12;
-  }
-
-  if (input.subtotal < 50 && input.couponCode) {
-    return 0;
   }
 
   if (input.couponCode === "SPRING10") {

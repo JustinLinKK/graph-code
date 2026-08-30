@@ -1707,7 +1707,7 @@ export class GraphRepository {
           execution: input.execution,
           position: input.position,
           size: input.size,
-          agentStatus: "implemented"
+          agentStatus: "planning"
         });
       } else {
         this.assertNodeInProject(projectId, operation.entityId);
@@ -1734,7 +1734,7 @@ export class GraphRepository {
           animated: input.animated,
           pointingEnabled: input.pointingEnabled,
           pointingDirection: input.pointingDirection,
-          agentStatus: "implemented"
+          agentStatus: "planning"
         });
       } else {
         this.assertEdgeInProject(projectId, operation.entityId);
@@ -1931,19 +1931,30 @@ export class GraphRepository {
     const sourceHashes =
       orchestrationContext.sourceHashes ??
       Object.fromEntries(this.listScanFileStates(project.id).map((file) => [file.filePath, file.contentHash]));
-    const orchestration = previewPartitionedCodingWorkflow({
-      workflowId,
-      projectId: project.id,
-      scopeNodeId: scope.id,
-      scopeName: scope.name,
-      planItems,
-      nodes: this.listNodes(project.id),
-      edges: this.listEdges(project.id),
-      revision: { ...orchestrationContext, sourceHashes },
-      maximumConcurrency: options.executionPolicy?.maximumConcurrency,
-      partitionConstraints: options.partitionConstraints,
-      executionPolicy: options.executionPolicy
-    });
+    const orchestration = classifyWorkspaceWritePermissions(
+      previewPartitionedCodingWorkflow({
+        workflowId,
+        projectId: project.id,
+        scopeNodeId: scope.id,
+        scopeName: scope.name,
+        planItems,
+        nodes: this.listNodes(project.id),
+        edges: this.listEdges(project.id),
+        revision: { ...orchestrationContext, sourceHashes },
+        maximumConcurrency: options.executionPolicy?.maximumConcurrency,
+        partitionConstraints: options.partitionConstraints,
+        executionPolicy: options.executionPolicy
+      }),
+      project.rootPath
+    );
+    if (status === "running") {
+      const unlinkedUnits = orchestration.workUnits.filter((unit) => unit.plannedWriteScopes.length === 0);
+      if (unlinkedUnits.length > 0) {
+        throw validationError(
+          `Cannot start coding because ${unlinkedUnits.map((unit) => unit.title).join(", ")} ${unlinkedUnits.length === 1 ? "has" : "have"} no safe write scope. Link each planned block to a workspace-relative source path and preview again.`
+        );
+      }
+    }
     const nodeById = new Map(this.listNodes(project.id).map((node) => [node.id, node]));
     const routingByUnitId = new Map(orchestration.routingDecisions.map((decision) => [decision.workUnitId, decision]));
     const usedAnchorNodeIds = new Set<string>();
@@ -4167,8 +4178,12 @@ export class GraphRepository {
       if (!isDomainNodeKind(node.kind) || node.parentId || node.attachedToId) {
         throw validationError(`Scanner top module must resolve to a parentless domain node: ${stableKey}`);
       }
-      if (configuredPaths.length > 0 && node.kind !== "ml_model") {
-        throw validationError(`Configured top modules must resolve to parentless ml_model nodes; received ${node.kind} for ${stableKey}.`);
+      const mlPipelineEnabled = this.isExtensionPackageEnabled(projectId, "@graphcode/extension-ml-pipeline");
+      if (configuredPaths.length > 0 && mlPipelineEnabled && node.kind !== "ml_model") {
+        throw validationError(`Configured ML top modules must resolve to parentless ml_model nodes; received ${node.kind} for ${stableKey}.`);
+      }
+      if (configuredPaths.length > 0 && !mlPipelineEnabled && node.kind !== "framework") {
+        throw validationError(`Configured top modules must resolve to parentless framework nodes; received ${node.kind} for ${stableKey}.`);
       }
       const extensionDefinition = extensionNodeDefinitionForKind(node.kind);
       if (extensionDefinition && !extensionDefinition.allowTopLevel) {
@@ -7950,6 +7965,29 @@ function parseStringArray(value: string | null | undefined): string[] {
 
 function normalizeRepositoryPath(value: string): string {
   return value.replaceAll("\\", "/").replace(/^\.\/+/, "").replace(/\/+/g, "/");
+}
+
+function classifyWorkspaceWritePermissions(
+  orchestration: CodingWorkflowOrchestration,
+  workspaceRoot: string
+): CodingWorkflowOrchestration {
+  const classified = structuredClone(orchestration);
+  classified.workUnits = classified.workUnits.map((unit) => ({
+    ...unit,
+    plannedWriteScopes: unit.plannedWriteScopes.map((scope) => {
+      if (scope.permission !== "edit") return scope;
+      const absolutePath = path.resolve(workspaceRoot, scope.path);
+      const relativePath = path.relative(workspaceRoot, absolutePath);
+      const isInsideWorkspace =
+        relativePath !== "" &&
+        !relativePath.startsWith(`..${path.sep}`) &&
+        relativePath !== ".." &&
+        !path.isAbsolute(relativePath);
+      if (!isInsideWorkspace || fs.existsSync(absolutePath)) return scope;
+      return { ...scope, startLine: null, endLine: null, permission: "create" as const };
+    })
+  }));
+  return codingWorkflowOrchestrationSchema.parse(classified);
 }
 
 function mapCodeProposal(row: CodeProposalRow): StoredCodeProposal {

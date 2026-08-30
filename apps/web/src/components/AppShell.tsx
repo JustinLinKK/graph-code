@@ -702,6 +702,7 @@ function CodingWorkflowPanel({
   const visibleItems = workflow.items.slice(boundedPage * WORKFLOW_PAGE_SIZE, (boundedPage + 1) * WORKFLOW_PAGE_SIZE);
   const failedChecks = workflow.integrationChecks?.filter((check) => check.status !== "passed") ?? [];
   const ignoredEdges = orchestration?.partitioning?.ignoredEdges ?? [];
+  const hasUnlinkedWorkUnits = orchestration?.workUnits.some((unit) => unit.plannedWriteScopes.length === 0) ?? false;
   return (
     <section className="coding-workflow-panel" aria-label="Coding workflow preview">
       <div className="coding-workflow-header">
@@ -753,6 +754,11 @@ function CodingWorkflowPanel({
           <AlertTriangle size={14} /> Preview controls changed. Revalidate before execution.
         </div>
       ) : null}
+      {orchestration?.warnings?.map((warning) => (
+        <div className="coding-workflow-validation-warning" role="status" key={warning}>
+          <AlertTriangle size={14} /> {warning}
+        </div>
+      ))}
       {workflow.status === "preview" && orchestration ? (
         <div className="coding-workflow-partition-actions">
           <Button size="sm" variant="secondary" isDisabled={agentBusy || selectedUnitIds.length < 2} onPress={() => onMergeUnits(selectedUnitIds)}>
@@ -767,6 +773,7 @@ function CodingWorkflowPanel({
         {visibleItems.map((item) => {
           const unit = unitById.get(item.id);
           const route = routeByUnitId.get(item.id);
+          const runtimeFailure = codingWorkflowRuntimeFailure(item.contextDiagnostics);
           const blockingDependencies = unit?.dependencyWorkUnitIds.filter((dependencyId) => {
             const dependency = workflow.items.find((candidate) => candidate.id === dependencyId);
             return dependency && dependency.status !== "applied" && dependency.status !== "skipped";
@@ -786,13 +793,21 @@ function CodingWorkflowPanel({
               <strong>{unit?.title ?? item.nodeName}</strong>
               <span>Wave {item.layerIndex + 1} · {item.nodeKind} · <b>{formatWorkflowStatus(item.status)}</b></span>
               <small>{unit?.objective ?? item.objective ?? item.modeReason}</small>
+              {runtimeFailure ? (
+                <small className="workflow-blocker" role="alert">
+                  {runtimeFailure.reason}
+                  {runtimeFailure.providerId && runtimeFailure.modelId
+                    ? ` (${runtimeFailure.providerId}/${runtimeFailure.modelId}, ${runtimeFailure.attempts} ${runtimeFailure.attempts === 1 ? "attempt" : "attempts"})`
+                    : ""}
+                </small>
+              ) : null}
               {blockingDependencies.length > 0 ? <small className="workflow-blocker">Blocked by {blockingDependencies.join(", ")}</small> : null}
               <details>
                 <summary>Why, scope, model, and evidence</summary>
                 <dl className="coding-workflow-evidence">
                   <div><dt>Owned</dt><dd>{unit?.ownedNodeIds.join(", ") || item.nodeId}</dd></div>
                   <div><dt>Read halo</dt><dd>{unit?.readHaloNodeIds.join(", ") || "None"}</dd></div>
-                  <div><dt>Writes</dt><dd>{unit?.plannedWriteScopes.map((scope) => `${scope.permission}:${scope.path}:${scope.startLine ?? "*"}-${scope.endLine ?? "*"}`).join("; ") || "Legacy scope"}</dd></div>
+                  <div><dt>Writes</dt><dd>{unit ? unit.plannedWriteScopes.map((scope) => `${scope.permission}:${scope.path}:${scope.startLine ?? "*"}-${scope.endLine ?? "*"}`).join("; ") || "No safe write scope" : "Legacy scope"}</dd></div>
                   <div><dt>Dependencies</dt><dd>{unit?.dependencyWorkUnitIds.join(", ") || "None"}</dd></div>
                   <div><dt>Routing</dt><dd>{route?.reasons.join(" ") || item.modeReason}</dd></div>
                   <div><dt>Provider/model</dt><dd>{route?.assignment ? `${route.assignment.providerId}/${route.assignment.modelId}` : "Assigned at start"}</dd></div>
@@ -875,7 +890,7 @@ function CodingWorkflowPanel({
             <Button size="sm" variant="secondary" isDisabled={agentBusy || !previewDirty} onPress={onRevalidate}>
               <RefreshCw size={14} /> Revalidate preview
             </Button>
-            <Button size="sm" variant="primary" isDisabled={agentBusy || workflow.items.length === 0 || previewDirty} onPress={onStart}>
+            <Button size="sm" variant="primary" isDisabled={agentBusy || workflow.items.length === 0 || previewDirty || hasUnlinkedWorkUnits} onPress={onStart}>
               <Play size={14} /> Start workflow
             </Button>
           </>
@@ -906,6 +921,21 @@ function codingWorkflowStatusLabel(status: CodingWorkflow["status"], readyForRev
 function formatWorkflowStatus(status: string): string {
   const label = status.replaceAll("_", " ");
   return `${label.charAt(0).toUpperCase()}${label.slice(1)}`;
+}
+
+function codingWorkflowRuntimeFailure(
+  diagnostics: Record<string, unknown> | undefined
+): { reason: string; attempts: number; providerId: string | null; modelId: string | null } | null {
+  const failure = diagnostics?.runtimeFailure;
+  if (!failure || typeof failure !== "object" || Array.isArray(failure)) return null;
+  const record = failure as Record<string, unknown>;
+  if (typeof record.reason !== "string" || !record.reason.trim()) return null;
+  return {
+    reason: record.reason,
+    attempts: typeof record.attempts === "number" && Number.isFinite(record.attempts) ? record.attempts : 0,
+    providerId: typeof record.providerId === "string" ? record.providerId : null,
+    modelId: typeof record.modelId === "string" ? record.modelId : null
+  };
 }
 
 function countLabel(count: number, singular: string, plural = `${singular}s`): string {

@@ -1,8 +1,10 @@
 import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
-import { ChatOpenAI } from "@langchain/openai";
+import { ChatOpenAI, ChatOpenAICompletions } from "@langchain/openai";
 import crossSpawn from "cross-spawn";
+import fs from "node:fs";
+import path from "node:path";
 import {
   buildLegacyRoundRobinPlanningChunks,
   estimateLegacyInputTokens,
@@ -26,6 +28,12 @@ import {
   type GraphNode,
   type GraphPatch,
   type GraphStatusPatch,
+  GRAPH_EDGE_KINDS,
+  GRAPH_NODE_KINDS,
+  FORMAT_KINDS,
+  IO_KINDS,
+  LANGUAGE_TYPES,
+  PROCESS_KINDS,
   type IndexState,
   type InterfaceContract,
   type MemoryContext,
@@ -222,30 +230,79 @@ export type CodeGraphRefreshResult = {
   workflowNodeCount: number;
 };
 
+const scanExtensionDetailsSchema = z.preprocess((value) => {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  if (typeof value === "object") {
+    const extension = value as { packageId?: unknown; schemaId?: unknown };
+    if (
+      (extension.packageId === undefined || extension.packageId === null || extension.packageId === "") &&
+      (extension.schemaId === undefined || extension.schemaId === null || extension.schemaId === "")
+    ) {
+      return undefined;
+    }
+  }
+  return value;
+}, extensionNodeDetailsMutationSchema.optional());
+
+const scanIoKindSchema = z.preprocess(
+  (value) => (typeof value === "string" && (IO_KINDS as readonly string[]).includes(value) ? value : undefined),
+  ioKindSchema.optional()
+);
+const scanProcessKindSchema = z.preprocess(
+  (value) => (typeof value === "string" && (PROCESS_KINDS as readonly string[]).includes(value) ? value : undefined),
+  processKindSchema.optional()
+);
+const scanFormatKindSchema = z.preprocess(
+  (value) => (typeof value === "string" && (FORMAT_KINDS as readonly string[]).includes(value) ? value : undefined),
+  formatKindSchema.optional()
+);
+const scanLanguageSchema = z.preprocess(
+  (value) => {
+    if (value === null || value === undefined) {
+      return undefined;
+    }
+    return typeof value === "string" && (LANGUAGE_TYPES as readonly string[]).includes(value) ? value : "other";
+  },
+  languageTypeSchema.default("unknown")
+);
+const scanOptionalDetailTextSchema = z.preprocess((value) => (value === null ? undefined : value), z.string().optional());
+
 const scanDetailSchema = z.object({
-  ioKind: ioKindSchema.optional(),
-  channel: z.string().optional(),
+  ioKind: scanIoKindSchema,
+  channel: scanOptionalDetailTextSchema,
   schemaHint: z.string().nullable().optional(),
-  processKind: processKindSchema.optional(),
+  processKind: scanProcessKindSchema,
   trigger: z.string().nullable().optional(),
-  formatKind: formatKindSchema.optional(),
-  spec: z.string().optional(),
-  notes: z.string().optional(),
-  extensionDetails: extensionNodeDetailsMutationSchema.optional()
+  formatKind: scanFormatKindSchema,
+  spec: scanOptionalDetailTextSchema,
+  notes: scanOptionalDetailTextSchema,
+  extensionDetails: scanExtensionDetailsSchema
 });
+
+const scanOptionalTextSchema = z.preprocess((value) => (value === null ? undefined : value), z.string().default(""));
+const scanSourceRangeSchema = z.preprocess(
+  (value) => (value === null ? undefined : value),
+  sourceRangeSchema.default({ path: null, startLine: null, endLine: null })
+);
 
 export const scanNodeDraftSchema = z.object({
   stableKey: z.string().min(1),
   kind: graphNodeKindSchema,
   name: z.string().min(1),
-  summary: z.string().default(""),
-  codeContext: z.string().default(""),
-  source: sourceRangeSchema.default({ path: null, startLine: null, endLine: null }),
-  language: languageTypeSchema.default("unknown"),
+  summary: scanOptionalTextSchema,
+  codeContext: scanOptionalTextSchema,
+  source: scanSourceRangeSchema,
+  language: scanLanguageSchema,
   parentStableKey: z.string().nullable().optional(),
   attachedToStableKey: z.string().nullable().optional(),
   detail: scanDetailSchema.optional()
-});
+}).transform((node) =>
+  isAttachmentNodeKind(node.kind)
+    ? { ...node, parentStableKey: undefined, attachedToStableKey: node.attachedToStableKey || node.parentStableKey }
+    : node
+);
 
 export const scanEdgeDraftSchema = z.object({
   stableKey: z.string().min(1),
@@ -253,28 +310,28 @@ export const scanEdgeDraftSchema = z.object({
   sourceStableKey: z.string().min(1),
   targetStableKey: z.string().min(1),
   label: z.string().nullable().optional(),
-  codeContext: z.string().default(""),
-  source: sourceRangeSchema.default({ path: null, startLine: null, endLine: null }),
+  codeContext: scanOptionalTextSchema,
+  source: scanSourceRangeSchema,
   animated: z.boolean().optional()
 });
 
 export const scanLocalOutputSchema = z.object({
   filePath: z.string().min(1),
   contentHash: z.string().min(1),
-  summary: z.string().default(""),
+  summary: scanOptionalTextSchema,
   nodes: z.array(scanNodeDraftSchema).default([]),
   edges: z.array(scanEdgeDraftSchema).default([])
 });
 
 export const scanMediumOutputSchema = z.object({
   scopePath: z.string().min(1),
-  summary: z.string().default(""),
+  summary: scanOptionalTextSchema,
   nodes: z.array(scanNodeDraftSchema).default([]),
   edges: z.array(scanEdgeDraftSchema).default([])
 });
 
 export const scanGlobalOutputSchema = z.object({
-  summary: z.string().default(""),
+  summary: scanOptionalTextSchema,
   topModuleStableKeys: z.array(z.string().min(1)).default([]),
   nodes: z.array(scanNodeDraftSchema).default([]),
   edges: z.array(scanEdgeDraftSchema).default([]),
@@ -344,7 +401,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
             coverageNotice,
             formatMemoryContext(memory),
             scope ? `Scope: ${scope.name} (${scope.kind}) ${scope.summary}` : "Scope: workspace",
-            `Writable node ids:\n${graph.nodes.slice(0, 120).map((node) => `${node.id}: ${node.name} (${node.kind})`).join("\n")}`,
+            `Writable node ids and source locations:\n${graph.nodes.slice(0, 120).map(formatPlanningNode).join("\n")}`,
             `Writable edge ids:\n${graph.edges.slice(0, 160).map((edge) => `${edge.id}: ${edge.sourceNodeId}->${edge.targetNodeId} (${edge.kind})`).join("\n")}`,
             `Return shape:
 {
@@ -352,45 +409,26 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
   "graphPatch": {
     "summary": "short patch summary",
     "operations": [
-      { "entityType": "node", "entityId": "existing-node-id", "action": "update", "fields": { "summary": "planned summary" } }
+      { "entityType": "node", "entityId": "existing-node-id", "action": "update", "fields": { "summary": "planned summary" } },
+      { "entityType": "node", "entityId": "new-node-id", "action": "create", "fields": { "kind": "function", "name": "New block", "summary": "What it must implement", "codeContext": "Implementation requirements", "codeDirectory": "src/existing-or-new-file.ts", "parentId": "existing-parent-id" } }
     ]
   },
   "memoryUpdates": []
 }`,
             "Emit at least one graphPatch operation when a scoped or root node can represent the plan. Prefer updating existing node summaries or codeContext over creating speculative new nodes.",
-            `Topology-scoped planning evidence:\nNodes:\n${graph.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}\nEdges:\n${graph.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
+            "Every created block intended for coding must include a normalized workspace-relative codeDirectory. Reuse an evidenced existing source path when the block belongs in that file, or provide the intended new file path. Do not create source-unlinked coding blocks.",
+            `Topology-scoped planning evidence:\nNodes:\n${graph.nodes.map(formatPlanningNode).join("\n")}\nEdges:\n${graph.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
           ].join("\n")
         }
       ]);
       const output = parsePlanningAgentOutput(response, input.prompt, graph, scope);
       const patch = output.graphPatch;
       await applyAgentMemory(options, input.projectId, "planning", output.memoryUpdates);
-      if (input.scopeNodeId) {
-        await options.toolbox.setStatuses(input.projectId, [
-          {
-            entityType: "node",
-            entityId: input.scopeNodeId,
-            status: "planning",
-            note: patch.summary,
-            agentRunId: options.runId ?? null
-          }
-        ]);
-      }
       return {
         response: output.response,
         graphPatch: patch,
         memoryUpdates: output.memoryUpdates,
-        touched: input.scopeNodeId
-          ? [
-              {
-                entityType: "node",
-                entityId: input.scopeNodeId,
-                status: "planning",
-                note: patch.summary,
-                agentRunId: options.runId ?? null
-              }
-            ]
-          : []
+        touched: []
       };
     }
   });
@@ -746,14 +784,32 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
         memoryGuidance,
         options.workspaceRoot
       );
+      const scannablePaths = new Set(inventory.map((file) => file.path.replaceAll("\\", "/")));
+      const normalizedLocalOutputs = localOutputs.map((output) => normalizeScanOutputSources(output, scannablePaths));
+      const normalizedMediumOutputs = mediumOutputs.map((output) => normalizeScanOutputSources(output, scannablePaths));
+      const normalizedGlobalOutput = normalizeScanOutputSources(
+        normalizeGenericTopModules(globalOutput, topModulePaths, input.enabledExtensionPackageIds ?? [], scannablePaths),
+        scannablePaths
+      );
+      const containedOutputs = normalizeGenericModuleParents(
+        normalizedLocalOutputs,
+        normalizedMediumOutputs,
+        normalizedGlobalOutput,
+        input.enabledExtensionPackageIds ?? []
+      );
+      const prunedOutputs = pruneUnresolvedScanAttachments(
+        containedOutputs.localOutputs,
+        containedOutputs.mediumOutputs,
+        containedOutputs.globalOutput
+      );
       const pipeline = scanPipelineResultSchema.parse({
         initial,
         inventory,
         changedFiles,
         deletedFiles,
-        localOutputs,
-        mediumOutputs,
-        globalOutput
+        localOutputs: prunedOutputs.localOutputs,
+        mediumOutputs: prunedOutputs.mediumOutputs,
+        globalOutput: prunedOutputs.globalOutput
       });
       const result = await options.toolbox.applyScanResult(input.projectId, pipeline, options.runId ?? null);
       await applyAgentMemory(options, input.projectId, "scanning", globalOutput.memoryUpdates);
@@ -772,6 +828,139 @@ export async function runScanningAgent(input: ScanningAgentRequest, options: Age
       };
     }
   });
+}
+
+function normalizeScanOutputSources<T extends ScanLocalOutput | ScanMediumOutput | ScanGlobalOutput>(output: T, scannablePaths: Set<string>): T {
+  const normalizeSource = (source: { path: string | null; startLine: number | null; endLine: number | null }) =>
+    source.path && !scannablePaths.has(source.path.replaceAll("\\", "/"))
+      ? { path: null, startLine: null, endLine: null }
+      : source;
+  return {
+    ...output,
+    nodes: output.nodes.map((node) => ({ ...node, source: normalizeSource(node.source) })),
+    edges: output.edges.map((edge) => ({ ...edge, source: normalizeSource(edge.source) }))
+  } as T;
+}
+
+function pruneUnresolvedScanAttachments(
+  localOutputs: ScanLocalOutput[],
+  mediumOutputs: ScanMediumOutput[],
+  globalOutput: ScanGlobalOutput
+): { localOutputs: ScanLocalOutput[]; mediumOutputs: ScanMediumOutput[]; globalOutput: ScanGlobalOutput } {
+  const orderedNodes = [
+    ...globalOutput.nodes,
+    ...mediumOutputs.flatMap((output) => output.nodes),
+    ...localOutputs.flatMap((output) => output.nodes)
+  ];
+  const resolvedNodes = [...new Map(orderedNodes.map((node) => [node.stableKey, node])).values()];
+  const retainedKeys = new Set(resolvedNodes.filter((node) => isDomainNodeKind(node.kind)).map((node) => node.stableKey));
+  let added = true;
+  while (added) {
+    added = false;
+    for (const node of resolvedNodes) {
+      if (!retainedKeys.has(node.stableKey) && node.attachedToStableKey && retainedKeys.has(node.attachedToStableKey)) {
+        retainedKeys.add(node.stableKey);
+        added = true;
+      }
+    }
+  }
+  const prune = <T extends ScanLocalOutput | ScanMediumOutput | ScanGlobalOutput>(output: T): T => ({
+    ...output,
+    nodes: output.nodes.filter((node) => retainedKeys.has(node.stableKey)),
+    edges: output.edges.filter((edge) => retainedKeys.has(edge.sourceStableKey) && retainedKeys.has(edge.targetStableKey))
+  }) as T;
+  return {
+    localOutputs: localOutputs.map(prune),
+    mediumOutputs: mediumOutputs.map(prune),
+    globalOutput: prune(globalOutput)
+  };
+}
+
+function normalizeGenericTopModules(
+  output: ScanGlobalOutput,
+  topModulePaths: string[],
+  enabledExtensionPackageIds: string[],
+  scannablePaths: Set<string>
+): ScanGlobalOutput {
+  if (enabledExtensionPackageIds.includes("@graphcode/extension-ml-pipeline")) {
+    return output;
+  }
+  const topPathByKey = new Map(output.topModuleStableKeys.map((stableKey, index) => [stableKey, topModulePaths[index]]));
+  return {
+    ...output,
+    nodes: output.nodes.map((node) => {
+      const configuredPath = topPathByKey.get(node.stableKey)?.replaceAll("\\", "/");
+      if (!configuredPath) {
+        return node;
+      }
+      return {
+        ...node,
+        kind: "framework",
+        parentStableKey: undefined,
+        attachedToStableKey: undefined,
+        source: scannablePaths.has(configuredPath) ? { path: configuredPath, startLine: null, endLine: null } : node.source
+      };
+    })
+  };
+}
+
+function normalizeGenericModuleParents(
+  localOutputs: ScanLocalOutput[],
+  mediumOutputs: ScanMediumOutput[],
+  globalOutput: ScanGlobalOutput,
+  enabledExtensionPackageIds: string[]
+): { localOutputs: ScanLocalOutput[]; mediumOutputs: ScanMediumOutput[]; globalOutput: ScanGlobalOutput } {
+  if (enabledExtensionPackageIds.includes("@graphcode/extension-ml-pipeline")) {
+    return { localOutputs, mediumOutputs, globalOutput };
+  }
+  const topKeys = new Set(globalOutput.topModuleStableKeys);
+  const withoutDuplicateTops = <T extends ScanLocalOutput | ScanMediumOutput>(output: T): T => ({
+    ...output,
+    nodes: output.nodes.filter((node) => !topKeys.has(node.stableKey))
+  }) as T;
+  const deduplicatedLocal = localOutputs.map(withoutDuplicateTops);
+  const deduplicatedMedium = mediumOutputs.map(withoutDuplicateTops);
+  const orderedNodes = [
+    ...globalOutput.nodes,
+    ...deduplicatedMedium.flatMap((output) => output.nodes),
+    ...deduplicatedLocal.flatMap((output) => output.nodes)
+  ];
+  const resolvedNodes = [...new Map(orderedNodes.map((node) => [node.stableKey, node])).values()];
+  const kindByKey = new Map(resolvedNodes.map((node) => [node.stableKey, node.kind]));
+  const rootKey = globalOutput.topModuleStableKeys[0] ?? resolvedNodes.find((node) => node.kind === "framework")?.stableKey;
+  const moduleKeyBySourcePath = new Map(
+    resolvedNodes
+      .filter((node) => node.kind === "module" && node.source.path)
+      .map((node) => [node.source.path!, node.stableKey])
+  );
+  const fallbackModuleKey = resolvedNodes.find((node) => node.kind === "module")?.stableKey;
+  const normalize = <T extends ScanLocalOutput | ScanMediumOutput | ScanGlobalOutput>(output: T): T => ({
+    ...output,
+    nodes: output.nodes.map((node) => {
+      if (node.kind === "module" && rootKey && node.stableKey !== rootKey) {
+        const parentKind = node.parentStableKey ? kindByKey.get(node.parentStableKey) : undefined;
+        return parentKind === "framework" || parentKind === "module"
+          ? node
+          : { ...node, parentStableKey: rootKey, attachedToStableKey: undefined };
+      }
+      if (node.kind === "function" || node.kind === "object") {
+        const parentKind = node.parentStableKey ? kindByKey.get(node.parentStableKey) : undefined;
+        if (parentKind === "module" || parentKind === "function") {
+          return node;
+        }
+        const replacementParent = (node.source.path ? moduleKeyBySourcePath.get(node.source.path) : undefined) ?? fallbackModuleKey;
+        return replacementParent && replacementParent !== node.stableKey
+          ? { ...node, parentStableKey: replacementParent, attachedToStableKey: undefined }
+          : node;
+      }
+      return node;
+    })
+  }) as T;
+  return {
+    localOutputs: deduplicatedLocal.map(normalize),
+    mediumOutputs: deduplicatedMedium.map(normalize),
+    globalOutput: normalize(globalOutput)
+  };
 }
 
 function scanningPrompt(input: ScanningAgentRequest): string {
@@ -802,6 +991,17 @@ function scanningPrompt(input: ScanningAgentRequest): string {
       .filter(Boolean)
       .join("\n\n") || input.projectId
   );
+}
+
+function scanGraphVocabularyInstructions(): string {
+  return [
+    `Every node kind must be exactly one of: ${GRAPH_NODE_KINDS.join(", ")}.`,
+    `Every edge kind must be exactly one of: ${GRAPH_EDGE_KINDS.join(", ")}.`,
+    `Every node language must be exactly one of: ${LANGUAGE_TYPES.join(", ")}. Use other for text-like or diff-like content that has no more specific value.`,
+    `When detail is present, ioKind must be one of: ${IO_KINDS.join(", ")}; processKind must be one of: ${PROCESS_KINDS.join(", ")}; formatKind must be one of: ${FORMAT_KINDS.join(", ")}.`,
+    "Never invent kind values. Represent TypeScript types, interfaces, classes, and meaningful variables as object nodes when they merit their own block.",
+    "Use owns for containment, calls for function invocation, imports for imports, uses for other references, flows for data or return-value flow, impacts for behavioral effects, and describes_format for format relationships."
+  ].join("\n");
 }
 
 function resolveScanningConfigs(options: AgentRuntimeOptions): Record<ScanningAgentMode, ScanningAgentConfig> {
@@ -854,7 +1054,9 @@ async function runLocalScan(
         `Mode: local`,
         `File: ${file.path}`,
         `Content hash: ${file.contentHash}`,
-        "Return only JSON matching this shape: {filePath, contentHash, summary, nodes:[{stableKey, kind, name, summary, codeContext, source:{path,startLine,endLine}, language, parentStableKey, attachedToStableKey, detail:{..., extensionDetails:{packageId,schemaId,payload}}}], edges:[{stableKey, kind, sourceStableKey, targetStableKey, label, codeContext, source:{path,startLine,endLine}}]}.",
+        scanGraphVocabularyInstructions(),
+        "Return only JSON matching this shape: {filePath, contentHash, summary, nodes:[{stableKey, kind, name, summary, codeContext, source:{path,startLine,endLine}, language, parentStableKey, attachedToStableKey, detail:{ioKind,channel,schemaHint,processKind,trigger,formatKind,spec,notes}}], edges:[{stableKey, kind, sourceStableKey, targetStableKey, label, codeContext, source:{path,startLine,endLine}}]}.",
+        "Omit detail.extensionDetails entirely unless an enabled extension package requires it; never emit empty extension packageId or schemaId values.",
         "Every source range must be exact and use 1-based inclusive line numbers from this file.",
         numberedSource(source)
       ].join("\n\n")
@@ -889,6 +1091,7 @@ async function runMediumScan(
         `Scope path: ${scopePath}`,
         `Files in scope:\n${inventory.filter((file) => fileInScope(file.path, scopePath)).map((file) => `${file.path} ${file.contentHash}`).join("\n")}`,
         `Changed local outputs:\n${JSON.stringify(localOutputs.filter((output) => fileInScope(output.filePath, scopePath)).map(compactLocalOutput), null, 2)}`,
+        scanGraphVocabularyInstructions(),
         "Return only JSON matching this shape: {scopePath, summary, nodes, edges}. Medium nodes should describe directory/package/module grouping and exported surfaces."
       ].join("\n\n")
     }
@@ -913,6 +1116,7 @@ async function runGlobalScan(
     return fakeGlobalOutput(input);
   }
   const provider = createProvider(config, workspaceRoot);
+  const mlExtensionEnabled = input.enabledExtensionPackageIds?.includes("@graphcode/extension-ml-pipeline") ?? false;
   const response = await provider.invoke([
     { role: "system", content: resolveSystemPrompt(config, "Return strict JSON for one GraphCode global scan synthesis.") },
     {
@@ -937,7 +1141,12 @@ async function runGlobalScan(
               )
               .join("\n\n")}`
           : "",
-        "Return only JSON matching this shape: {summary, topModuleStableKeys, nodes, edges, memoryUpdates}. Return one ordered topModuleStableKeys entry for each configured top-module path. Each configured top module must be a distinct parentless ml_model node sourced from the corresponding file. Do not invent a repository wrapper around explicit top modules. Resolve configuration through make_model_config/make_model into concrete implementations such as SeerNetMulti, SeerTrunk, and SeerBlock, and distinguish configured instances from shared class definitions. Decompose ML models layer by layer, use flows edges for forward data flow, and give compound layers nested workflows. Preserve exact source evidence. memoryUpdates may contain only durable, source-grounded facts."
+        scanGraphVocabularyInstructions(),
+        "Return only JSON matching this shape: {summary, topModuleStableKeys, nodes, edges, memoryUpdates}. Return one ordered topModuleStableKeys entry for each configured top-module path. Each configured top module must be a distinct parentless domain node sourced from the corresponding path; use framework for ordinary repositories unless enabled extension instructions and source evidence require an allowed top-level extension domain kind. Do not invent a repository wrapper around explicit top modules.",
+        mlExtensionEnabled
+          ? "For evidenced ML top modules, resolve configuration through factory functions into concrete implementations and distinguish configured instances from shared class definitions. Decompose ML models layer by layer, use flows edges for forward data flow, and give compound layers nested workflows."
+          : "The ML Pipeline extension is not enabled. Do not emit ML-specific nodes or apply ML-specific decomposition rules.",
+        "Preserve exact source evidence. When evidence is unavailable, emit source:{path:null,startLine:null,endLine:null}, never source:null. Use an empty string rather than null for summary or codeContext. memoryUpdates may contain only durable, source-grounded facts."
       ].join("\n\n")
     }
   ]);
@@ -1200,18 +1409,58 @@ function extractMemoryUpdates(response: string): { content: string; updates: Mem
 function parseJsonResponse(response: string): unknown {
   const trimmed = response.trim();
   if (trimmed.startsWith("{")) {
-    return JSON.parse(trimmed);
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      const object = firstCompleteJsonObject(trimmed);
+      if (object) {
+        return JSON.parse(object);
+      }
+    }
   }
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced) {
     return JSON.parse(fenced[1]);
   }
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (start >= 0 && end > start) {
-    return JSON.parse(trimmed.slice(start, end + 1));
+  const object = firstCompleteJsonObject(trimmed);
+  if (object) {
+    return JSON.parse(object);
   }
   throw new Error("Scanning agent did not return JSON.");
+}
+
+function firstCompleteJsonObject(value: string): string | null {
+  const start = value.indexOf("{");
+  if (start < 0) {
+    return null;
+  }
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < value.length; index += 1) {
+    const character = value[index];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (character === "\\") {
+        escaped = true;
+      } else if (character === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+    } else if (character === "{") {
+      depth += 1;
+    } else if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return value.slice(start, index + 1);
+      }
+    }
+  }
+  return null;
 }
 
 export function parsePlanningAgentOutput(response: string, prompt: string, graph: PlanningGraph, scope: GraphNode | null): z.infer<typeof planningAgentOutputSchema> {
@@ -1563,6 +1812,14 @@ function formatNode(node: GraphNode): string {
   return `${node.id}: ${node.name} (${node.kind}, status=${node.agentStatus}) ${node.summary}`.trim();
 }
 
+function formatPlanningNode(node: GraphNode): string {
+  const sourcePath = node.source.path ?? node.code.directory ?? "none";
+  const startLine = node.source.startLine ?? node.code.startLine;
+  const endLine = node.source.endLine ?? node.code.endLine;
+  const sourceRange = startLine !== null && endLine !== null ? `${startLine}-${endLine}` : "unknown";
+  return `${node.id}:${node.name}:${node.kind}:parent=${node.parentId ?? "none"}:attachedTo=${node.attachedToId ?? "none"}:source=${sourcePath}:${sourceRange}:${node.summary}`;
+}
+
 export const graphDatabaseToolSchemas = {
   "graphcode.db.read_graph": z.object({ projectId: z.string() }),
   "graphcode.db.get_node_detail": z.object({ nodeId: z.string() }),
@@ -1620,18 +1877,20 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
         : config.provider === "deepseek"
           ? "https://api.deepseek.com"
           : undefined;
-    const model = new ChatOpenAI({
+    const fields = {
       model: config.model,
       apiKey,
       temperature: 0,
       ...(baseURL
         ? {
             configuration: {
-              baseURL
+              baseURL,
+              ...(config.provider === "openrouter" ? { fetch: openRouterFetch } : {})
             }
           }
         : {})
-    });
+    };
+    const model = config.provider === "openrouter" ? new ChatOpenAICompletions(fields) : new ChatOpenAI(fields);
     return { invoke: (messages) => invokeChatModel(model, messages) };
   }
   if (config.provider === "gemini") {
@@ -1721,7 +1980,7 @@ async function invokeCodexCli(config: ProviderConfig, messages: PromptMessage[],
   const { stdout } = await runCliCommand(command, args, {
     cwd,
     input: prompt,
-    timeout: 120000,
+    timeout: 300000,
     maxBuffer: 1024 * 1024 * 4
   });
   return stdout.trim();
@@ -1747,15 +2006,15 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
     "text",
     ...(config.model.trim() ? ["--model", config.model.trim()] : []),
     ...(isClaudeReasoningEffort(config.reasoningEffort) ? ["--effort", config.reasoningEffort] : []),
-    ...(config.speedTier === "fast" ? ["--settings", JSON.stringify({ fastMode: true })] : []),
-    prompt
+    ...(config.speedTier === "fast" ? ["--settings", JSON.stringify({ fastMode: true })] : [])
   ];
   const { stdout } = await runCliCommand(
     command,
     args,
     {
       cwd,
-      timeout: 120000,
+      input: prompt,
+      timeout: 300000,
       maxBuffer: 1024 * 1024 * 4
     }
   );
@@ -1763,7 +2022,30 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
 }
 
 function resolveCliCommand(config: ProviderConfig, fallback: string): string {
-  return config.cliCommand?.trim() || fallback;
+  const command = config.cliCommand?.trim() || fallback;
+  return resolveKnownWindowsAgentCliPath(command, fallback) ?? command;
+}
+
+export function resolveKnownWindowsAgentCliPath(
+  command: string,
+  fallback: string,
+  environment: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform
+): string | null {
+  if (platform !== "win32") {
+    return null;
+  }
+  const commandName = path.win32.basename(command).toLowerCase().replace(/\.(?:com|exe|bat|cmd)$/i, "");
+  if (commandName !== command.toLowerCase().replace(/\.(?:com|exe|bat|cmd)$/i, "") || commandName !== fallback.toLowerCase()) {
+    return null;
+  }
+  const userProfile = environment.USERPROFILE?.trim();
+  const appData = environment.APPDATA?.trim();
+  const candidates = [
+    userProfile ? path.join(userProfile, ".local", "bin", `${commandName}.exe`) : "",
+    appData ? path.join(appData, "npm", `${commandName}.cmd`) : ""
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
 }
 
 function claudePermissionProfile(permissionMode: ProviderConfig["permissionMode"]): {
@@ -1908,6 +2190,102 @@ async function invokeChatModel(model: { invoke: (messages: Array<SystemMessage |
     return Array.isArray(content) ? content.map(String).join("\n") : String(content ?? "");
   }
   return String(output ?? "");
+}
+
+const openRouterFetch: typeof fetch = async (input, init) => normalizeOpenRouterResponse(await fetch(input, init));
+
+export async function normalizeOpenRouterResponse(response: Response): Promise<Response> {
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (!contentType.includes("application/json")) {
+    return response;
+  }
+
+  let payload: unknown;
+  try {
+    payload = await response.clone().json();
+  } catch {
+    return response;
+  }
+  if (!isUnknownRecord(payload)) {
+    return response;
+  }
+
+  if (isUnknownRecord(payload.error)) {
+    if (!response.ok) {
+      return response;
+    }
+    return rebuildJsonResponse(payload, response, openRouterErrorStatus(payload.error.code));
+  }
+  if (!response.ok) {
+    return response;
+  }
+
+  const choices = payload.choices;
+  const firstChoice = Array.isArray(choices) ? choices[0] : null;
+  const message = isUnknownRecord(firstChoice) && isUnknownRecord(firstChoice.message) ? firstChoice.message : null;
+  if (!message) {
+    return openRouterInvalidResponse(response, "OpenRouter returned a successful response without an assistant message.", 502);
+  }
+
+  if (Array.isArray(message.content)) {
+    const text = message.content
+      .map((block) => {
+        if (typeof block === "string") return block;
+        return isUnknownRecord(block) && typeof block.text === "string" ? block.text : "";
+      })
+      .filter(Boolean)
+      .join("\n");
+    if (text.trim()) {
+      message.content = text;
+      return rebuildJsonResponse(payload, response, response.status);
+    }
+  } else if (typeof message.content === "string" && message.content.trim()) {
+    return response;
+  }
+
+  if (typeof message.refusal === "string" && message.refusal.trim()) {
+    return openRouterInvalidResponse(response, `OpenRouter refused the request: ${message.refusal.trim()}`, 422);
+  }
+  if (Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    return openRouterInvalidResponse(response, "OpenRouter returned tool calls without assistant text, but this GraphCode run did not request tools.", 422);
+  }
+  if (typeof message.reasoning === "string" && message.reasoning.trim()) {
+    return openRouterInvalidResponse(response, "OpenRouter returned reasoning without final assistant text.", 502);
+  }
+  return openRouterInvalidResponse(response, "OpenRouter returned no assistant text.", 502);
+}
+
+function openRouterInvalidResponse(response: Response, message: string, status: number): Response {
+  return rebuildJsonResponse(
+    {
+      error: {
+        code: status,
+        message,
+        metadata: { error_type: "invalid_response" }
+      }
+    },
+    response,
+    status
+  );
+}
+
+function openRouterErrorStatus(code: unknown): number {
+  return typeof code === "number" && Number.isInteger(code) && code >= 400 && code <= 599 ? code : 502;
+}
+
+function rebuildJsonResponse(payload: unknown, response: Response, status: number): Response {
+  const headers = new Headers(response.headers);
+  headers.set("content-type", "application/json");
+  headers.delete("content-length");
+  return new Response(JSON.stringify(payload), {
+    status,
+    statusText: status === response.status ? response.statusText : undefined,
+    headers
+  });
+}
+
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function resolveApiKey(config: ProviderConfig): string | undefined {

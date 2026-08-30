@@ -92,6 +92,80 @@ describe("example project layered workflow", () => {
       runtime.close();
     }
   }, 20_000);
+
+  it("executes a source-linked block created by an applied planning patch", async () => {
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-planned-block-"));
+    cleanups.push(rootPath);
+    fs.cpSync(path.resolve(process.cwd(), "../../examples/review-proposal-lab"), rootPath, { recursive: true });
+    const runtime = new WorkspaceRuntime(path.join(rootPath, "bootstrap.sqlite"), rootPath);
+
+    try {
+      const opened = runtime.openWorkspace({
+        rootPath,
+        createIfMissing: true,
+        creationMode: "scan",
+        initialization: {
+          projectName: "Planned Block Lab",
+          projectDescription: "Regression coverage for graph-to-code handoff.",
+          scanningInstructions: "Group TypeScript modules and functions.",
+          topModulePaths: [],
+          enabledExtensionPackageIds: [],
+          skipCodexDefaultSystemPrompt: false
+        }
+      });
+      expect(opened.status).toBe("created");
+      if (opened.status !== "created") return;
+      expect((await waitForScan(runtime, opened.project.id)).status).toBe("succeeded");
+
+      const scope = runtime.repo().listProjectNodes(opened.project.id).find((node) => node.kind === "module");
+      expect(scope).toBeTruthy();
+      if (!scope) return;
+      const planningRun = runtime.repo().createAgentRun({
+        projectId: opened.project.id,
+        agentKind: "planning",
+        targetNodeId: scope.id,
+        prompt: "Add a cache helper in a new source file.",
+        status: "succeeded",
+        graphPatch: {
+          summary: "Add the planned cache helper.",
+          operations: [
+            {
+              entityType: "node",
+              entityId: "planned-cache-helper",
+              action: "create",
+              fields: {
+                kind: "function",
+                name: "plannedCacheHelper",
+                summary: "Cache repeated calculations.",
+                codeContext: "Export a small deterministic cache helper.",
+                codeDirectory: "src/planned_cache.ts",
+                language: "typescript",
+                parentId: scope.id
+              }
+            }
+          ]
+        }
+      });
+      expect(runtime.repo().applyAgentGraphPatch(opened.project.id, planningRun.id).status).toBe("succeeded");
+
+      const started = await runtime.startCodingWorkflow({
+        projectId: opened.project.id,
+        scopeNodeId: scope.id,
+        background: false
+      });
+      const item = started.items.find((candidate) => candidate.nodeId === "planned-cache-helper");
+      expect(item?.status).toBe("proposed");
+      expect(started.status).toBe("blocked");
+      expect(item?.agentRunId).toBeTruthy();
+      if (!item?.agentRunId) return;
+      const proposal = runtime.repo().getLatestCodeProposalForRun(item.agentRunId);
+      expect(proposal).toBeTruthy();
+      if (!proposal) return;
+      expect(runtime.repo().getCodeProposal(proposal.id).diff).toContain("+++ b/src/planned_cache.ts");
+    } finally {
+      runtime.close();
+    }
+  }, 20_000);
 });
 
 async function waitForScan(runtime: WorkspaceRuntime, projectId: string) {

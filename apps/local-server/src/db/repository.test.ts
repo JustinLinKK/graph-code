@@ -653,6 +653,94 @@ describe("SQLite graph repository", () => {
     expect(repo.getNode("module-web").summary).toBe("First planning edit.");
   });
 
+  it("hands planning-patch-created blocks to coding with create-file authority", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const run = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      targetNodeId: "module-web",
+      prompt: "Add a cache block",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Add a source-linked cache block.",
+        operations: [
+          {
+            entityType: "node",
+            entityId: "function-planned-cache",
+            action: "create",
+            fields: {
+              kind: "function",
+              name: "plannedCache",
+              summary: "Cache repeated workspace reads.",
+              codeDirectory: "apps/web/src/plannedCache.ts",
+              parentId: "module-web",
+              language: "typescript"
+            }
+          },
+          {
+            entityType: "edge",
+            entityId: "edge-planned-cache-uses-web",
+            action: "create",
+            fields: {
+              kind: "uses",
+              sourceNodeId: "function-planned-cache",
+              targetNodeId: "module-web",
+              codeContext: "The planned cache supports the web module."
+            }
+          }
+        ]
+      }
+    });
+
+    expect(repo.applyAgentGraphPatch(project.id, run.id).status).toBe("succeeded");
+    expect(repo.getNode("function-planned-cache").agentStatus).toBe("planning");
+    expect(repo.getEdge("edge-planned-cache-uses-web").agentStatus).toBe("planning");
+
+    const preview = repo.previewGraphPartitionedCodingWorkflow(
+      project.id,
+      "module-web",
+      { indexRevision: "index-1", workspaceRevision: "workspace-1", graphRevision: repo.currentGraphRevision(project.id), sourceHashes: {}, indexState: "complete" }
+    );
+    const unit = preview.orchestration?.workUnits.find((candidate) => candidate.ownedNodeIds.includes("function-planned-cache"));
+    expect(unit?.plannedWriteScopes).toEqual([
+      expect.objectContaining({ path: "apps/web/src/plannedCache.ts", permission: "create", startLine: null, endLine: null })
+    ]);
+    expect(preview.items.map((item) => item.nodeId)).toContain("function-planned-cache");
+    expect(preview.items.map((item) => item.nodeId)).not.toContain("module-web");
+  });
+
+  it("blocks coding startup for source-unlinked planned blocks", () => {
+    const project = repo.seedSelfGraph(selfRootPath);
+    const run = repo.createAgentRun({
+      projectId: project.id,
+      agentKind: "planning",
+      status: "succeeded",
+      graphPatch: {
+        summary: "Add an unlinked block.",
+        operations: [
+          {
+            entityType: "node",
+            entityId: "function-unlinked-plan",
+            action: "create",
+            fields: { kind: "function", name: "unlinkedPlan", summary: "Missing a source destination.", parentId: "module-web" }
+          }
+        ]
+      }
+    });
+    repo.applyAgentGraphPatch(project.id, run.id);
+    const context = {
+      indexRevision: "index-1",
+      workspaceRevision: "workspace-1",
+      graphRevision: repo.currentGraphRevision(project.id),
+      sourceHashes: {},
+      indexState: "complete" as const
+    };
+
+    const preview = repo.previewGraphPartitionedCodingWorkflow(project.id, "module-web", context);
+    expect(preview.orchestration?.warnings).toContainEqual(expect.stringMatching(/no safe write scope/i));
+    expect(() => repo.createGraphPartitionedCodingWorkflow(project.id, "module-web", context)).toThrow(/no safe write scope/i);
+  });
+
   it("rejects malformed graph patches at persistence and fails closed for corrupt stored patches", () => {
     const project = repo.seedSelfGraph(selfRootPath);
     const malformedPatch = {

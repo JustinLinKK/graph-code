@@ -275,6 +275,7 @@ export class WorkspaceRuntime {
   async getCodexStatus(command = DEFAULT_CODEX_COMMAND): Promise<CodexCliStatus> {
     const checkedAt = new Date().toISOString();
     const resolvedPath = await resolveCliPath(command);
+    const executable = resolvedPath ?? command;
     let version: string | null = null;
     let authStatus: string | null = null;
     let authenticated = false;
@@ -282,7 +283,7 @@ export class WorkspaceRuntime {
     const errors: string[] = [];
 
     try {
-      const result = await execFileAsync(command, ["--version"], cliExecOptions(5000));
+      const result = await execFileAsync(executable, ["--version"], cliExecOptions(5000));
       version = (outputText(result.stdout) || outputText(result.stderr)).trim() || null;
     } catch (error) {
       return {
@@ -299,7 +300,7 @@ export class WorkspaceRuntime {
     }
 
     try {
-      const result = await execFileAsync(command, ["login", "status"], cliExecOptions(10000));
+      const result = await execFileAsync(executable, ["login", "status"], cliExecOptions(10000));
       authStatus = (outputText(result.stdout) || outputText(result.stderr)).trim() || "Authenticated";
       authenticated = true;
     } catch (error) {
@@ -309,7 +310,7 @@ export class WorkspaceRuntime {
 
     if (authenticated) {
       try {
-        const result = await execFileAsync(command, ["debug", "models"], {
+        const result = await execFileAsync(executable, ["debug", "models"], {
           ...cliExecOptions(CODEX_MODEL_CATALOG_TIMEOUT_MS),
           maxBuffer: 1024 * 1024 * 12
         });
@@ -343,7 +344,7 @@ export class WorkspaceRuntime {
     if (!status.authenticated) {
       throw validationError(status.error ?? "Codex CLI is not authenticated.");
     }
-    const result = await execFileAsync(command, ["debug", "models"], {
+    const result = await execFileAsync(status.resolvedPath ?? command, ["debug", "models"], {
       ...cliExecOptions(CODEX_MODEL_CATALOG_TIMEOUT_MS),
       maxBuffer: 1024 * 1024 * 12
     });
@@ -441,13 +442,14 @@ export class WorkspaceRuntime {
   async getClaudeStatus(command = DEFAULT_CLAUDE_COMMAND): Promise<ClaudeCliStatus> {
     const checkedAt = new Date().toISOString();
     const resolvedPath = await resolveCliPath(command);
+    const executable = resolvedPath ?? command;
     let version: string | null = null;
     let authStatus: string | null = null;
     let authenticated = false;
     const errors: string[] = [];
 
     try {
-      const result = await execFileAsync(command, ["--version"], cliExecOptions(5000));
+      const result = await execFileAsync(executable, ["--version"], cliExecOptions(5000));
       version = (outputText(result.stdout) || outputText(result.stderr)).trim() || null;
     } catch (error) {
       return {
@@ -464,7 +466,7 @@ export class WorkspaceRuntime {
     }
 
     try {
-      const result = await execFileAsync(command, ["auth", "status", "--text"], cliExecOptions(10000));
+      const result = await execFileAsync(executable, ["auth", "status", "--text"], cliExecOptions(10000));
       authStatus = (outputText(result.stdout) || outputText(result.stderr)).trim() || "Authenticated";
       authenticated = true;
     } catch (error) {
@@ -799,9 +801,7 @@ export class WorkspaceRuntime {
       workflow = this.applyModelRouter(workflow);
     }
     if (input.background) {
-      void this.runCodingWorkflowCurrentLayer(workflow.id).catch(() => {
-        this.repository.updateCodingWorkflowStatus(workflow.id, "failed");
-      });
+      this.runCodingWorkflowCurrentLayerInBackground(workflow.id);
       return this.repository.getCodingWorkflow(workflow.id);
     }
     await this.runCodingWorkflowCurrentLayer(workflow.id);
@@ -876,9 +876,10 @@ export class WorkspaceRuntime {
       unit.contextBudget = contextBudgetForScale(nextScale);
       this.repository.replaceCodingWorkflowOrchestration(workflow.id, orchestration);
     }
+    this.saveCodingWorkUnitRuntimeFailure(workflow.projectId, workflow.id, item.id, null);
     this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "pending", agentRunId: null, proposalId: null });
     this.repository.updateCodingWorkflowStatus(workflow.id, "running", item.layerIndex);
-    await this.runCodingWorkflowCurrentLayer(workflow.id);
+    this.runCodingWorkflowCurrentLayerInBackground(workflow.id);
     return this.repository.getCodingWorkflow(workflow.id);
   }
 
@@ -1629,6 +1630,20 @@ export class WorkspaceRuntime {
         this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "blocked" });
       }
       if (result.status === "cancelled") this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "cancelled" });
+      this.saveCodingWorkUnitRuntimeFailure(
+        workflow.projectId,
+        workflow.id,
+        item.id,
+        result.reason
+          ? {
+              status: result.status,
+              reason: result.reason,
+              attempts: result.attempts,
+              providerId: result.providerId,
+              modelId: result.modelId
+            }
+          : null
+      );
     }
     this.repository.replaceCodingWorkflowOrchestration(workflowId, updated);
     const refreshed = this.repository.getCodingWorkflow(workflowId);
@@ -1638,6 +1653,54 @@ export class WorkspaceRuntime {
       workflowId,
       scheduled.status === "cancelled" ? "cancelled" : allAccepted ? "succeeded" : hasProposal ? "blocked" : scheduled.status === "failed" ? "failed" : "blocked"
     );
+  }
+
+  private runCodingWorkflowCurrentLayerInBackground(workflowId: string): void {
+    void this.runCodingWorkflowCurrentLayer(workflowId).catch((error: unknown) => {
+      const workflow = this.repository.getCodingWorkflow(workflowId);
+      const message = error instanceof Error ? error.message : "Coding workflow failed.";
+      for (const item of workflow.items.filter(
+        (candidate) => candidate.layerIndex === workflow.currentLayer && (candidate.status === "pending" || candidate.status === "running")
+      )) {
+        this.repository.updateCodingWorkflowItem({ itemId: item.id, status: "failed" });
+        this.saveCodingWorkUnitRuntimeFailure(workflow.projectId, workflow.id, item.id, {
+          status: "failed",
+          reason: message,
+          attempts: 0,
+          providerId: null,
+          modelId: null
+        });
+      }
+      this.repository.updateCodingWorkflowStatus(workflowId, "failed");
+    });
+  }
+
+  private saveCodingWorkUnitRuntimeFailure(
+    projectId: string,
+    workflowId: string,
+    workUnitId: string,
+    failure: {
+      status: string;
+      reason: string;
+      attempts: number;
+      providerId: string | null;
+      modelId: string | null;
+    } | null
+  ): void {
+    const stored = asRecord(this.repository.getCodingWorkUnitContextDiagnostics(projectId, workflowId, workUnitId)) ?? {};
+    const diagnostics = { ...stored };
+    if (failure) {
+      diagnostics.runtimeFailure = failure;
+    } else {
+      delete diagnostics.runtimeFailure;
+    }
+    this.repository.saveCodingWorkUnitContextDiagnostics({
+      projectId,
+      workflowId,
+      workUnitId,
+      compilerVersion: typeof diagnostics.compilerVersion === "string" ? diagnostics.compilerVersion : WORK_UNIT_CONTEXT_COMPILER_VERSION,
+      diagnostics
+    });
   }
 
   private workUnitRevisionContext(projectId: string) {
@@ -2538,14 +2601,15 @@ function reviewVerdict(response: string): "reviewed" | "bugged" | null {
 
 async function validateCliProvider(provider: "codex" | "claudecode", command: string): Promise<string | null> {
   const label = cliProviderLabel(provider);
+  const executable = (await resolveCliPath(command)) ?? command;
   try {
-    await execFileAsync(command, ["--version"], cliExecOptions(5000));
+    await execFileAsync(executable, ["--version"], cliExecOptions(5000));
   } catch {
     return `${label} command not found or not executable: ${command}`;
   }
   const authArgs = provider === "codex" ? ["login", "status"] : ["auth", "status"];
   try {
-    await execFileAsync(command, authArgs, cliExecOptions(10000));
+    await execFileAsync(executable, authArgs, cliExecOptions(10000));
   } catch {
     return `${label} account login is not available. Run ${command} ${authArgs.join(" ")} or sign in with the CLI before saving.`;
   }
@@ -2564,13 +2628,35 @@ async function resolveCliPath(command: string): Promise<string | null> {
   const lookupCommand = process.platform === "win32" ? "where" : "which";
   try {
     const { stdout } = await execFileAsync(lookupCommand, [command], cliExecOptions(3000));
-    return outputText(stdout)
+    const matches = outputText(stdout)
       .split(/\r?\n/)
       .map((line) => line.trim())
-      .find(Boolean) ?? null;
+      .filter(Boolean);
+    if (process.platform === "win32") {
+      return matches.find(isRunnableWindowsCliPath) ?? resolveKnownWindowsCliPath(command);
+    }
+    return matches[0] ?? null;
   } catch {
+    return process.platform === "win32" ? resolveKnownWindowsCliPath(command) : null;
+  }
+}
+
+function isRunnableWindowsCliPath(candidate: string): boolean {
+  return [".com", ".exe", ".bat", ".cmd"].includes(path.win32.extname(candidate).toLowerCase());
+}
+
+export function resolveKnownWindowsCliPath(command: string, environment: NodeJS.ProcessEnv = process.env): string | null {
+  const commandName = path.win32.basename(command).toLowerCase().replace(/\.(?:com|exe|bat|cmd)$/i, "");
+  if (commandName !== command.toLowerCase().replace(/\.(?:com|exe|bat|cmd)$/i, "") || (commandName !== "claude" && commandName !== "codex")) {
     return null;
   }
+  const userProfile = environment.USERPROFILE?.trim();
+  const appData = environment.APPDATA?.trim();
+  const candidates = [
+    userProfile ? path.join(userProfile, ".local", "bin", `${commandName}.exe`) : "",
+    appData ? path.join(appData, "npm", `${commandName}.cmd`) : ""
+  ].filter(Boolean);
+  return candidates.find((candidate) => fs.existsSync(candidate)) ?? null;
 }
 
 function cliErrorMessage(error: unknown, fallback: string): string {
