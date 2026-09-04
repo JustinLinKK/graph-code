@@ -18,6 +18,10 @@ function sha1(value: string): string {
   return crypto.createHash("sha1").update(value).digest("hex");
 }
 
+function normalizeNewlines(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}
+
 function editScope(filePath: string, startLine = 1, endLine = 20): SourceWriteScope {
   return { path: filePath, startLine, endLine, symbolId: null, permission: "edit" };
 }
@@ -424,7 +428,7 @@ describe("MA-5 integration runner", () => {
         combinedDiff: diff,
         timeoutMs: 10000
       })).resolves.toBeUndefined();
-      expect(await fsp.readFile(path.join(root, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
+      expect(normalizeNewlines(await fsp.readFile(path.join(root, "src/a.ts"), "utf8"))).toBe("export const a = 2;\n");
     } finally {
       await fsp.rm(root, { recursive: true, force: true });
     }
@@ -453,7 +457,7 @@ describe("MA-5 integration runner", () => {
         combinedDiff: malformed,
         timeoutMs: 10000
       })).resolves.toBeUndefined();
-      expect(await fsp.readFile(path.join(root, "src/a.ts"), "utf8")).toBe("one\nTWO\nthree\n");
+      expect(normalizeNewlines(await fsp.readFile(path.join(root, "src/a.ts"), "utf8"))).toBe("one\nTWO\nthree\n");
     } finally {
       await fsp.rm(root, { recursive: true, force: true });
     }
@@ -476,7 +480,7 @@ describe("MA-5 integration runner", () => {
         timeoutMs: 10000
       })).resolves.toBeUndefined();
 
-      expect(await fsp.readFile(path.join(workspace, "src/a.ts"), "utf8")).toBe("export const a = 2;\n");
+      expect(normalizeNewlines(await fsp.readFile(path.join(workspace, "src/a.ts"), "utf8"))).toBe("export const a = 2;\n");
     } finally {
       await fsp.rm(root, { recursive: true, force: true });
     }

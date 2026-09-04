@@ -1,4 +1,5 @@
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -15,6 +16,10 @@ function sha1(value: string): string {
   return crypto.createHash("sha1").update(value).digest("hex");
 }
 
+function normalizeNewlines(value: string): string {
+  return value.replace(/\r\n/g, "\n");
+}
+
 function diffFor(filePath: string, before: string, after: string): string {
   return [
     `diff --git a/${filePath} b/${filePath}`,
@@ -25,6 +30,30 @@ function diffFor(filePath: string, before: string, after: string): string {
     `+${after}`,
     ""
   ].join("\n");
+}
+
+function writeDirectEditCli(relativePath: string, content: string): string {
+  const commandRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-direct-cli-"));
+  cleanups.push(commandRoot);
+  const runner = path.join(commandRoot, "runner.cjs");
+  const runnerSource = [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'process.stdin.resume();',
+    'process.stdin.on("end", () => {',
+    `  fs.writeFileSync(path.join(process.cwd(), ${JSON.stringify(relativePath)}), ${JSON.stringify(content)}, "utf8");`,
+    '  process.stdout.write("Implemented the requested workspace edit.\\n");',
+    '});'
+  ].join("\n");
+  fs.writeFileSync(runner, runnerSource, "utf8");
+  if (process.platform === "win32") {
+    const command = path.join(commandRoot, "claude.cmd");
+    fs.writeFileSync(command, `@echo off\r\nnode "%~dp0runner.cjs" %*\r\n`, "utf8");
+    return command;
+  }
+  const command = path.join(commandRoot, "claude");
+  fs.writeFileSync(command, `#!/bin/sh\nexec node "$(dirname "$0")/runner.cjs" "$@"\n`, { encoding: "utf8", mode: 0o755 });
+  return command;
 }
 
 function setupWorkflow() {
@@ -70,6 +99,120 @@ function setupWorkflow() {
 }
 
 describe("WorkspaceRuntime MA-5 integration gate", () => {
+  it("captures staged and untracked files when verifying direct CLI edits", async () => {
+    const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-direct-diff-workspace-"));
+    const databaseRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-direct-diff-db-"));
+    cleanups.push(rootPath, databaseRoot);
+    fs.mkdirSync(path.join(rootPath, "src"), { recursive: true });
+    fs.writeFileSync(path.join(rootPath, "src/tracked.ts"), "export const tracked = 1;\n", "utf8");
+    execFileSync("git", ["init"], { cwd: rootPath });
+    execFileSync("git", ["config", "user.email", "graphcode@example.invalid"], { cwd: rootPath });
+    execFileSync("git", ["config", "user.name", "GraphCode Test"], { cwd: rootPath });
+    execFileSync("git", ["add", "src/tracked.ts"], { cwd: rootPath });
+    execFileSync("git", ["commit", "-m", "fixture"], { cwd: rootPath });
+    fs.writeFileSync(path.join(rootPath, "src/tracked.ts"), "export const tracked = 2;\n", "utf8");
+    execFileSync("git", ["add", "src/tracked.ts"], { cwd: rootPath });
+    fs.writeFileSync(path.join(rootPath, "src/new.ts"), "export const added = true;\n", "utf8");
+    fs.mkdirSync(path.join(rootPath, ".graphcode/memory"), { recursive: true });
+    fs.writeFileSync(path.join(rootPath, ".graphcode/memory/state.md"), "internal state\n", "utf8");
+
+    const runtime = new WorkspaceRuntime(path.join(databaseRoot, "graphcode.sqlite"), rootPath);
+    try {
+      const project = runtime.repo().createProject({ id: `project-${crypto.randomUUID()}`, name: "Direct diff", rootPath });
+      const diff = (await runtime.readGitDiff(project.id)).replace(/\r\n/g, "\n");
+
+      expect(diff).toContain("diff --git a/src/tracked.ts b/src/tracked.ts");
+      expect(diff).toContain("+export const tracked = 2;");
+      expect(diff).toContain("diff --git a/src/new.ts b/src/new.ts");
+      expect(diff).toContain("+export const added = true;");
+      expect(diff).not.toContain(".graphcode/");
+    } finally {
+      runtime.close();
+    }
+  }, 20000);
+
+  it("records a verified direct-edit coding result as implemented", async () => {
+    const fixture = setupWorkflow();
+    try {
+      const run = fixture.repo.createAgentRun({
+        projectId: fixture.project.id,
+        agentKind: "coding",
+        codingMode: "small",
+        targetNodeId: fixture.functionId,
+        prompt: "Apply a direct edit.",
+        status: "running"
+      });
+      const runtime = fixture.runtime as unknown as {
+        finishAgentRun: (
+          agentRun: typeof run,
+          execute: () => Promise<{ response: string; diff: string; workspaceEditsApplied: boolean }>
+        ) => Promise<typeof run>;
+      };
+
+      const completed = await runtime.finishAgentRun(run, async () => ({
+        response: "Edited the workspace.",
+        diff: diffFor("src/value.ts", "export const value = 1;", "export const value = 2;"),
+        workspaceEditsApplied: true
+      }));
+
+      expect(completed.error).toBeNull();
+      expect(completed.status).toBe("succeeded");
+      expect(completed.implementedAt).toBeTruthy();
+    } finally {
+      fixture.runtime.close();
+    }
+  });
+
+  it("runs a Claude-compatible direct editor, verifies its diff, and marks the run implemented", async () => {
+    const fixture = setupWorkflow();
+    try {
+      fs.writeFileSync(path.join(fixture.rootPath, ".gitignore"), "graphcode.sqlite\n", "utf8");
+      execFileSync("git", ["init"], { cwd: fixture.rootPath });
+      execFileSync("git", ["config", "user.email", "graphcode@example.invalid"], { cwd: fixture.rootPath });
+      execFileSync("git", ["config", "user.name", "GraphCode Test"], { cwd: fixture.rootPath });
+      execFileSync("git", ["add", ".gitignore", "src/value.ts"], { cwd: fixture.rootPath });
+      execFileSync("git", ["commit", "-m", "fixture"], { cwd: fixture.rootPath });
+      const command = writeDirectEditCli("src/value.ts", "export const value = 2;\n");
+      fixture.repo.saveWorkspaceSettings(fixture.project.id, {
+        general: { theme: "system" },
+        github: { enabled: false, repository: "", clientId: "" },
+        automation: { autoReviewAfterCoding: false },
+        extensions: { enabledPackageIds: [], configs: {} },
+        agents: [],
+        codingAgents: [{
+          mode: "small",
+          provider: "claudecode",
+          model: "sonnet",
+          cliCommand: command,
+          reasoningEffort: "medium",
+          speedTier: "standard",
+          permissionMode: "full_access",
+          codexSystemPromptMode: "default",
+          claudeSystemPromptMode: "default",
+          parallelLimit: 1,
+          apiKeySource: { type: "env", value: "" },
+          systemPromptSource: { type: "manual", value: "" }
+        }],
+        reviewAgents: [],
+        scanningAgents: []
+      });
+
+      const completed = await fixture.runtime.runCoding(
+        { projectId: fixture.project.id, nodeId: fixture.functionId, mode: "small", prompt: "Change the value to 2." },
+        { autoReview: false }
+      );
+
+      expect(completed.error).toBeNull();
+      expect(completed.status).toBe("succeeded");
+      expect(completed.implementedAt).toBeTruthy();
+      expect(completed.diff).toContain("+export const value = 2;");
+      expect(fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8").replace(/\r\n/g, "\n")).toBe("export const value = 2;\n");
+      expect(fixture.repo.getNode(fixture.functionId).agentStatus).toBe("implemented");
+    } finally {
+      fixture.runtime.close();
+    }
+  }, 30000);
+
   it("implements a reviewed direct coding proposal once and records the result", async () => {
     const fixture = setupWorkflow();
     try {
@@ -103,7 +246,7 @@ describe("WorkspaceRuntime MA-5 integration gate", () => {
       const implemented = await fixture.runtime.applyCodeProposal({ projectId: fixture.project.id, runId: codingRun.id });
 
       expect(implemented.implementedAt).toBeTruthy();
-      expect(fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8")).toBe("export const value = 2;\n");
+      expect(normalizeNewlines(fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8"))).toBe("export const value = 2;\n");
       await expect(fixture.runtime.applyCodeProposal({ projectId: fixture.project.id, runId: codingRun.id })).resolves.toMatchObject({
         id: codingRun.id,
         implementedAt: implemented.implementedAt
@@ -256,7 +399,7 @@ describe("WorkspaceRuntime MA-5 integration gate", () => {
       expect(applied.items[0]).toMatchObject({ status: "applied", proposalRevision: 1 });
       expect(applied.integrationChecks).toHaveLength(7);
       expect(applied.integrationChecks?.every((check) => check.status === "passed")).toBe(true);
-      expect(fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8")).toBe("export const value = 2;\n");
+      expect(normalizeNewlines(fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8"))).toBe("export const value = 2;\n");
     } finally {
       fixture.runtime.close();
     }

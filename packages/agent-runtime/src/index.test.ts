@@ -6,6 +6,7 @@ import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, IndexState, NodeDe
 import {
   extractWorkUnitProposalMetadata,
   normalizeOpenRouterResponse,
+  resolveCodingAgentDiff,
   resolveKnownWindowsAgentCliPath,
   runCodingAgent,
   runPlanningAgent,
@@ -522,7 +523,8 @@ describe("GraphCode agent runtime", () => {
           "diff --git a/src/module.ts b/src/module.ts",
           "--- a/src/module.ts",
           "+++ b/src/module.ts",
-          "@@",
+          "@@ -1,1 +1,1 @@",
+          "-export const value = 1;",
           "+export const value = 2;",
           "GRAPHCODE_TEST_ARTIFACTS_JSON",
           "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}"
@@ -564,10 +566,18 @@ describe("GraphCode agent runtime", () => {
 
     it("runs Claude Code direct-edit modes with model, effort, fast settings, and git diff capture", async () => {
       const argsLog = path.join(os.tmpdir(), `graphcode-claude-${crypto.randomUUID()}.args`);
-      const command = writeFakeCli(["Claude edited files directly"], { argsLog });
-      const directDiff = ["diff --git a/src/module.ts b/src/module.ts", "--- a/src/module.ts", "+++ b/src/module.ts", "@@", "+export const value = 4;"].join("\n");
+      const stdinLog = path.join(os.tmpdir(), `graphcode-claude-${crypto.randomUUID()}.stdin`);
+      const command = writeFakeCli(["Claude edited files directly"], { argsLog, stdinLog });
+      const directDiff = [
+        "diff --git a/src/module.ts b/src/module.ts",
+        "--- a/src/module.ts",
+        "+++ b/src/module.ts",
+        "@@ -1,1 +1,1 @@",
+        "-export const value = 1;",
+        "+export const value = 4;"
+      ].join("\n");
       const tools = toolbox({
-        readGitDiff: vi.fn(async () => directDiff)
+        readGitDiff: vi.fn().mockResolvedValueOnce("").mockResolvedValueOnce(directDiff)
       });
 
       const result = await runCodingAgent(
@@ -600,9 +610,117 @@ describe("GraphCode agent runtime", () => {
       expect(args).toContain("--effort\nhigh");
       expect(args).toContain("--settings\n{\"fastMode\":true}");
       expect(args).not.toContain("--append-system-prompt");
+      const stdin = fs.readFileSync(stdinLog, "utf8");
+      expect(stdin).toContain("use editing tools to make the requested workspace change");
+      expect(stdin).toContain("do not return a proposed unified diff instead of editing");
       expect(result.diff).toContain("export const value = 4");
+      expect(result.workspaceEditsApplied).toBe(true);
       expect(tools.writeCodeProposal).toHaveBeenCalledWith("project", "run-claude-direct", "node-1", directDiff, null);
+      expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "implemented" })]);
       expect(tools.refreshCodeGraph).toHaveBeenCalledWith("project");
+    });
+
+    it.each(["claudecode", "codex"] as const)("rejects %s direct-edit completion when the workspace did not change", async (provider) => {
+      const command = writeFakeCli(["Implemented the requested code change."]);
+      const tools = toolbox({ readGitDiff: vi.fn(async () => "") });
+
+      await expect(
+        runCodingAgent(
+          { projectId: "project", nodeId: "node-1", mode: "small", prompt: "Change value to 2" },
+          {
+            config: {
+              ...baseConfig,
+              agentKind: "coding",
+              provider,
+              cliCommand: command,
+              model: provider === "claudecode" ? "sonnet" : "gpt-5.4",
+              permissionMode: "full_access"
+            },
+            runId: `run-${provider}-no-edit`,
+            toolbox: tools
+          }
+        )
+      ).rejects.toThrow(/reported completion, but no workspace changes were detected/i);
+      expect(tools.writeCodeProposal).not.toHaveBeenCalled();
+      expect(tools.setStatuses).not.toHaveBeenCalled();
+    });
+
+    it("does not start a direct-edit provider against a dirty workspace", async () => {
+      const argsLog = path.join(os.tmpdir(), `graphcode-dirty-${crypto.randomUUID()}.args`);
+      const command = writeFakeCli(["Should not run"], { argsLog });
+      const existingDiff = [
+        "diff --git a/src/module.ts b/src/module.ts",
+        "--- a/src/module.ts",
+        "+++ b/src/module.ts",
+        "@@ -1,1 +1,1 @@",
+        "-export const value = 1;",
+        "+export const value = 9;"
+      ].join("\n");
+      const tools = toolbox({ readGitDiff: vi.fn(async () => existingDiff) });
+
+      await expect(
+        runCodingAgent(
+          { projectId: "project", nodeId: "node-1", mode: "small", prompt: "Change value to 2" },
+          {
+            config: {
+              ...baseConfig,
+              agentKind: "coding",
+              provider: "claudecode",
+              cliCommand: command,
+              model: "sonnet",
+              permissionMode: "full_access"
+            },
+            runId: "run-claude-dirty",
+            toolbox: tools
+          }
+        )
+      ).rejects.toThrow(/requires a clean workspace/i);
+      expect(fs.existsSync(argsLog)).toBe(false);
+      expect(tools.readGitDiff).toHaveBeenCalledOnce();
+    });
+
+    it("rejects prose-only coding output for every proposal-only real provider", () => {
+      for (const provider of ["codex", "claudecode", "openai", "gemini", "deepseek", "openrouter"] as const) {
+        expect(() =>
+          resolveCodingAgentDiff({
+            provider,
+            permissionMode: "ask_for_permission",
+            response: "Implemented the requested code change.",
+            allowedPath: "src/module.ts",
+            source: "export const value = 1;\n"
+          })
+        ).toThrow(/did not contain a unified diff/i);
+      }
+    });
+
+    it("accepts a real scoped proposal from every proposal-only provider", () => {
+      const diff = [
+        "diff --git a/src/module.ts b/src/module.ts",
+        "--- a/src/module.ts",
+        "+++ b/src/module.ts",
+        "@@ -1,1 +1,1 @@",
+        "-export const value = 1;",
+        "+export const value = 2;"
+      ].join("\n");
+      for (const provider of ["codex", "claudecode", "openai", "gemini", "deepseek", "openrouter"] as const) {
+        expect(resolveCodingAgentDiff({
+          provider,
+          permissionMode: "ask_for_permission",
+          response: diff,
+          allowedPath: "src/module.ts"
+        })).toEqual({ diff, workspaceEditsApplied: false });
+      }
+    });
+
+    it("rejects a diff header and hunk that contain no changed lines", () => {
+      expect(() =>
+        resolveCodingAgentDiff({
+          provider: "openai",
+          permissionMode: "ask_for_permission",
+          response: "--- a/src/module.ts\n+++ b/src/module.ts\n@@ -1,1 +1,1 @@\n export const value = 1;",
+          allowedPath: "src/module.ts"
+        })
+      ).toThrow(/with code changes/i);
     });
 
     it("runs Codex CLI providers with workspace root and prompt skills on stdin", async () => {
@@ -610,7 +728,14 @@ describe("GraphCode agent runtime", () => {
       const stdinLog = path.join(os.tmpdir(), `graphcode-codex-${crypto.randomUUID()}.stdin`);
       const workspaceRoot = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-workspace-"));
       const command = writeFakeCli(
-        ["diff --git a/src/module.ts b/src/module.ts", "--- a/src/module.ts", "+++ b/src/module.ts", "@@", "+export const value = 3;"],
+        [
+          "diff --git a/src/module.ts b/src/module.ts",
+          "--- a/src/module.ts",
+          "+++ b/src/module.ts",
+          "@@ -1,1 +1,1 @@",
+          "-export const value = 1;",
+          "+export const value = 3;"
+        ],
         { argsLog, stdinLog }
       );
       const tools = toolbox();
@@ -708,7 +833,14 @@ describe("GraphCode agent runtime", () => {
   });
 
     it("rejects coding diffs that leave the selected source scope", async () => {
-      const command = writeFakeCli(["diff --git a/src/other.ts b/src/other.ts", "--- a/src/other.ts", "+++ b/src/other.ts", "@@", "+bad"]);
+      const command = writeFakeCli([
+        "diff --git a/src/other.ts b/src/other.ts",
+        "--- a/src/other.ts",
+        "+++ b/src/other.ts",
+        "@@ -1,1 +1,1 @@",
+        "-good",
+        "+bad"
+      ]);
       await expect(
         runCodingAgent(
         {

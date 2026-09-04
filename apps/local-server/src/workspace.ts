@@ -676,7 +676,10 @@ export class WorkspaceRuntime {
         toolbox: this.createToolbox(input.projectId)
       })
       );
-      if (codingRun.status === "succeeded" && (options.autoReview ?? true) && this.repository.getWorkspaceSettings(input.projectId).automation.autoReviewAfterCoding) {
+      if (codingRun.implementedAt) {
+        await this.memoryStore.promoteRun(project.rootPath, codingRun.id);
+      }
+      if (codingRun.status === "succeeded" && !codingRun.implementedAt && (options.autoReview ?? true) && this.repository.getWorkspaceSettings(input.projectId).automation.autoReviewAfterCoding) {
         await this.runReview({ projectId: input.projectId, runId: codingRun.id, mode: codingRun.codingMode ?? "medium" });
       }
     return codingRun;
@@ -1365,14 +1368,50 @@ export class WorkspaceRuntime {
 
   async readGitDiff(projectId: string): Promise<string> {
     const project = this.repository.getProject(projectId);
+    const options = {
+      timeout: 10000,
+      maxBuffer: 1024 * 1024 * 8
+    };
+    const workspacePathspec = ["--", ".", ":(exclude).graphcode/**"];
     try {
-      const { stdout } = await execFileAsync("git", ["-C", project.rootPath, "diff", "--no-ext-diff", "--"], {
-        timeout: 10000,
-        maxBuffer: 1024 * 1024 * 8
-      });
-      return stdout.trimEnd();
-    } catch {
-      return "";
+      let trackedDiff = "";
+      try {
+        const result = await execFileAsync("git", ["-C", project.rootPath, "diff", "--relative", "--no-ext-diff", "--binary", "HEAD", ...workspacePathspec], options);
+        trackedDiff = outputText(result.stdout);
+      } catch {
+        const [staged, unstaged] = await Promise.all([
+          execFileAsync("git", ["-C", project.rootPath, "diff", "--cached", "--relative", "--no-ext-diff", "--binary", ...workspacePathspec], options),
+          execFileAsync("git", ["-C", project.rootPath, "diff", "--relative", "--no-ext-diff", "--binary", ...workspacePathspec], options)
+        ]);
+        trackedDiff = `${outputText(staged.stdout)}${outputText(unstaged.stdout)}`;
+      }
+      const untrackedResult = await execFileAsync(
+        "git",
+        ["-C", project.rootPath, "ls-files", "--others", "--exclude-standard", "-z", ...workspacePathspec],
+        options
+      );
+      const untrackedPaths = outputText(untrackedResult.stdout).split("\0").filter(Boolean);
+      const untrackedDiffs = await Promise.all(
+        untrackedPaths.map(async (relativePath) => {
+          try {
+            const result = await execFileAsync(
+              "git",
+              ["-C", project.rootPath, "diff", "--no-index", "--no-ext-diff", "--binary", "--", "/dev/null", relativePath],
+              options
+            );
+            return outputText(result.stdout);
+          } catch (error) {
+            const result = error as { code?: number | string; stdout?: unknown };
+            if (Number(result.code) === 1) {
+              return outputText(result.stdout);
+            }
+            throw error;
+          }
+        })
+      );
+      return [trackedDiff, ...untrackedDiffs].filter((part) => part.trim()).join("\n").trimEnd();
+    } catch (error) {
+      throw validationError(cliErrorMessage(error, "Unable to capture the Git workspace diff required for direct-edit verification."));
     }
   }
 
@@ -1397,7 +1436,10 @@ export class WorkspaceRuntime {
     this.repository = new GraphRepository(this.db);
   }
 
-  private async finishAgentRun(run: AgentRun, execute: () => Promise<{ response: string; diff?: string; graphPatch?: GraphPatch | null }>): Promise<AgentRun> {
+  private async finishAgentRun(
+    run: AgentRun,
+    execute: () => Promise<{ response: string; diff?: string; graphPatch?: GraphPatch | null; workspaceEditsApplied?: boolean }>
+  ): Promise<AgentRun> {
     try {
       const result = await execute();
       this.repository.addAgentMessage({ runId: run.id, role: "assistant", content: result.response });
@@ -1406,6 +1448,7 @@ export class WorkspaceRuntime {
         response: result.response,
         diff: result.diff ?? "",
         graphPatch: result.graphPatch ?? null,
+        implementedAt: result.workspaceEditsApplied ? new Date().toISOString() : undefined,
         error: null
       });
     } catch (error) {

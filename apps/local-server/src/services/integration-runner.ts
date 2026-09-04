@@ -722,7 +722,12 @@ function commandError(error: unknown): string {
 
 async function runShellCommand(command: string, cwd: string, timeout: number): Promise<{ stdout: string; stderr: string }> {
   if (process.platform === "win32") {
-    return execFileAsync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", command], { cwd, timeout, maxBuffer: 10 * 1024 * 1024 });
+    return execFileAsync(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", command], {
+      cwd,
+      timeout,
+      maxBuffer: 10 * 1024 * 1024,
+      windowsVerbatimArguments: true
+    });
   }
   return execFileAsync("/bin/sh", ["-lc", command], { cwd, timeout, maxBuffer: 10 * 1024 * 1024 });
 }

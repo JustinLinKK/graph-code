@@ -606,9 +606,9 @@ export function SettingsPage({
           <label className="form-field">
             <span title="Controls whether Codex proposes changes or can edit the workspace directly.">Permission Mode</span>
             <select value={agent.permissionMode} onChange={(event) => onPatch({ permissionMode: event.target.value as AgentSettingsLike["permissionMode"] })}>
-              <option value="ask_for_permission">Ask for permission</option>
-              <option value="approve_for_me">Approve for me</option>
-              <option value="full_access">Full access</option>
+              <option value="ask_for_permission">Proposal only (no file edits)</option>
+              <option value="approve_for_me">Approve for me (direct edits)</option>
+              <option value="full_access">Full access (direct edits)</option>
             </select>
           </label>
           <label className="form-field">
@@ -682,9 +682,9 @@ export function SettingsPage({
           <label className="form-field">
             <span title="Controls whether Claude Code plans only, accepts edits, or bypasses permission prompts.">Permission Mode</span>
             <select value={agent.permissionMode} onChange={(event) => onPatch({ permissionMode: event.target.value as AgentSettingsLike["permissionMode"] })}>
-              <option value="ask_for_permission">Ask for permission</option>
-              <option value="approve_for_me">Approve for me</option>
-              <option value="full_access">Full access</option>
+              <option value="ask_for_permission">Proposal only (no file edits)</option>
+              <option value="approve_for_me">Approve for me (direct edits)</option>
+              <option value="full_access">Full access (direct edits)</option>
             </select>
           </label>
           <label className="form-field">

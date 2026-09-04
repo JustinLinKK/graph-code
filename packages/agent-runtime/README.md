@@ -2,7 +2,7 @@
 
 This package coordinates GraphCode's AI-assisted workflows for planning, coding, review, and scanning.
 
-Agent runs stay reviewable. Providers return text, graph patches, diffs, or scan JSON back to GraphCode; the runtime stores those proposals and does not let provider CLIs directly mutate the workspace.
+Agent runs stay reviewable. Providers return text, graph patches, diffs, or scan JSON back to GraphCode. Hosted providers and CLI **Proposal only** (`ask_for_permission`) runs are proposal-only. Standalone Codex and Claude Code coding runs may mutate a clean Git workspace when configured with **Approve for me** or **Full access**; the runtime requires a new, in-scope diff before recording those runs as implemented.
 
 ## Providers
 
@@ -11,21 +11,23 @@ Agent runs stay reviewable. Providers return text, graph patches, diffs, or scan
 - `codex`: account-based Codex CLI provider. The configured model field is the CLI command, defaulting to `codex`.
 - `claudecode`: account-based Claude Code CLI provider. The configured model field is the CLI command, defaulting to `claude`.
 
-CLI providers use the user's local CLI login instead of GraphCode storing API keys. GraphCode injects its mode-specific system prompts as the portable skill layer for each run, invokes the CLI from the active workspace root, and asks the CLI to return proposals rather than writing files.
+CLI providers use the user's local CLI login instead of GraphCode storing API keys. GraphCode injects its mode-specific system prompts as the portable skill layer for each run and invokes the CLI from the active workspace root. **Proposal only** requests a patch without writing files. **Approve for me** and **Full access** request direct edits for standalone coding runs and reject success claims that do not change the verified workspace diff.
 
 ## CLI Commands
 
-Codex runs non-interactively with:
+Codex proposal-only runs use a read-only sandbox:
 
 ```sh
 codex --ask-for-approval never exec --cd <workspaceRoot> --sandbox read-only -
 ```
 
-Claude Code runs in print mode with editing tools disallowed:
+Claude Code proposal-only runs use plan mode with editing tools disallowed:
 
 ```sh
 claude -p --append-system-prompt <systemPrompt> --permission-mode plan --disallowedTools Edit MultiEdit Write NotebookEdit --output-format text <prompt>
 ```
+
+For standalone direct-edit coding, Codex instead uses `workspace-write` or `danger-full-access`, while Claude Code uses `acceptEdits` or `bypassPermissions`. GraphCode captures the Git diff before and after the run, rejects dirty starting workspaces and no-op success claims, validates the changed paths, and records a verified direct edit as implemented.
 
 Settings validation checks that the CLI command exists and that the local CLI account is signed in before saving the configuration.
 

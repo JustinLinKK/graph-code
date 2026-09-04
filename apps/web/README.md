@@ -26,4 +26,4 @@ pnpm --filter @graphcode/web test
 pnpm --filter @graphcode/web build
 ```
 
-Providers only return proposals. `Integrate` validates and stores reconciliation evidence without changing the workspace; `Apply layer` is the explicit mutation boundary.
+Partitioned workflow providers only return proposals. `Integrate` validates and stores reconciliation evidence without changing the workspace; `Apply layer` is the explicit mutation boundary. Standalone Codex or Claude Code coding runs can edit directly when their permission mode allows it and GraphCode verifies an in-scope workspace diff.

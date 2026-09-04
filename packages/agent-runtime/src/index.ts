@@ -15,6 +15,7 @@ import {
   AVAILABLE_EXTENSION_PACKAGES,
   type AgentConfig,
   type AgentKind,
+  type AgentProvider,
   type AgentRun,
   type AgentStatus,
   type BlockExecutionMetadata,
@@ -174,6 +175,7 @@ export type AgentResult = {
   graphPatch?: GraphPatch | null;
   touched?: GraphStatusPatch[];
   memoryUpdates?: MemoryUpdate[];
+  workspaceEditsApplied?: boolean;
 };
 
 export type IntegrationAgentContext = {
@@ -440,6 +442,10 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
     prompt: input.prompt ?? "",
     execute: async () => {
       const provider = createProvider(options.config, options.workspaceRoot);
+      const directEditMode = usesCliDirectEditMode(options.config);
+      if (directEditMode && !options.toolbox.readGitDiff) {
+        throw new Error("Direct-edit CLI mode requires workspace diff capture.");
+      }
       const mode = input.mode ?? "medium";
       const detail = await options.toolbox.getNodeDetail(input.nodeId);
       const scopeRootNodeId = detail.node.parentId ?? detail.node.id;
@@ -453,6 +459,10 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
         const allowedPath = detail.node.source.path ?? detail.node.code.directory;
         const source = allowedPath ? await options.toolbox.readSourceFile(allowedPath) : "";
         const gitStatus = await options.toolbox.readGitStatus(input.projectId);
+        const initialWorkspaceDiff = directEditMode ? await options.toolbox.readGitDiff!(input.projectId) : undefined;
+        if (directEditMode && normalizeCapturedWorkspaceDiff(initialWorkspaceDiff ?? "")) {
+          throw new Error("Direct-edit CLI mode requires a clean workspace so provider changes can be verified and attributed safely. Use proposal-only mode or commit/stash the existing changes first.");
+        }
         const execution = await options.toolbox.resolveExecutionMetadata(input.nodeId);
         const memory = await readAgentMemory(options, input.projectId, "coding", input.prompt ?? detail.node.summary, allowedPath ? [allowedPath] : []);
         const context = buildCodingContextBundle({
@@ -474,35 +484,42 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
             role: "system",
             content: resolveSystemPrompt(
               options.config,
-              "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates."
+              directEditMode
+                ? "Edit the selected GraphCode block in the workspace and verify the requested change is present. Do not merely describe an implementation or return a proposed patch. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates."
+                : "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates."
             )
           },
           { role: "user", content: `${context}\n\n${formatMemoryContext(memory)}\n\n${memoryUpdateInstructions()}` }
         ]);
         const { content: responseWithoutMemory, updates: memoryUpdates } = extractMemoryUpdates(response);
         const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMemory);
-        const directEditMode = usesCliDirectEditMode(options.config);
-        const directDiff = directEditMode ? await (options.toolbox.readGitDiff?.(input.projectId) ?? Promise.resolve("")) : "";
-        if (directEditMode && directDiff.trim()) {
+        const finalWorkspaceDiff = directEditMode ? await options.toolbox.readGitDiff!(input.projectId) : undefined;
+        const resolvedDiff = resolveCodingAgentDiff({
+          provider: options.config.provider,
+          permissionMode: options.config.permissionMode,
+          response: responseWithoutArtifacts,
+          allowedPath,
+          source,
+          initialWorkspaceDiff,
+          finalWorkspaceDiff
+        });
+        if (resolvedDiff.workspaceEditsApplied) {
           await options.toolbox.refreshCodeGraph(input.projectId).catch(() => undefined);
         }
-        const diff = directDiff.trim() ? directDiff : normalizeDiff(responseWithoutArtifacts, allowedPath);
-        if (!directEditMode) {
-          assertDiffInScope(diff, allowedPath);
-        }
+        const diff = resolvedDiff.diff;
         await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
         await applyAgentMemory(options, input.projectId, "coding", memoryUpdates);
         const touched: GraphStatusPatch[] = [
           {
             entityType: "node",
             entityId: input.nodeId,
-            status: "coded",
-            note: usesCliDirectEditMode(options.config) ? "Coding agent applied or captured direct workspace edits." : "Coding agent produced a patch proposal.",
+            status: resolvedDiff.workspaceEditsApplied ? "implemented" : "coded",
+            note: resolvedDiff.workspaceEditsApplied ? "Coding agent applied verified direct workspace edits." : "Coding agent produced a validated patch proposal.",
             agentRunId: options.runId ?? null
           }
         ];
         await options.toolbox.setStatuses(input.projectId, touched);
-        return { response: responseWithoutMemory, diff, touched, memoryUpdates };
+        return { response: responseWithoutMemory, diff, touched, memoryUpdates, workspaceEditsApplied: resolvedDiff.workspaceEditsApplied };
     }
   });
 }
@@ -559,7 +576,7 @@ export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, optio
       const diff =
         options.config.provider === "fake"
           ? fakeWorkUnitDiff(context, responseWithoutArtifacts)
-          : normalizeDiff(responseWithoutArtifacts, context.allowedWrites[0]?.path);
+          : normalizeDiff(responseWithoutArtifacts);
       const actualWriteScopes = extractUnifiedDiffWriteScopes(diff);
       if (actualWriteScopes.length === 0) throw new Error("Work-unit coding response did not contain a parseable unified diff.");
       validateActualWriteScopes(context.workUnit, actualWriteScopes);
@@ -1907,8 +1924,47 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
   throw new Error(`Unsupported agent provider: ${config.provider}`);
 }
 
-function usesCliDirectEditMode(config: ProviderConfig): boolean {
+function usesCliDirectEditMode(config: Pick<ProviderConfig, "provider" | "permissionMode">): boolean {
   return (config.provider === "codex" || config.provider === "claudecode") && (config.permissionMode === "approve_for_me" || config.permissionMode === "full_access");
+}
+
+export function resolveCodingAgentDiff(input: {
+  provider: AgentProvider;
+  permissionMode: AgentConfig["permissionMode"];
+  response: string;
+  allowedPath: string | null | undefined;
+  source?: string;
+  initialWorkspaceDiff?: string;
+  finalWorkspaceDiff?: string;
+}): { diff: string; workspaceEditsApplied: boolean } {
+  const directEditMode = usesCliDirectEditMode(input);
+  let diff: string;
+  if (directEditMode) {
+    if (input.initialWorkspaceDiff === undefined || input.finalWorkspaceDiff === undefined) {
+      throw new Error("Direct-edit CLI mode could not verify the workspace before and after the provider run.");
+    }
+    const initial = normalizeCapturedWorkspaceDiff(input.initialWorkspaceDiff);
+    const final = normalizeCapturedWorkspaceDiff(input.finalWorkspaceDiff);
+    const providerName = input.provider === "claudecode" ? "Claude Code" : "Codex CLI";
+    if (!final) {
+      throw new Error(`${providerName} reported completion, but no workspace changes were detected.`);
+    }
+    if (initial === final) {
+      throw new Error(`${providerName} reported completion, but the workspace diff did not change.`);
+    }
+    diff = input.finalWorkspaceDiff.trimEnd();
+  } else if (input.provider === "fake") {
+    diff = fakeStandaloneCodingDiff(input.allowedPath, input.source ?? "", input.response);
+  } else {
+    diff = normalizeDiff(input.response);
+  }
+  assertDiffInScope(diff, input.allowedPath);
+  assertDiffContainsChanges(diff);
+  return { diff, workspaceEditsApplied: directEditMode };
+}
+
+function normalizeCapturedWorkspaceDiff(diff: string): string {
+  return diff.replace(/\r\n/g, "\n").trim();
 }
 
 function codexPermissionProfile(permissionMode: ProviderConfig["permissionMode"]): {
@@ -2099,7 +2155,9 @@ function buildCliPrompt(messages: PromptMessage[], options: { providerName: stri
     options.allowDirectEdits
       ? "You may edit workspace files directly when needed. Return a concise final message; GraphCode will capture the resulting git diff."
       : "Do not edit, write, or apply files directly. Return the requested GraphCode response only so the app can store, review, and apply proposals.",
-    "For coding runs, return a clean unified diff and append GRAPHCODE_TEST_ARTIFACTS_JSON only when test artifacts are proposed. For scanning runs, return strict JSON only.",
+    options.allowDirectEdits
+      ? "For coding runs, use editing tools to make the requested workspace change; do not return a proposed unified diff instead of editing. For scanning runs, return strict JSON only."
+      : "For coding runs, return a clean unified diff and append GRAPHCODE_TEST_ARTIFACTS_JSON only when test artifacts are proposed. For scanning runs, return strict JSON only.",
     conversation
   ]
     .filter(Boolean)
@@ -2363,12 +2421,55 @@ export function extractWorkUnitProposalMetadata(response: string): {
   }
 }
 
-function normalizeDiff(response: string, allowedPath: string | null | undefined): string {
-  if (response.includes("diff --git") || response.includes("--- ") || response.includes("+++ ")) {
-    return response;
+function normalizeDiff(response: string): string {
+  const fencedDiff = [...response.matchAll(/```(?:diff|patch)?\s*\r?\n([\s\S]*?)```/gi)]
+    .map((match) => match[1])
+    .find((candidate) => candidate.includes("diff --git") || (candidate.includes("--- ") && candidate.includes("+++ ")));
+  const candidate = fencedDiff ?? response;
+  const lines = candidate.replace(/\r\n/g, "\n").split("\n");
+  const start = lines.findIndex((line, index) => line.startsWith("diff --git ") || (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ")));
+  if (start < 0) {
+    throw new Error("Coding agent response did not contain a unified diff; no code proposal was recorded.");
   }
-  const path = allowedPath ?? "SCOPED_BLOCK.md";
-  return [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@", `+${response.replace(/\n/g, "\n+")}`].join("\n");
+  return lines.slice(start).join("\n").trimEnd();
+}
+
+function fakeStandaloneCodingDiff(allowedPath: string | null | undefined, source: string, response: string): string {
+  const targetPath = allowedPath ?? "SCOPED_BLOCK.md";
+  const summary = response.replace(/\s+/g, " ").slice(0, 160);
+  const sourceLines = source.split(/\r?\n/);
+  const lineIndex = sourceLines.findIndex((line) => line.trim().length > 0);
+  if (lineIndex < 0) {
+    return [
+      `diff --git a/${targetPath} b/${targetPath}`,
+      "--- /dev/null",
+      `+++ b/${targetPath}`,
+      "@@ -0,0 +1,1 @@",
+      `+${fakeProposalLine(targetPath, "", summary)}`
+    ].join("\n");
+  }
+  const lineNumber = lineIndex + 1;
+  const originalLine = sourceLines[lineIndex];
+  return [
+    `diff --git a/${targetPath} b/${targetPath}`,
+    `--- a/${targetPath}`,
+    `+++ b/${targetPath}`,
+    `@@ -${lineNumber},1 +${lineNumber},1 @@`,
+    `-${originalLine}`,
+    `+${fakeProposalLine(targetPath, originalLine, summary)}`
+  ].join("\n");
+}
+
+function assertDiffContainsChanges(diff: string): void {
+  const writeScopes = extractUnifiedDiffWriteScopes(diff);
+  const hasRename = /^rename from .+$/m.test(diff) && /^rename to .+$/m.test(diff);
+  const hasChangedLine = diff
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .some((line) => (line.startsWith("+") && !line.startsWith("+++")) || (line.startsWith("-") && !line.startsWith("---")));
+  if ((writeScopes.length === 0 || !hasChangedLine) && !hasRename) {
+    throw new Error("Coding agent response did not contain a parseable unified diff with code changes.");
+  }
 }
 
 function assertDiffInScope(diff: string, allowedPath: string | null | undefined): void {
@@ -2476,8 +2577,9 @@ function diffEscapesScope(diff: string, allowedPath: string | null | undefined):
     return false;
   }
   const normalized = allowedPath.replace(/^\/+/, "");
-  const touched = [...diff.matchAll(/^(?:\+\+\+|---) [ab]\/(.+)$/gm)].map((match) => match[1]);
-  return touched.some((path) => path !== normalized && !path.startsWith(`${normalized}/`));
+  const headerPaths = [...diff.matchAll(/^(?:\+\+\+|---) [ab]\/(.+)$/gm)].map((match) => match[1].trim());
+  const renamePaths = [...diff.matchAll(/^rename (?:from|to) (.+)$/gm)].map((match) => match[1].trim());
+  return [...headerPaths, ...renamePaths].some((candidate) => candidate !== normalized && !candidate.startsWith(`${normalized}/`));
 }
 
 function parseReviewVerdict(response: string): "reviewed" | "bugged" | null {

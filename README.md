@@ -234,7 +234,7 @@ The planning panel converts intent into graph-scoped tickets. Planning results c
 
 ### Proposal-First Coding
 
-Coding agents run in small, medium, or large modes. The mode controls how much graph and workflow context is included, but it does not grant unlimited edit scope. Provider outputs are stored as proposals and diffs so the user can inspect them before applying anything. A direct proposal can be implemented only after its matching review succeeds; GraphCode then validates and applies the exact reviewed diff as an explicit user action.
+Coding agents run in small, medium, or large modes. The mode controls how much graph and workflow context is included, but it does not grant unlimited edit scope. Hosted providers and CLI agents in **Proposal only** mode return validated proposals and diffs so the user can inspect them before applying anything. A proposal can be implemented only after its matching review succeeds; GraphCode then validates and applies the exact reviewed diff as an explicit user action. Standalone Codex or Claude Code runs configured with **Approve for me** or **Full access** instead edit a clean Git workspace directly. GraphCode verifies a new, in-scope diff before marking those runs implemented; partitioned workflows remain proposal-only.
 
 ### Review Agents
 
@@ -246,7 +246,7 @@ Scanning is split into local, medium, and global passes. Local scans analyze sou
 
 ### Local and Account-Based Providers
 
-GraphCode supports deterministic fake providers for tests and demos, hosted OpenAI, Gemini, DeepSeek, and OpenRouter providers through API-key settings, and account-based Codex or Claude Code CLI providers. CLI providers are invoked so they return proposals to GraphCode rather than editing files directly.
+GraphCode supports deterministic fake providers for tests and demos, hosted OpenAI, Gemini, DeepSeek, and OpenRouter providers through API-key settings, and account-based Codex or Claude Code CLI providers. Hosted providers and CLI **Proposal only** runs return proposals. Standalone CLI runs may edit directly only when **Approve for me** or **Full access** is selected; direct runs require a clean Git workspace and a verified, in-scope post-run diff.
 
 ## Examples
 
