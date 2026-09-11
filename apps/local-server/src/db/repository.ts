@@ -2744,7 +2744,7 @@ export class GraphRepository {
     const scopeIds = collectCodingScopeNodeIds(scope, nodeById);
     let candidates = nodes.filter((node) => scopeIds.has(node.id) && node.agentStatus === "planning");
     if (candidates.length === 0) {
-      candidates = [scope];
+      candidates = fallbackCodingCandidates(scope, nodes, scopeIds);
     }
     const candidateIds = new Set(candidates.map((node) => node.id));
     const childrenByCandidate = new Map<string, string[]>();
@@ -3785,6 +3785,7 @@ export class GraphRepository {
       const preservedLayouts = this.snapshotProjectLayouts(projectId);
       const preservedWorkspaceLayouts = this.snapshotWorkspaceLayouts(projectId);
       const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
+      const preservedPlanning = this.snapshotPlanningState(projectId);
       this.deleteGeneratedCodeGraph(projectId);
       const frameworkId = this.findOrCreateScanFramework(projectId);
       const directoryIdByPath = new Map(snapshot.directories.map((directory) => [directory.path, directory.id]));
@@ -3890,6 +3891,7 @@ export class GraphRepository {
       }
       this.restoreExistingProjectLayouts(projectId, preservedLayouts);
       this.restoreExistingWorkspaceLayouts(projectId, preservedWorkspaceLayouts);
+      this.restorePlanningState(projectId, preservedPlanning);
 
       this.db
         .prepare("INSERT OR REPLACE INTO graph_revisions (id, project_id, revision, note) VALUES (?, ?, ?, ?)")
@@ -3924,6 +3926,7 @@ export class GraphRepository {
       const preservedLayouts = this.snapshotProjectLayouts(projectId);
       const preservedWorkspaceLayouts = this.snapshotWorkspaceLayouts(projectId);
       const previousGeneratedEntities = this.listGeneratedGraphEntities(projectId, true);
+      const preservedPlanning = this.snapshotPlanningState(projectId);
       if (result.initial) {
         this.deleteGeneratedCodeGraph(projectId);
         this.db.prepare("DELETE FROM scan_file_state WHERE project_id = ?").run(projectId);
@@ -3985,6 +3988,7 @@ export class GraphRepository {
       }
       this.restoreExistingProjectLayouts(projectId, preservedLayouts);
       this.restoreExistingWorkspaceLayouts(projectId, preservedWorkspaceLayouts);
+      this.restorePlanningState(projectId, preservedPlanning);
 
       this.bumpGraphEntities(
         projectId,
@@ -4001,6 +4005,30 @@ export class GraphRepository {
   private deleteGeneratedCodeGraph(projectId: string): void {
     this.db.prepare("DELETE FROM graph_nodes WHERE project_id = ? AND (id LIKE 'scan-%' OR id LIKE 'code-%')").run(projectId);
     this.db.prepare("DELETE FROM graph_revisions WHERE project_id = ? AND id LIKE 'code-graph-revision-%'").run(projectId);
+  }
+
+  private snapshotPlanningState(projectId: string): Array<{ id: string; summary: string }> {
+    return this.db
+      .prepare(
+        "SELECT id, summary FROM graph_nodes WHERE project_id = ? AND agent_status = 'planning' AND (id LIKE 'code-%' OR id LIKE 'scan-%')"
+      )
+      .all(projectId) as Array<{ id: string; summary: string }>;
+  }
+
+  private restorePlanningState(projectId: string, planning: Array<{ id: string; summary: string }>): void {
+    if (planning.length === 0) {
+      return;
+    }
+    const setStatus = this.db.prepare(
+      "UPDATE graph_nodes SET agent_status = 'planning', updated_at = datetime('now') WHERE id = ? AND project_id = ?"
+    );
+    const setSummary = this.db.prepare(
+      "UPDATE graph_nodes SET summary = ? WHERE id = ? AND project_id = ?"
+    );
+    for (const item of planning) {
+      setStatus.run(item.id, projectId);
+      setSummary.run(item.summary, item.id, projectId);
+    }
   }
 
   private snapshotProjectLayouts(projectId: string): ProjectLayoutRow[] {
@@ -8310,6 +8338,25 @@ function defaultSizeForKind(kind: GraphNodeKind): { width: number; height: numbe
     return { width: 224, height: 112 };
   }
   return { width: 260, height: 136 };
+}
+
+function fallbackCodingCandidates(scope: GraphNode, nodes: GraphNode[], scopeIds: Set<string>): GraphNode[] {
+  // A node is a real coding target only when it carries a source path with line numbers.
+  // Synthetic directory modules carry a directory path but no source lines, so coding them
+  // yields empty context. When no "planning" markers survived (e.g. a scan reset them),
+  // fall back to the source-bearing file modules the scope owns instead of the bare scope.
+  const isSourceNode = (node: GraphNode) => Boolean(node.source.path) && typeof node.source.startLine === "number";
+  if (isSourceNode(scope)) {
+    return [scope];
+  }
+  const fileModules = nodes.filter(
+    (node) => node.id !== scope.id && scopeIds.has(node.id) && node.kind === "module" && isSourceNode(node)
+  );
+  if (fileModules.length > 0) {
+    return fileModules;
+  }
+  const anySourceNode = nodes.filter((node) => node.id !== scope.id && scopeIds.has(node.id) && isSourceNode(node));
+  return anySourceNode.length > 0 ? anySourceNode : [scope];
 }
 
 function collectCodingScopeNodeIds(scope: GraphNode, nodeById: Map<string, GraphNode>): Set<string> {

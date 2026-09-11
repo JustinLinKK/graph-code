@@ -1375,6 +1375,11 @@ export class WorkspaceRuntime {
     }
   }
 
+  async applyDiffToWorkspace(projectId: string, diff: string): Promise<void> {
+    const project = this.repository.getProject(projectId);
+    await applyCombinedPatchToWorkspace({ workspaceRoot: project.rootPath, combinedDiff: diff });
+  }
+
   private resolveGithubClientId(projectId: string, override?: string): string {
     const settings = this.repository.getWorkspaceSettings(projectId);
     const clientId = override?.trim() || settings.github.clientId.trim() || process.env.GRAPHCODE_GITHUB_CLIENT_ID?.trim() || "";
@@ -1802,6 +1807,7 @@ export class WorkspaceRuntime {
       },
       readGitStatus: async (inputProjectId) => this.readGitStatus(inputProjectId),
       readGitDiff: async (inputProjectId) => this.readGitDiff(inputProjectId),
+      applyDiffToWorkspace: async (inputProjectId, diff) => this.applyDiffToWorkspace(inputProjectId, diff),
       readMemory: async (inputProjectId, query) => {
         const project = this.repository.getProject(inputProjectId);
         return this.memoryStore.read(project.rootPath, query);

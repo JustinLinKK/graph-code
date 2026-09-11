@@ -2,6 +2,7 @@ import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages
 import { ChatGoogleGenerativeAI } from "@langchain/google-genai";
 import { Annotation, END, START, StateGraph } from "@langchain/langgraph";
 import { ChatOpenAI } from "@langchain/openai";
+import { fetch as undiciFetch, ProxyAgent } from "undici";
 import crossSpawn from "cross-spawn";
 import {
   buildLegacyRoundRobinPlanningChunks,
@@ -110,6 +111,7 @@ export type GraphCodeToolbox = {
   ) => Promise<void>;
   readGitStatus: (projectId: string) => Promise<string>;
   readGitDiff?: (projectId: string) => Promise<string>;
+  applyDiffToWorkspace?: (projectId: string, diff: string) => Promise<void>;
   readMemory?: (projectId: string, query: { agentKind: AgentKind; prompt: string; scopePaths: string[] }) => Promise<MemoryContext>;
   applyMemoryUpdates?: (projectId: string, runId: string | null, agentKind: AgentKind, updates: MemoryUpdate[]) => Promise<void>;
   refreshCodeGraph: (
@@ -357,7 +359,7 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
   },
   "memoryUpdates": []
 }`,
-            "Emit at least one graphPatch operation when a scoped or root node can represent the plan. Prefer updating existing node summaries or codeContext over creating speculative new nodes.",
+            "Emit at least one graphPatch operation when a scoped or root node can represent the plan. Write a concrete, code-level implementation plan into each updated node's summary — name the file, the function, and exactly what to change (e.g. 'In gui.py refresh(): add a restart button that calls init_game_state and re-enables controls'). Prefer updating the scope node's summary so the plan is visible even when the coding workflow lands on a single file-level unit. Do NOT create new nodes without an existing source location (no speculative frontend/API placeholder nodes); update existing symbols instead.",
             `Topology-scoped planning evidence:\nNodes:\n${graph.nodes.map((node) => `${node.id}:${node.name}:${node.kind}:${node.summary}`).join("\n")}\nEdges:\n${graph.edges.map((edge) => `${edge.id}:${edge.sourceNodeId}->${edge.targetNodeId}:${edge.kind}:${edge.label ?? ""}`).join("\n")}`
           ].join("\n")
         }
@@ -431,35 +433,69 @@ export async function runCodingAgent(input: CodingAgentRequest, options: AgentRu
           prompt: input.prompt,
           coverageNotice: formatIndexCoverageForPrompt(indexState)
         });
-        const response = await provider.invoke([
+        const cliDirectEditMode = usesCliDirectEditMode(options.config);
+        const apiDirectEditMode = isApiDirectEditMode(options.config);
+        const messages: PromptMessage[] = [
           {
             role: "system",
             content: resolveSystemPrompt(
               options.config,
-              "Return a unified diff scoped only to the selected GraphCode block. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates."
+              "Return a unified diff scoped only to the selected GraphCode block. Copy every context line in the diff byte-for-byte from the Source section (indentation and whitespace must match exactly), and recompute @@ hunk line numbers from the actual file. If you create test scripts, append GRAPHCODE_TEST_ARTIFACTS_JSON followed by a compact JSON artifact manifest. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates."
             )
           },
           { role: "user", content: `${context}\n\n${formatMemoryContext(memory)}\n\n${memoryUpdateInstructions()}` }
-        ]);
-        const { content: responseWithoutMemory, updates: memoryUpdates } = extractMemoryUpdates(response);
-        const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMemory);
-        const directEditMode = usesCliDirectEditMode(options.config);
-        const directDiff = directEditMode ? await (options.toolbox.readGitDiff?.(input.projectId) ?? Promise.resolve("")) : "";
-        if (directEditMode && directDiff.trim()) {
-          await options.toolbox.refreshCodeGraph(input.projectId).catch(() => undefined);
-        }
-        const diff = directDiff.trim() ? directDiff : normalizeDiff(responseWithoutArtifacts, allowedPath);
-        if (!directEditMode) {
+        ];
+        // Hosted-API direct edits apply the model's diff via `git apply`; when the
+        // diff's context lines drift from the file (a common LLM failure), re-invoke
+        // the model with the concrete `git apply` error so it can correct the diff.
+        const applyRetries = apiDirectEditMode ? 2 : 0;
+        let response = "";
+        let responseWithoutMemory = "";
+        let memoryUpdates: MemoryUpdate[] = [];
+        let artifactManifest: CodeProposalArtifactManifest | null = null;
+        let diff = "";
+        for (let attempt = 0; attempt <= applyRetries; attempt += 1) {
+          response = await provider.invoke(messages);
+          ({ content: responseWithoutMemory, updates: memoryUpdates } = extractMemoryUpdates(response));
+          ({ content: responseWithoutMemory, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMemory));
+          if (cliDirectEditMode) {
+            const capturedDiff = await (options.toolbox.readGitDiff?.(input.projectId) ?? Promise.resolve(""));
+            if (capturedDiff.trim()) {
+              await options.toolbox.refreshCodeGraph(input.projectId).catch(() => undefined);
+            }
+            diff = capturedDiff.trim() ? capturedDiff : normalizeDiff(responseWithoutMemory, allowedPath);
+            break;
+          }
+          diff = normalizeDiff(responseWithoutMemory, allowedPath);
           assertDiffInScope(diff, allowedPath);
+          if (!apiDirectEditMode || !options.toolbox.applyDiffToWorkspace) {
+            break;
+          }
+          try {
+            await options.toolbox.applyDiffToWorkspace(input.projectId, diff);
+            break;
+          } catch (error) {
+            if (attempt >= applyRetries) throw error;
+            messages.push({ role: "assistant", content: response });
+            messages.push({ role: "user", content: diffRetryFeedback(error) });
+          }
+        }
+        if (apiDirectEditMode) {
+          await options.toolbox.refreshCodeGraph(input.projectId).catch(() => undefined);
         }
         await options.toolbox.writeCodeProposal(input.projectId, options.runId ?? null, input.nodeId, diff, artifactManifest);
         await applyAgentMemory(options, input.projectId, "coding", memoryUpdates);
+        const note = cliDirectEditMode
+          ? "Coding agent captured direct workspace edits."
+          : apiDirectEditMode
+            ? "Coding agent applied direct workspace edits."
+            : "Coding agent produced a patch proposal.";
         const touched: GraphStatusPatch[] = [
           {
             entityType: "node",
             entityId: input.nodeId,
             status: "coded",
-            note: usesCliDirectEditMode(options.config) ? "Coding agent applied or captured direct workspace edits." : "Coding agent produced a patch proposal.",
+            note,
             agentRunId: options.runId ?? null
           }
         ];
@@ -1264,7 +1300,24 @@ function fallbackPlanningOutput(response: string, prompt: string, graph: Plannin
 }
 
 function compactPlanningSummary(value: string): string {
-  return value.replace(/\s+/g, " ").trim().slice(0, 1000) || "Planning agent proposed graph updates.";
+  let text = value.trim();
+  // A fenced JSON response should never be stored verbatim as a node summary.
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced) text = fenced[1].trim();
+  // If what remains is JSON, pull the human-readable "response" field so the
+  // fallback summary is a real plan instead of a raw payload blob.
+  if (text.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(text) as { response?: unknown; graphPatch?: { summary?: unknown } };
+      const responseText = typeof parsed.response === "string" ? parsed.response.trim() : "";
+      const patchSummary = typeof parsed.graphPatch?.summary === "string" ? parsed.graphPatch.summary.trim() : "";
+      if (responseText) text = responseText;
+      else if (patchSummary) text = patchSummary;
+    } catch {
+      // Keep the raw text when it is not parseable JSON.
+    }
+  }
+  return text.replace(/\s+/g, " ").trim().slice(0, 1000) || "Planning agent proposed graph updates.";
 }
 
 type CodingContextInput = {
@@ -1307,8 +1360,9 @@ function buildCodingContextBundle(input: CodingContextInput): string {
     `Target node: ${formatNode(input.detail.node)}`,
     `Organization scope: ${input.organizationScope ? formatNode(input.organizationScope) : "none"}`,
     `Allowed edit path: ${input.allowedPath ?? "none"}`,
-    `Allowed source lines: ${input.detail.node.source.startLine ?? input.detail.node.code.startLine ?? "unknown"}-${input.detail.node.source.endLine ?? input.detail.node.code.endLine ?? "unknown"}`,
+    `Target symbol lines: ${input.detail.node.source.startLine ?? input.detail.node.code.startLine ?? "unknown"}-${input.detail.node.source.endLine ?? input.detail.node.code.endLine ?? "unknown"} (the whole file is shown below; edit anywhere in the file that serves this change)`,
     `Execution metadata:\n${formatExecutionMetadata(input.execution)}`,
+    "Diff rule: in the unified diff, copy every context line (lines beginning with a single space) byte-for-byte from the Source section — exact indentation and whitespace, no rewording — and recompute each @@ hunk header's line numbers from the actual file.",
     "Environment rule: use only the resolved virtual environment/setup metadata above. Do not activate unrelated conda, venv, pyenv, nvm, or system environments by guessing.",
     "Test artifact rule: if a new test script is useful, include it only in GRAPHCODE_TEST_ARTIFACTS_JSON; do not assume it has been written into the source tree.",
     `Workflow blocks:\n${formatNodeList(workflowNodes, 28)}`,
@@ -1596,6 +1650,16 @@ type ProviderConfig = Omit<AgentConfig, "agentKind"> & {
   skipCodexDefaultSystemPrompt?: boolean;
 };
 
+function resolveHttpProxy(): ProxyAgent | undefined {
+  const proxyUrl = process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  if (!proxyUrl) return undefined;
+  try {
+    return new ProxyAgent(proxyUrl);
+  } catch {
+    return undefined;
+  }
+}
+
 function createProvider(config: ProviderConfig, workspaceRoot?: string): { invoke: (messages: PromptMessage[]) => Promise<string> } {
       if (config.provider === "fake") {
         return {
@@ -1620,17 +1684,22 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
         : config.provider === "deepseek"
           ? "https://api.deepseek.com"
           : undefined;
+    const proxyAgent = resolveHttpProxy();
     const model = new ChatOpenAI({
       model: config.model,
       apiKey,
       temperature: 0,
-      ...(baseURL
-        ? {
-            configuration: {
-              baseURL
+      configuration: {
+        ...(baseURL ? { baseURL } : {}),
+        ...(proxyAgent
+          ? {
+              // undici's `fetch` must be paired with the ProxyAgent from the same undici copy;
+              // its signature differs structurally from openai's `Fetch` type, so bridge via `any`.
+              fetch: undiciFetch as any,
+              fetchOptions: { dispatcher: proxyAgent }
             }
-          }
-        : {})
+          : {})
+      }
     });
     return { invoke: (messages) => invokeChatModel(model, messages) };
   }
@@ -1650,6 +1719,16 @@ function createProvider(config: ProviderConfig, workspaceRoot?: string): { invok
 
 function usesCliDirectEditMode(config: ProviderConfig): boolean {
   return (config.provider === "codex" || config.provider === "claudecode") && (config.permissionMode === "approve_for_me" || config.permissionMode === "full_access");
+}
+
+const HOSTED_API_PROVIDERS = new Set(["openai", "openrouter", "deepseek", "gemini"]);
+
+function isHostedApiProvider(provider: ProviderConfig["provider"]): boolean {
+  return HOSTED_API_PROVIDERS.has(provider);
+}
+
+function isApiDirectEditMode(config: ProviderConfig): boolean {
+  return isHostedApiProvider(config.provider) && (config.permissionMode === "approve_for_me" || config.permissionMode === "full_access");
 }
 
 function codexPermissionProfile(permissionMode: ProviderConfig["permissionMode"]): {
@@ -1983,6 +2062,24 @@ export function extractWorkUnitProposalMetadata(response: string): {
   } catch {
     throw new Error("Work-unit proposal metadata is not valid GRAPHCODE_WORK_UNIT_METADATA_JSON.");
   }
+}
+
+function diffRetryFeedback(error: unknown): string {
+  const record = error && typeof error === "object" ? (error as { message?: string; stderr?: string; stdout?: string }) : null;
+  const detail = (
+    record?.stderr?.trim() ||
+    record?.stdout?.trim() ||
+    (record?.message ?? String(error)).replace(/^Command failed:[^\r\n]*/, "git apply --check").trim()
+  ).slice(-4000);
+  return [
+    "The unified diff you returned does not apply cleanly. `git apply --check` reported:",
+    detail,
+    "",
+    "Return the corrected unified diff only. Fix it by:",
+    "1. Copying every context line (lines beginning with a single space) byte-for-byte from the Source section, including exact indentation and trailing whitespace.",
+    "2. Recomputing each @@ hunk header so its line numbers match the actual file.",
+    "3. Not rewording any existing line; only changing the specific lines the change requires."
+  ].join("\n");
 }
 
 function normalizeDiff(response: string, allowedPath: string | null | undefined): string {

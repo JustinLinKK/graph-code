@@ -383,8 +383,13 @@ async function compileSourceExcerpt(
       omission: { entityType: "source", entityId: node.id, reason: "unsupported", required, detail: "Node has no normalized workspace-relative source path." }
     };
   }
-  const startLine = node.source.startLine ?? node.code.startLine;
-  const endLine = node.source.endLine ?? node.code.endLine;
+  // A symbol work unit owns its whole containing file (see
+  // `sourceWriteScopeForNode` in graph-query), so the owned source excerpt spans
+  // the entire file rather than just the symbol's declared line range. This lets
+  // the coding agent see imports, sibling definitions, and where to add code.
+  const isOwnedSymbol = role === "owned" && node.kind !== "module";
+  const startLine = isOwnedSymbol ? null : node.source.startLine ?? node.code.startLine;
+  const endLine = isOwnedSymbol ? null : node.source.endLine ?? node.code.endLine;
   const validRange = (startLine === null && endLine === null) || (startLine !== null && endLine !== null && startLine > 0 && endLine >= startLine);
   if (!validRange) {
     return {
@@ -423,7 +428,7 @@ async function compileSourceExcerpt(
       role,
       selectionReason:
         role === "owned"
-          ? "Exact owned-symbol source is mandatory and writable only inside declared scopes."
+          ? "Owned source spans the whole containing file and is writable only inside allowedWrites."
           : role === "test"
             ? "Related test source is prioritized deterministic validation evidence."
             : "One-hop halo excerpt supplies read-only boundary evidence.",

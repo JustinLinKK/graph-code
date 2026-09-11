@@ -14,6 +14,15 @@ import {
   type ScanPipelineResult
 } from "./index";
 
+vi.mock("@langchain/openai", () => ({
+  ChatOpenAI: vi.fn().mockImplementation(() => ({
+    invoke: vi.fn(
+      async () =>
+        "diff --git a/src/module.ts b/src/module.ts\n--- a/src/module.ts\n+++ b/src/module.ts\n@@ -1 +1 @@\n-export const value = 1;\n+export const value = 2;\n"
+    )
+  }))
+}));
+
 const baseConfig: AgentConfig = {
   agentKind: "planning",
   provider: "fake",
@@ -157,6 +166,7 @@ function toolbox(overrides: Partial<GraphCodeToolbox> = {}): GraphCodeToolbox {
     readSourceFile: vi.fn(async () => "export const value = 1;\n"),
     writeCodeProposal: vi.fn(async () => {}),
     readGitStatus: vi.fn(async () => ""),
+    applyDiffToWorkspace: vi.fn(async () => {}),
     refreshCodeGraph: vi.fn(async () => ({ nodeCount: 12, edgeCount: 4, fileCount: 3, symbolCount: 5, workflowNodeCount: 4 })),
     ...overrides
   };
@@ -305,6 +315,69 @@ describe("GraphCode agent runtime", () => {
       expect(tools.writeCodeProposal).toHaveBeenCalled();
       expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded" })]);
       expect(tools.readGraph).not.toHaveBeenCalled();
+    });
+
+    it("applies a hosted API coding diff directly to the workspace in full_access mode", async () => {
+      const tools = toolbox();
+      await runCodingAgent(
+        { projectId: "project", nodeId: "node-1", mode: "small", prompt: "Update value directly" },
+        {
+          config: { ...baseConfig, agentKind: "coding", provider: "openai", model: "gpt-4o", permissionMode: "full_access" },
+          runId: "run-openai-direct",
+          toolbox: tools
+        }
+      );
+
+      expect(tools.applyDiffToWorkspace).toHaveBeenCalledWith("project", expect.stringContaining("diff --git a/src/module.ts"));
+      expect(tools.refreshCodeGraph).toHaveBeenCalledWith("project");
+      expect(tools.writeCodeProposal).toHaveBeenCalledWith("project", "run-openai-direct", "node-1", expect.stringContaining("diff --git a/src/module.ts"), null);
+      expect(tools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "coded", note: "Coding agent applied direct workspace edits." })]);
+    });
+
+    it("applies a hosted API coding diff directly in approve_for_me mode", async () => {
+      const tools = toolbox();
+      await runCodingAgent(
+        { projectId: "project", nodeId: "node-1", mode: "small", prompt: "Update value directly" },
+        {
+          config: { ...baseConfig, agentKind: "coding", provider: "deepseek", model: "deepseek-chat", permissionMode: "approve_for_me" },
+          runId: "run-deepseek-direct",
+          toolbox: tools
+        }
+      );
+
+      expect(tools.applyDiffToWorkspace).toHaveBeenCalled();
+      expect(tools.refreshCodeGraph).toHaveBeenCalledWith("project");
+    });
+
+    it("keeps hosted API coding proposal-only in ask_for_permission mode", async () => {
+      const tools = toolbox();
+      await runCodingAgent(
+        { projectId: "project", nodeId: "node-1", mode: "small", prompt: "Update value" },
+        {
+          config: { ...baseConfig, agentKind: "coding", provider: "openai", model: "gpt-4o", permissionMode: "ask_for_permission" },
+          runId: "run-openai-proposal",
+          toolbox: tools
+        }
+      );
+
+      expect(tools.applyDiffToWorkspace).not.toHaveBeenCalled();
+      expect(tools.writeCodeProposal).toHaveBeenCalled();
+      expect(tools.refreshCodeGraph).not.toHaveBeenCalled();
+    });
+
+    it("does not direct-edit for the fake provider even with full_access", async () => {
+      const tools = toolbox();
+      await runCodingAgent(
+        { projectId: "project", nodeId: "node-1", mode: "small", prompt: "Update value" },
+        {
+          config: { ...baseConfig, agentKind: "coding", provider: "fake", model: "graphcode-fake-v1", permissionMode: "full_access" },
+          runId: "run-fake-direct",
+          toolbox: tools
+        }
+      );
+
+      expect(tools.applyDiffToWorkspace).not.toHaveBeenCalled();
+      expect(tools.writeCodeProposal).toHaveBeenCalled();
     });
 
     it("warns agents not to make repository-wide claims from a partial index", async () => {

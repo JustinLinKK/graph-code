@@ -59,7 +59,7 @@ export function partitionGraphTask(rawInput: GraphPartitionInput): CodingWorkflo
       id,
       kind: "leaf",
       title: ownedNodeIds.map((nodeId) => nodeById.get(nodeId)?.name ?? nodeId).join(" + "),
-      objective: `Implement the graph-owned task partition for ${ownedNodeIds.map((nodeId) => nodeById.get(nodeId)?.name ?? nodeId).join(", ")}: ${input.task}`,
+      objective: `Implement the planned change for ${ownedNodeIds.map((nodeId) => nodeById.get(nodeId)?.name ?? nodeId).join(", ")}: ${planSummaryFor(ownedNodeIds, nodeById) || input.task}`,
       ownedNodeIds,
       parentWorkUnitId: null,
       dependencyWorkUnitIds: new Set(),
@@ -89,7 +89,7 @@ export function partitionGraphTask(rawInput: GraphPartitionInput): CodingWorkflo
       id,
       kind: "integration",
       title: `${node.name} integration`,
-      objective: `Integrate child partition outputs and preserve contracts for ${node.name}: ${input.task}`,
+      objective: `Integrate child partition outputs and preserve contracts for ${node.name}: ${planSummaryFor(ownedNodeIds, nodeById) || input.task}`,
       ownedNodeIds,
       parentWorkUnitId: null,
       dependencyWorkUnitIds: new Set(),
@@ -775,22 +775,44 @@ function computeDependencyLayers(partitions: Map<string, MutablePartition>): Map
 function sourceWriteScopeForNode(node: GraphNode): SourceWriteScope | null {
   const sourcePath = normalizeWorkspacePath(node.source.path ?? node.code.directory);
   if (!sourcePath) return null;
-  const startLine = node.source.startLine ?? node.code.startLine;
-  const endLine = node.source.endLine ?? node.code.endLine;
-  const validRange = startLine !== null && endLine !== null && startLine > 0 && endLine >= startLine;
-  return { path: sourcePath, startLine: validRange ? startLine : null, endLine: validRange ? endLine : null, symbolId: node.id, permission: "edit" };
+  // A work unit owns its whole containing file, not just the symbol's declared
+  // line range: implementing a function may require helper definitions, imports,
+  // or adjacent symbols in the same file. Null lines mean "anywhere in this
+  // path", which `scopeContains` in the runtime treats as whole-file authority.
+  return { path: sourcePath, startLine: null, endLine: null, symbolId: node.id, permission: "edit" };
 }
 
 function writeScopesConflict(left: GraphNode, right: GraphNode): boolean {
+  // Write scopes are whole-file (see `sourceWriteScopeForNode`), so any two
+  // nodes in the same file have overlapping write authority and must be ordered.
   const leftPath = sourcePathForNode(left);
   const rightPath = sourcePathForNode(right);
-  if (!leftPath || leftPath !== rightPath) return false;
-  const leftStart = left.source.startLine ?? left.code.startLine;
-  const leftEnd = left.source.endLine ?? left.code.endLine;
-  const rightStart = right.source.startLine ?? right.code.startLine;
-  const rightEnd = right.source.endLine ?? right.code.endLine;
-  if (leftStart === null || leftEnd === null || rightStart === null || rightEnd === null) return true;
-  return leftStart <= rightEnd && rightStart <= leftEnd;
+  return Boolean(leftPath && leftPath === rightPath);
+}
+
+function planSummaryFor(nodeIds: string[], nodeById: Map<string, GraphNode>): string {
+  const summaries: string[] = [];
+  const seen = new Set<string>();
+  for (const nodeId of nodeIds) {
+    const node = nodeById.get(nodeId);
+    if (!node) continue;
+    const summary = node.summary?.trim() ?? "";
+    if (!summary || seen.has(summary)) continue;
+    if (!isActionablePlanSummary(summary, node.name)) continue;
+    seen.add(summary);
+    summaries.push(summary);
+  }
+  return summaries.join(" ").slice(0, 2000);
+}
+
+function isActionablePlanSummary(summary: string, nodeName: string): boolean {
+  // Parser-generated defaults carry no plan and should not drive the objective.
+  if (/^(Exported )?(function|method|class|module|type|object|interface) .+ from .+\.$/i.test(summary)) return false;
+  if (/^Function entry for /.test(summary)) return false;
+  if (/python file module with \d+ symbols/i.test(summary)) return false;
+  // A summary that only restates the node name is not a plan.
+  if (summary === nodeName || summary === `Exported function ${nodeName}` || summary === `function ${nodeName}`) return false;
+  return true;
 }
 
 function estimateNodeTokens(node: GraphNode): number {

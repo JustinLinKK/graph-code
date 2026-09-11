@@ -205,4 +205,26 @@ describe("WorkspaceRuntime MA-5 integration gate", () => {
       fixture.runtime.close();
     }
   }, 20000);
+
+  it("applies a diff directly to the workspace via applyDiffToWorkspace", async () => {
+    const fixture = setupWorkflow();
+    try {
+      const diff = diffFor("src/value.ts", "export const value = 1;", "export const value = 3;");
+      await fixture.runtime.applyDiffToWorkspace(fixture.project.id, diff);
+      const content = fs.readFileSync(path.join(fixture.rootPath, "src/value.ts"), "utf8").replace(/\r\n/g, "\n");
+      expect(content).toBe("export const value = 3;\n");
+    } finally {
+      fixture.runtime.close();
+    }
+  }, 20000);
+
+  it("propagates a failing git apply from applyDiffToWorkspace", async () => {
+    const fixture = setupWorkflow();
+    try {
+      const diff = diffFor("src/missing.ts", "export const old = 1;", "export const new = 2;");
+      await expect(fixture.runtime.applyDiffToWorkspace(fixture.project.id, diff)).rejects.toThrow();
+    } finally {
+      fixture.runtime.close();
+    }
+  }, 20000);
 });

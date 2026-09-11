@@ -54,9 +54,9 @@ describe("MA-3 isolated work-unit context compiler", () => {
         availability: "present",
         exact: true,
         writable: true,
-        startLine: 2,
-        endLine: 4,
-        content: ["export function owned() {", "  return halo();", "}"].join("\n")
+        startLine: null,
+        endLine: null,
+        content: sourceFiles["src/owned.ts"]
       })
     );
     expect(context.sources.find((source) => source.role === "test")?.path).toBe("tests/owned.test.ts");

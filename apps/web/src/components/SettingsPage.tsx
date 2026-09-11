@@ -713,6 +713,22 @@ export function SettingsPage({
     );
   };
 
+  const renderHostedPermissionMode = (agent: AgentSettingsLike, onPatch: (patch: AgentSettingsPatch) => void) => {
+    if (isCliProvider(agent.provider)) {
+      return null;
+    }
+    return (
+      <label className="form-field">
+        <span title="Controls whether the hosted API provider proposes changes for review or applies them directly to the workspace.">Permission Mode</span>
+        <select value={agent.permissionMode} onChange={(event) => onPatch({ permissionMode: event.target.value as AgentSettingsLike["permissionMode"] })}>
+          <option value="ask_for_permission">Ask for permission</option>
+          <option value="approve_for_me">Approve for me</option>
+          <option value="full_access">Full access</option>
+        </select>
+      </label>
+    );
+  };
+
   return (
     <div className="settings-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-dialog-title">
       <div className="settings-page">
@@ -900,6 +916,7 @@ export function SettingsPage({
                       </div>
                       {renderCodexControls(agent, `agents.${index}`, (patch) => updateAgent(agentKind, patch))}
                       {renderClaudeControls(agent, `agents.${index}`, (patch) => updateAgent(agentKind, patch))}
+                      {renderHostedPermissionMode(agent, (patch) => updateAgent(agentKind, patch))}
                       {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
@@ -992,6 +1009,7 @@ export function SettingsPage({
                       </div>
                       {renderCodexControls(agent, `codingAgents.${index}`, (patch) => updateCodingAgent(mode, patch))}
                       {renderClaudeControls(agent, `codingAgents.${index}`, (patch) => updateCodingAgent(mode, patch))}
+                      {renderHostedPermissionMode(agent, (patch) => updateCodingAgent(mode, patch))}
                       {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
@@ -1084,6 +1102,7 @@ export function SettingsPage({
                         </div>
                         {renderCodexControls(agent, `reviewAgents.${index}`, (patch) => updateReviewAgent(mode, patch))}
                         {renderClaudeControls(agent, `reviewAgents.${index}`, (patch) => updateReviewAgent(mode, patch))}
+                        {renderHostedPermissionMode(agent, (patch) => updateReviewAgent(mode, patch))}
                         {!isCliProvider(agent.provider) ? (
                         <div className="form-grid">
                           <label className="form-field">
@@ -1176,6 +1195,7 @@ export function SettingsPage({
                       </div>
                       {renderCodexControls(agent, `scanningAgents.${index}`, (patch) => updateScanningAgent(mode, patch))}
                       {renderClaudeControls(agent, `scanningAgents.${index}`, (patch) => updateScanningAgent(mode, patch))}
+                      {renderHostedPermissionMode(agent, (patch) => updateScanningAgent(mode, patch))}
                       {!isCliProvider(agent.provider) ? (
                       <div className="form-grid">
                         <label className="form-field">
