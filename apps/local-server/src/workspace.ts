@@ -170,6 +170,10 @@ export class WorkspaceRuntime {
     this.db = openDatabase(fallbackDbPath);
     migrate(this.db);
     this.repository = new GraphRepository(this.db);
+    // Schedulers and agents are in-memory only, so any "running"/"queued" rows that
+    // survived a previous process are orphaned. Reconcile them on startup so the UI
+    // never presents a workflow or agent run that nothing will ever resume.
+    this.repository.markInterruptedWork();
   }
 
   repo(): GraphRepository {
@@ -463,13 +467,11 @@ export class WorkspaceRuntime {
       };
     }
 
-    try {
-      const result = await execFileAsync(command, ["auth", "status", "--text"], cliExecOptions(10000));
-      authStatus = (outputText(result.stdout) || outputText(result.stderr)).trim() || "Authenticated";
-      authenticated = true;
-    } catch (error) {
-      authStatus = cliErrorMessage(error, "Claude Code is not authenticated.");
-      errors.push(authStatus);
+    const authProbe = await probeClaudeCli(command);
+    authenticated = authProbe.ok;
+    authStatus = authProbe.detail;
+    if (!authProbe.ok) {
+      errors.push(authProbe.detail);
     }
 
     return {
@@ -2549,13 +2551,82 @@ async function validateCliProvider(provider: "codex" | "claudecode", command: st
   } catch {
     return `${label} command not found or not executable: ${command}`;
   }
-  const authArgs = provider === "codex" ? ["login", "status"] : ["auth", "status"];
+  if (provider === "claudecode") {
+    const authProbe = await probeClaudeCli(command);
+    if (!authProbe.ok) {
+      return `${label} account login is not available (${authProbe.detail}). Run ${command} or sign in with the CLI before saving.`;
+    }
+    return null;
+  }
   try {
-    await execFileAsync(command, authArgs, cliExecOptions(10000));
+    await execFileAsync(command, ["login", "status"], cliExecOptions(10000));
   } catch {
-    return `${label} account login is not available. Run ${command} ${authArgs.join(" ")} or sign in with the CLI before saving.`;
+    return `${label} account login is not available. Run ${command} login status or sign in with the CLI before saving.`;
   }
   return null;
+}
+
+// Claude Code 2.x removed the `auth` subcommand (`claude auth status --text` no
+// longer exists), so there is no non-interactive "am I signed in?" probe. The
+// truthful, local, and fast signal is whether credentials are configured in
+// ~/.claude/settings.json. Custom endpoints (Anthropic-compatible gateways such
+// as DeepSeek's /anthropic) are configured there via env.ANTHROPIC_AUTH_TOKEN,
+// and OAuth sessions live in ~/.claude/.credentials.json. We deliberately avoid
+// a `claude -p` round-trip: it performs a real model request (slow, quota
+// consuming, and it hangs when spawned without the configured proxy).
+async function probeClaudeCli(command: string): Promise<{ ok: boolean; detail: string }> {
+  const env = readClaudeSettingsEnv();
+  const token = typeof env?.ANTHROPIC_AUTH_TOKEN === "string" ? env.ANTHROPIC_AUTH_TOKEN.trim() : "";
+  if (token) {
+    const baseUrl = typeof env?.ANTHROPIC_BASE_URL === "string" ? env.ANTHROPIC_BASE_URL.trim() : "";
+    const host = hostFromUrl(baseUrl);
+    return { ok: true, detail: `Configured${host ? ` (${host})` : ""}` };
+  }
+  if (claudeOAuthCredentialsExist()) {
+    return { ok: true, detail: "Authenticated (OAuth)" };
+  }
+  return {
+    ok: false,
+    detail: `No credentials configured. Set ANTHROPIC_AUTH_TOKEN (and ANTHROPIC_BASE_URL) in ~/.claude/settings.json, or run \`${command} setup-token\`.`
+  };
+}
+
+function claudeSettingsPath(): string {
+  return path.join(os.homedir(), ".claude", "settings.json");
+}
+
+function readClaudeSettingsEnv(): Record<string, string> | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(claudeSettingsPath(), "utf8")) as { env?: unknown };
+    if (!parsed || typeof parsed !== "object" || !parsed.env || typeof parsed.env !== "object") {
+      return null;
+    }
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed.env as Record<string, unknown>)) {
+      if (typeof value === "string") {
+        env[key] = value;
+      }
+    }
+    return env;
+  } catch {
+    return null;
+  }
+}
+
+function claudeOAuthCredentialsExist(): boolean {
+  try {
+    return fs.existsSync(path.join(os.homedir(), ".claude", ".credentials.json"));
+  } catch {
+    return false;
+  }
+}
+
+function hostFromUrl(value: string): string {
+  try {
+    return new URL(value).host || value;
+  } catch {
+    return value;
+  }
 }
 
 function cliExecOptions(timeout: number): ExecFileOptions {

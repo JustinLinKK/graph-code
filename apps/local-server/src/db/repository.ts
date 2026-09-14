@@ -2176,6 +2176,27 @@ export class GraphRepository {
     return this.getCodingWorkflow(workflowId);
   }
 
+  // Reconciles in-flight work left behind by a previous server process. Workflow
+  // schedulers and agent invocations are in-memory only, so any "running" (or
+  // "queued") row that survives a restart is orphaned: no scheduler or agent will
+  // ever resume it. Mark them failed here so the UI can't show a permanently stuck
+  // workflow or agent run, and so a user can start a fresh workflow without first
+  // clearing a phantom "running" one.
+  markInterruptedWork(): { workflows: number; items: number; agentRuns: number } {
+    const items = this.db
+      .prepare("UPDATE coding_workflow_items SET status = 'failed', updated_at = datetime('now') WHERE status = 'running'")
+      .run().changes;
+    const workflows = this.db
+      .prepare("UPDATE coding_workflows SET status = 'failed', updated_at = datetime('now') WHERE status = 'running'")
+      .run().changes;
+    const agentRuns = this.db
+      .prepare(
+        "UPDATE agent_runs SET status = 'failed', error = COALESCE(error, 'Interrupted by server restart.'), updated_at = datetime('now') WHERE status IN ('running', 'queued')"
+      )
+      .run().changes;
+    return { workflows, items, agentRuns };
+  }
+
   updateCodingWorkflowItem(input: { itemId: string; status?: CodingWorkflowItemStatus; agentRunId?: string | null; proposalId?: string | null; appliedAt?: string | null }): CodingWorkflowItem {
     const existingItem = this.db.prepare("SELECT project_id FROM coding_workflow_items WHERE id = ?").get(input.itemId) as { project_id: string } | undefined;
     if (!existingItem) {

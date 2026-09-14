@@ -1483,7 +1483,7 @@ function providerPatch(provider: AgentProvider, firstCodexModel?: CodexModelInfo
       reasoningEffort: firstCodexModel?.defaultReasoningLevel ?? "medium",
       speedTier: "standard",
       permissionMode: "ask_for_permission",
-      codexSystemPromptMode: "default",
+      codexSystemPromptMode: "custom",
       apiKeySource: { type: "env", value: "" },
       systemPromptSource: { type: "manual", value: "" }
     };
@@ -1496,7 +1496,7 @@ function providerPatch(provider: AgentProvider, firstCodexModel?: CodexModelInfo
       reasoningEffort: firstClaudeModel?.defaultReasoningLevel ?? "medium",
       speedTier: "standard",
       permissionMode: "ask_for_permission",
-      claudeSystemPromptMode: "default",
+      claudeSystemPromptMode: "custom",
       apiKeySource: { type: "env", value: "" },
       systemPromptSource: { type: "manual", value: "" }
     };
@@ -1572,7 +1572,7 @@ function applyInitialCodexModel<T extends AgentSettingsLike>(agent: T, model: Co
     reasoningEffort: model.defaultReasoningLevel,
     speedTier: "standard",
     permissionMode: agent.permissionMode ?? "ask_for_permission",
-    codexSystemPromptMode: agent.codexSystemPromptMode ?? "default"
+    codexSystemPromptMode: agent.codexSystemPromptMode ?? "custom"
   };
 }
 
@@ -1587,7 +1587,7 @@ function applyInitialClaudeModel<T extends AgentSettingsLike>(agent: T, model: C
     reasoningEffort: model.defaultReasoningLevel,
     speedTier: "standard",
     permissionMode: agent.permissionMode ?? "ask_for_permission",
-    claudeSystemPromptMode: agent.claudeSystemPromptMode ?? "default"
+    claudeSystemPromptMode: agent.claudeSystemPromptMode ?? "custom"
   };
 }
 

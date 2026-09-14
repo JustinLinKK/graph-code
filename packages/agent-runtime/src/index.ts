@@ -1800,7 +1800,7 @@ async function invokeCodexCli(config: ProviderConfig, messages: PromptMessage[],
   const { stdout } = await runCliCommand(command, args, {
     cwd,
     input: prompt,
-    timeout: 120000,
+    timeout: 600000,
     maxBuffer: 1024 * 1024 * 4
   });
   return stdout.trim();
@@ -1816,6 +1816,15 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
     systemInPrompt: false,
     allowDirectEdits: permission.directEdits
   });
+  // Claude Code has no `--effort` flag; reasoning effort is a settings field
+  // (`effortLevel`), passed through `--settings` alongside fast mode.
+  const claudeSettings: Record<string, unknown> = {};
+  if (config.speedTier === "fast") {
+    claudeSettings.fastMode = true;
+  }
+  if (isClaudeReasoningEffort(config.reasoningEffort)) {
+    claudeSettings.effortLevel = config.reasoningEffort;
+  }
   const args = [
     "-p",
     ...(config.claudeSystemPromptMode === "custom" && systemPrompt ? ["--append-system-prompt", systemPrompt] : []),
@@ -1825,16 +1834,15 @@ async function invokeClaudeCodeCli(config: ProviderConfig, messages: PromptMessa
     "--output-format",
     "text",
     ...(config.model.trim() ? ["--model", config.model.trim()] : []),
-    ...(isClaudeReasoningEffort(config.reasoningEffort) ? ["--effort", config.reasoningEffort] : []),
-    ...(config.speedTier === "fast" ? ["--settings", JSON.stringify({ fastMode: true })] : []),
-    prompt
+    ...(Object.keys(claudeSettings).length > 0 ? ["--settings", JSON.stringify(claudeSettings)] : [])
   ];
   const { stdout } = await runCliCommand(
     command,
     args,
     {
       cwd,
-      timeout: 120000,
+      input: prompt,
+      timeout: 600000,
       maxBuffer: 1024 * 1024 * 4
     }
   );
@@ -1890,7 +1898,7 @@ function buildCliPrompt(messages: PromptMessage[], options: { providerName: stri
     .map((message) => `${message.role.toUpperCase()}:\n${message.content}`)
     .join("\n\n");
   return [
-    `GraphCode ${options.providerName} account-plan invocation.`,
+    `You are the GraphCode ${options.providerName} agent. Complete the GraphCode task described below.`,
     "Use the GraphCode role/mode instructions as the active skill for this run.",
     options.systemInPrompt && system ? `GraphCode skill instructions:\n${system}` : "",
     options.allowDirectEdits
@@ -2083,11 +2091,24 @@ function diffRetryFeedback(error: unknown): string {
 }
 
 function normalizeDiff(response: string, allowedPath: string | null | undefined): string {
-  if (response.includes("diff --git") || response.includes("--- ") || response.includes("+++ ")) {
-    return response;
+  const stripped = stripMarkdownFence(response);
+  if (stripped.includes("diff --git") || stripped.includes("--- ") || stripped.includes("+++ ")) {
+    return stripped;
   }
   const path = allowedPath ?? "SCOPED_BLOCK.md";
-  return [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@", `+${response.replace(/\n/g, "\n+")}`].join("\n");
+  return [`diff --git a/${path} b/${path}`, `--- a/${path}`, `+++ b/${path}`, "@@", `+${stripped.replace(/\n/g, "\n+")}`].join("\n");
+}
+
+// Models often wrap a unified diff in a markdown code fence (```diff … ```). A fence
+// left in place reaches `git apply` as literal input and makes the patch fail, so
+// strip the outermost fence before any header detection or hunk counting runs.
+function stripMarkdownFence(response: string): string {
+  const lines = response.trim().split(/\r?\n/);
+  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  if (lines.length > 0 && lines[0].trim().startsWith("```")) lines.shift();
+  if (lines.length > 0 && lines[lines.length - 1].trim().startsWith("```")) lines.pop();
+  return lines.join("\n");
 }
 
 function assertDiffInScope(diff: string, allowedPath: string | null | undefined): void {

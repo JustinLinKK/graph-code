@@ -458,4 +458,124 @@ describe("MA-5 integration runner", () => {
       await fsp.rm(root, { recursive: true, force: true });
     }
   }, 15000);
+
+  it("applies a patch whose context line lost trailing whitespace", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-context-ws-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      // Line 2 carries trailing whitespace (four spaces) that a provider may strip
+      // from the copied context, turning it into an empty context line.
+      await fsp.writeFile(path.join(root, "src/a.ts"), "export const a = 1;\n    \nexport const b = 2;\n", "utf8");
+      const diff = [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -1,3 +1,3 @@",
+        " export const a = 1;",
+        " ",
+        "-export const b = 2;",
+        "+export const b = 3;"
+      ].join("\n");
+
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+
+      const content = (await fsp.readFile(path.join(root, "src/a.ts"), "utf8")).replace(/\r\n/g, "\n");
+      expect(content).toBe("export const a = 1;\n    \nexport const b = 3;\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("expands a minimal-context hunk so git apply anchors it beside whitespace-only lines", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-minimal-context-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      // Mirrors the real failure: a whitespace-only line sits immediately before the
+      // change and an empty + whitespace-only line immediately after. The provider
+      // emits only the changed lines as context, which git apply rejects because it
+      // cannot anchor the hunk against the surrounding whitespace-only neighbors.
+      const before = [
+        "    return values[idx]",
+        "    ",
+        "    total = sum(values)",
+        "    average = total / len(values)",
+        "    print(average)",
+        "",
+        "    ",
+        "    def reset():",
+        "        pass"
+      ].join("\n") + "\n";
+      await fsp.writeFile(path.join(root, "src/a.py"), before, "utf8");
+
+      const diff = [
+        "diff --git a/src/a.py b/src/a.py",
+        "--- a/src/a.py",
+        "+++ b/src/a.py",
+        "@@ -3,3 +3,4 @@",
+        "    total = sum(values)",
+        "-    average = total / len(values)",
+        "    print(average)",
+        "+    minimum = min(values)",
+        "+    maximum = max(values)"
+      ].join("\n");
+
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+
+      const content = (await fsp.readFile(path.join(root, "src/a.py"), "utf8")).replace(/\r\n/g, "\n");
+      expect(content).toBe([
+        "    return values[idx]",
+        "    ",
+        "    total = sum(values)",
+        "    print(average)",
+        "    minimum = min(values)",
+        "    maximum = max(values)",
+        "",
+        "    ",
+        "    def reset():",
+        "        pass"
+      ].join("\n") + "\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("strips a markdown fence wrapping a diff so git apply accepts the patch", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-fenced-diff-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      await fsp.writeFile(path.join(root, "src/a.py"), "def compute(x):\n    return x + 1\n", "utf8");
+      // Models often wrap the diff in ```diff … ``` fences; the fence lines must not
+      // reach git apply or they corrupt hunk counting and fail the patch.
+      const diff = [
+        "```diff",
+        "diff --git a/src/a.py b/src/a.py",
+        "--- a/src/a.py",
+        "+++ b/src/a.py",
+        "@@ -1,2 +1,3 @@",
+        " def compute(x):",
+        "     return x + 1",
+        "+    return x * 2",
+        "```"
+      ].join("\n");
+
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+
+      const content = (await fsp.readFile(path.join(root, "src/a.py"), "utf8")).replace(/\r\n/g, "\n");
+      expect(content).toBe("def compute(x):\n    return x + 1\n    return x * 2\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
 });

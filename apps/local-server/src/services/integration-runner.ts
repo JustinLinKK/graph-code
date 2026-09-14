@@ -399,6 +399,19 @@ export function combineIndependentDiffs(proposals: Array<Pick<IntegrationProposa
     .concat("\n");
 }
 
+// Proposals surfaced from model output (or replayed from storage) can carry a
+// markdown code fence around the unified diff. A stray ``` line corrupts hunk
+// header recounting and makes `git apply` reject the patch, so strip it before
+// any context expansion or formatting runs.
+function stripMarkdownFence(response: string): string {
+  const lines = response.trim().split(/\r?\n/);
+  while (lines.length > 0 && lines[0].trim() === "") lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") lines.pop();
+  if (lines.length > 0 && lines[0].trim().startsWith("```")) lines.shift();
+  if (lines.length > 0 && lines[lines.length - 1].trim().startsWith("```")) lines.pop();
+  return lines.join("\n");
+}
+
 export function normalizeUnifiedDiffFormatting(diff: string): string {
   const lines = diff.replace(/\r\n/g, "\n").split("\n");
   for (let index = 0; index < lines.length; index += 1) {
@@ -428,6 +441,174 @@ export function normalizeUnifiedDiffFormatting(diff: string): string {
     lines[index] = `@@ -${header[1]},${oldCount} +${header[2]},${newCount} @@${header[3]}`;
   }
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+// LLM providers frequently emit hunks with only the immediate changed lines as
+// context (e.g. a 3-line hunk for a single-line edit). `git apply` rejects such
+// minimal-context hunks against real files that carry whitespace-only lines or
+// mixed line endings near the change, even when every context line matches
+// byte-for-byte. Expanding each hunk to include a few surrounding lines from the
+// actual file (mirroring `git diff`'s default 3-line context) lets `git apply`
+// anchor the hunk the same way it anchors its own output.
+function expandPatchContext(diff: string, workspaceRoot: string, contextLines = 3): string {
+  const lines = diff.replace(/\r\n/g, "\n").split("\n");
+  const fileLinesCache = new Map<string, string[] | null>();
+  const readFileLines = (relativePath: string): string[] | null => {
+    if (fileLinesCache.has(relativePath)) return fileLinesCache.get(relativePath)!;
+    try {
+      const content = fs.readFileSync(path.resolve(workspaceRoot, relativePath), "utf8").replace(/\r\n/g, "\n");
+      const fileLines = content.split("\n");
+      if (fileLines.length > 0 && fileLines[fileLines.length - 1] === "") fileLines.pop();
+      fileLinesCache.set(relativePath, fileLines);
+      return fileLines;
+    } catch {
+      fileLinesCache.set(relativePath, null);
+      return null;
+    }
+  };
+
+  let currentPath: string | null = null;
+  const out: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.startsWith("--- ")) {
+      currentPath = normalizeDiffPath(line.slice(4));
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      if (currentPath === null) currentPath = normalizeDiffPath(line.slice(4));
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith("diff --git ")) {
+      currentPath = null;
+      out.push(line);
+      continue;
+    }
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (!hunk) {
+      out.push(line);
+      continue;
+    }
+    const oldStart = Number.parseInt(hunk[1], 10);
+    const newStart = Number.parseInt(hunk[2], 10);
+    let bodyEnd = index + 1;
+    while (bodyEnd < lines.length) {
+      const bodyLine = lines[bodyEnd];
+      if (
+        bodyLine.startsWith("@@ ") ||
+        bodyLine.startsWith("diff --git ") ||
+        (bodyLine.startsWith("--- ") && lines[bodyEnd + 1]?.startsWith("+++ "))
+      ) {
+        break;
+      }
+      bodyEnd += 1;
+    }
+    const bodyLines = lines.slice(index + 1, bodyEnd);
+    const oldCount = bodyLines.filter((bodyLine) => bodyLine.startsWith(" ") || bodyLine.startsWith("-")).length;
+    const fileLines = currentPath ? readFileLines(currentPath) : null;
+    const leading: string[] = [];
+    if (fileLines) {
+      for (let n = oldStart - contextLines; n < oldStart; n += 1) {
+        if (n < 1) continue;
+        const actual = fileLines[n - 1];
+        if (actual === undefined) continue;
+        leading.push(` ${actual}`);
+      }
+    }
+    const trailing: string[] = [];
+    if (fileLines && oldCount > 0) {
+      const oldEnd = oldStart + oldCount - 1;
+      for (let n = oldEnd + 1; n <= oldEnd + contextLines; n += 1) {
+        const actual = fileLines[n - 1];
+        if (actual === undefined) break;
+        trailing.push(` ${actual}`);
+      }
+    }
+    // Emit a header with start lines shifted by the leading context. The recount in
+    // `normalizeUnifiedDiffFormatting` recomputes the line counts from the body.
+    out.push(`@@ -${oldStart - leading.length} +${newStart - leading.length} @@`);
+    out.push(...leading, ...bodyLines, ...trailing);
+    index = bodyEnd - 1;
+  }
+  return `${out.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+// Providers (and markdown fences) routinely strip trailing whitespace from copied
+// context lines, so a file line like `    ` (four spaces) is emitted as an empty
+// context line. `git apply` matches context byte-for-byte and rejects that even
+// with `--ignore-whitespace`, so we reconcile each context line against the actual
+// file content, rewriting it only when the two differ solely by trailing whitespace.
+export function reconcileDiffContextWhitespace(diff: string, workspaceRoot: string): string {
+  const lines = normalizeUnifiedDiffFormatting(expandPatchContext(stripMarkdownFence(diff), workspaceRoot)).split("\n");
+  const fileLinesCache = new Map<string, string[] | null>();
+  const readFileLines = (relativePath: string): string[] | null => {
+    if (fileLinesCache.has(relativePath)) return fileLinesCache.get(relativePath)!;
+    try {
+      const content = fs.readFileSync(path.resolve(workspaceRoot, relativePath), "utf8").replace(/\r\n/g, "\n");
+      const fileLines = content.split("\n");
+      fileLinesCache.set(relativePath, fileLines);
+      return fileLines;
+    } catch {
+      fileLinesCache.set(relativePath, null);
+      return null;
+    }
+  };
+
+  let currentPath: string | null = null;
+  let oldLine = 0;
+  let newLine = 0;
+  const out: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.startsWith("--- ")) {
+      currentPath = normalizeDiffPath(line.slice(4));
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      if (currentPath === null) currentPath = normalizeDiffPath(line.slice(4));
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith("diff --git ")) {
+      currentPath = null;
+      out.push(line);
+      continue;
+    }
+    const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      oldLine = Number.parseInt(hunk[1], 10);
+      newLine = Number.parseInt(hunk[2], 10);
+      out.push(line);
+      continue;
+    }
+    if (line.startsWith(" ")) {
+      const fileLines = currentPath ? readFileLines(currentPath) : null;
+      const actual = fileLines ? fileLines[oldLine - 1] : undefined;
+      if (actual !== undefined && actual.trimEnd() === line.slice(1).trimEnd()) {
+        out.push(` ${actual}`);
+      } else {
+        out.push(line);
+      }
+      oldLine += 1;
+      newLine += 1;
+      continue;
+    }
+    if (line.startsWith("+")) {
+      out.push(line);
+      newLine += 1;
+      continue;
+    }
+    if (line.startsWith("-")) {
+      out.push(line);
+      oldLine += 1;
+      continue;
+    }
+    out.push(line);
+  }
+  return `${out.join("\n").replace(/\n+$/, "")}\n`;
 }
 
 export function buildBoundedIntegrationAgentContext(input: {
@@ -512,9 +693,9 @@ export async function validateCombinedPatchInTemporaryWorkspace(input: {
       await fsp.symlink(sourceNodeModules, targetNodeModules, process.platform === "win32" ? "junction" : "dir");
     }
     const patchPath = path.join(temporaryRoot, ".graphcode-integration.patch");
-    await fsp.writeFile(patchPath, normalizeUnifiedDiffFormatting(input.combinedDiff), "utf8");
+    await fsp.writeFile(patchPath, reconcileDiffContextWhitespace(input.combinedDiff, workspaceRoot), "utf8");
     try {
-      await execFileAsync("git", ["apply", "--whitespace=nowarn", patchPath], {
+      await execFileAsync("git", ["apply", "--ignore-whitespace", "--whitespace=nowarn", patchPath], {
         cwd: temporaryRoot,
         timeout: input.timeoutMs ?? 120000,
         maxBuffer: 10 * 1024 * 1024
@@ -548,13 +729,13 @@ export async function applyCombinedPatchToWorkspace(input: {
   const temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-apply-"));
   const patchPath = path.join(temporaryDirectory, "layer.patch");
   try {
-    await fsp.writeFile(patchPath, normalizeUnifiedDiffFormatting(input.combinedDiff), "utf8");
-    await execFileAsync("git", ["apply", "--check", "--whitespace=nowarn", patchPath], {
+    await fsp.writeFile(patchPath, reconcileDiffContextWhitespace(input.combinedDiff, workspaceRoot), "utf8");
+    await execFileAsync("git", ["apply", "--check", "--ignore-whitespace", "--whitespace=nowarn", patchPath], {
       cwd: workspaceRoot,
       timeout: input.timeoutMs ?? 60000,
       maxBuffer: 10 * 1024 * 1024
     });
-    await execFileAsync("git", ["apply", "--whitespace=nowarn", patchPath], {
+    await execFileAsync("git", ["apply", "--ignore-whitespace", "--whitespace=nowarn", patchPath], {
       cwd: workspaceRoot,
       timeout: input.timeoutMs ?? 60000,
       maxBuffer: 10 * 1024 * 1024

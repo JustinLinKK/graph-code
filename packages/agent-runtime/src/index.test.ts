@@ -404,6 +404,7 @@ describe("GraphCode agent runtime", () => {
 
     it("stores parsed test artifact manifests with coding proposals", async () => {
       const argsLog = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.args`);
+      const stdinLog = path.join(os.tmpdir(), `graphcode-agent-${crypto.randomUUID()}.stdin`);
       const command = writeFakeCli(
         [
           "diff --git a/src/module.ts b/src/module.ts",
@@ -414,7 +415,7 @@ describe("GraphCode agent runtime", () => {
           "GRAPHCODE_TEST_ARTIFACTS_JSON",
           "{\"testScriptDirectory\":\"tests/generated\",\"scripts\":[{\"relativePath\":\"module.test.ts\",\"content\":\"test('value', () => {})\"}]}"
         ],
-        { argsLog }
+        { argsLog, stdinLog }
       );
       const tools = toolbox();
 
@@ -438,17 +439,20 @@ describe("GraphCode agent runtime", () => {
         })
       );
       const args = normalizeNewlines(fs.readFileSync(argsLog, "utf8"));
+      const stdin = fs.readFileSync(stdinLog, "utf8");
       expect(args).toContain("--append-system-prompt\nTest prompt");
       expect(args).toContain("--permission-mode\nplan");
       expect(args).toContain("--disallowedTools\nEdit\n--disallowedTools\nMultiEdit\n--disallowedTools\nWrite\n--disallowedTools\nNotebookEdit");
       expect(args).toContain("--model\nsonnet");
-      expect(args).toContain("--effort\nmedium");
-      expect(args).toContain("GraphCode Claude Code CLI account-plan invocation.");
+      expect(args).toContain("--settings\n{\"effortLevel\":\"medium\"}");
+      expect(args).not.toContain("You are the GraphCode Claude Code CLI agent.");
+      expect(stdin).toContain("You are the GraphCode Claude Code CLI agent. Complete the GraphCode task described below.");
     });
 
     it("runs Claude Code direct-edit modes with model, effort, fast settings, and git diff capture", async () => {
       const argsLog = path.join(os.tmpdir(), `graphcode-claude-${crypto.randomUUID()}.args`);
-      const command = writeFakeCli(["Claude edited files directly"], { argsLog });
+      const stdinLog = path.join(os.tmpdir(), `graphcode-claude-${crypto.randomUUID()}.stdin`);
+      const command = writeFakeCli(["Claude edited files directly"], { argsLog, stdinLog });
       const directDiff = ["diff --git a/src/module.ts b/src/module.ts", "--- a/src/module.ts", "+++ b/src/module.ts", "@@", "+export const value = 4;"].join("\n");
       const tools = toolbox({
         readGitDiff: vi.fn(async () => directDiff)
@@ -481,8 +485,7 @@ describe("GraphCode agent runtime", () => {
       const args = normalizeNewlines(fs.readFileSync(argsLog, "utf8"));
       expect(args).toContain("--permission-mode\nbypassPermissions");
       expect(args).toContain("--model\nopus");
-      expect(args).toContain("--effort\nhigh");
-      expect(args).toContain("--settings\n{\"fastMode\":true}");
+      expect(args).toContain("--settings\n{\"fastMode\":true,\"effortLevel\":\"high\"}");
       expect(args).not.toContain("--append-system-prompt");
       expect(result.diff).toContain("export const value = 4");
       expect(tools.writeCodeProposal).toHaveBeenCalledWith("project", "run-claude-direct", "node-1", directDiff, null);
@@ -519,7 +522,7 @@ describe("GraphCode agent runtime", () => {
         `--ask-for-approval\nnever\n-c\nmodel_reasoning_effort="medium"\n-c\ndeveloper_instructions="Test prompt"\nexec\n--cd\n${workspaceRoot}\n--sandbox\nread-only\n--skip-git-repo-check\n--model\ngpt-5.4\n-\n`
       );
       const stdin = fs.readFileSync(stdinLog, "utf8");
-      expect(stdin).toContain("GraphCode Codex CLI account-plan invocation.");
+      expect(stdin).toContain("You are the GraphCode Codex CLI agent. Complete the GraphCode task described below.");
       expect(stdin).not.toContain("GraphCode skill instructions:\nTest prompt");
       expect(stdin).toContain("Update value through codex");
     });
