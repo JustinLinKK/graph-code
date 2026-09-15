@@ -485,4 +485,115 @@ describe("MA-5 integration runner", () => {
       await fsp.rm(root, { recursive: true, force: true });
     }
   }, 15000);
+
+  it("applies a patch whose context line lost trailing whitespace", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-context-ws-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      await fsp.writeFile(path.join(root, "src/a.ts"), "export const a = 1;\n    \nexport const b = 2;\n", "utf8");
+      const diff = [
+        "diff --git a/src/a.ts b/src/a.ts",
+        "--- a/src/a.ts",
+        "+++ b/src/a.ts",
+        "@@ -1,3 +1,3 @@",
+        " export const a = 1;",
+        " ",
+        "-export const b = 2;",
+        "+export const b = 3;"
+      ].join("\n");
+
+      await expect(validateCombinedPatchInTemporaryWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        commands: [],
+        timeoutMs: 10000
+      })).resolves.toMatchObject({ passed: true });
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+      expect(await fsp.readFile(path.join(root, "src/a.ts"), "utf8")).toBe("export const a = 1;\n    \nexport const b = 3;\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("expands a minimal-context hunk before applying it", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-minimal-context-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      const before = [
+        "    return values[idx]",
+        "    ",
+        "    total = sum(values)",
+        "    average = total / len(values)",
+        "    print(average)",
+        "",
+        "    ",
+        "    def reset():",
+        "        pass"
+      ].join("\n") + "\n";
+      await fsp.writeFile(path.join(root, "src/a.py"), before, "utf8");
+      const diff = [
+        "diff --git a/src/a.py b/src/a.py",
+        "--- a/src/a.py",
+        "+++ b/src/a.py",
+        "@@ -3,3 +3,4 @@",
+        "    total = sum(values)",
+        "-    average = total / len(values)",
+        "    print(average)",
+        "+    minimum = min(values)",
+        "+    maximum = max(values)"
+      ].join("\n");
+
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+      expect(await fsp.readFile(path.join(root, "src/a.py"), "utf8")).toBe([
+        "    return values[idx]",
+        "    ",
+        "    total = sum(values)",
+        "    print(average)",
+        "    minimum = min(values)",
+        "    maximum = max(values)",
+        "",
+        "    ",
+        "    def reset():",
+        "        pass"
+      ].join("\n") + "\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it("strips a markdown fence wrapping a stored diff", async () => {
+    const root = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-ma5-fenced-diff-"));
+    try {
+      await fsp.mkdir(path.join(root, "src"), { recursive: true });
+      await fsp.writeFile(path.join(root, "src/a.py"), "def compute(x):\n    return x + 1\n", "utf8");
+      const diff = [
+        "```diff",
+        "diff --git a/src/a.py b/src/a.py",
+        "--- a/src/a.py",
+        "+++ b/src/a.py",
+        "@@ -1,2 +1,3 @@",
+        " def compute(x):",
+        "     return x + 1",
+        "+    return x * 2",
+        "```"
+      ].join("\n");
+
+      await expect(applyCombinedPatchToWorkspace({
+        workspaceRoot: root,
+        combinedDiff: diff,
+        timeoutMs: 10000
+      })).resolves.toBeUndefined();
+      expect(await fsp.readFile(path.join(root, "src/a.py"), "utf8")).toBe("def compute(x):\n    return x + 1\n    return x * 2\n");
+    } finally {
+      await fsp.rm(root, { recursive: true, force: true });
+    }
+  }, 15000);
 });

@@ -170,6 +170,7 @@ export class WorkspaceRuntime {
     this.db = openDatabase(fallbackDbPath);
     migrate(this.db);
     this.repository = new GraphRepository(this.db);
+    this.repository.markInterruptedWork();
   }
 
   repo(): GraphRepository {

@@ -430,6 +430,195 @@ export function normalizeUnifiedDiffFormatting(diff: string): string {
   return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }
 
+function stripMarkdownFence(response: string): string {
+  const normalized = response.replace(/\r\n/g, "\n");
+  const fencedDiff = [...normalized.matchAll(/```(?:diff|patch)?\s*\n([\s\S]*?)```/gi)]
+    .map((match) => match[1])
+    .find((candidate) => candidate.includes("diff --git") || (candidate.includes("--- ") && candidate.includes("+++ ")));
+  return (fencedDiff ?? normalized).replace(/\n+$/, "");
+}
+
+function readWorkspaceFileLines(workspaceRoot: string, relativePath: string): string[] | null {
+  try {
+    const root = fs.realpathSync.native(workspaceRoot);
+    const file = fs.realpathSync.native(path.resolve(root, relativePath));
+    const relative = path.relative(root, file);
+    if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+    const lines = fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n").split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    return lines;
+  } catch {
+    return null;
+  }
+}
+
+function expandPatchContext(diff: string, workspaceRoot: string, contextLines = 3): string {
+  const lines = diff.replace(/\r\n/g, "\n").split("\n");
+  const fileLinesCache = new Map<string, string[] | null>();
+  const readFileLines = (relativePath: string): string[] | null => {
+    if (fileLinesCache.has(relativePath)) return fileLinesCache.get(relativePath)!;
+    const fileLines = readWorkspaceFileLines(workspaceRoot, relativePath);
+    fileLinesCache.set(relativePath, fileLines);
+    return fileLines;
+  };
+
+  let currentPath: string | null = null;
+  const output: string[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.startsWith("--- ")) {
+      currentPath = normalizeDiffPath(line.slice(4));
+      output.push(line);
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      if (currentPath === null) currentPath = normalizeDiffPath(line.slice(4));
+      output.push(line);
+      continue;
+    }
+    if (line.startsWith("diff --git ")) {
+      currentPath = null;
+      output.push(line);
+      continue;
+    }
+    const header = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
+    if (!header) {
+      output.push(line);
+      continue;
+    }
+
+    const oldStart = Number.parseInt(header[1], 10);
+    const newStart = Number.parseInt(header[2], 10);
+    let bodyEnd = index + 1;
+    while (bodyEnd < lines.length) {
+      const bodyLine = lines[bodyEnd];
+      if (
+        bodyLine.startsWith("@@ ") ||
+        bodyLine.startsWith("diff --git ") ||
+        (bodyLine.startsWith("--- ") && lines[bodyEnd + 1]?.startsWith("+++ "))
+      ) {
+        break;
+      }
+      bodyEnd += 1;
+    }
+    const bodyLines = lines.slice(index + 1, bodyEnd);
+    const oldCount = bodyLines.filter((bodyLine) => bodyLine.startsWith(" ") || bodyLine.startsWith("-")).length;
+    let existingLeading = 0;
+    while (bodyLines[existingLeading]?.startsWith(" ")) existingLeading += 1;
+    let existingTrailing = 0;
+    for (let bodyIndex = bodyLines.length - 1; bodyIndex >= 0; bodyIndex -= 1) {
+      if (bodyLines[bodyIndex] === "\\ No newline at end of file") continue;
+      if (!bodyLines[bodyIndex].startsWith(" ")) break;
+      existingTrailing += 1;
+    }
+
+    const fileLines = currentPath ? readFileLines(currentPath) : null;
+    const leading: string[] = [];
+    if (fileLines) {
+      const needed = Math.max(0, contextLines - existingLeading);
+      for (let number = Math.max(1, oldStart - needed); number < oldStart; number += 1) {
+        const actual = fileLines[number - 1];
+        if (actual !== undefined) leading.push(` ${actual}`);
+      }
+    }
+    const trailing: string[] = [];
+    if (fileLines && oldCount > 0) {
+      const oldEnd = oldStart + oldCount - 1;
+      const needed = Math.max(0, contextLines - existingTrailing);
+      for (let number = oldEnd + 1; number <= oldEnd + needed; number += 1) {
+        const actual = fileLines[number - 1];
+        if (actual === undefined) break;
+        trailing.push(` ${actual}`);
+      }
+    }
+    output.push(`@@ -${oldStart - leading.length} +${newStart - leading.length} @@${header[3]}`);
+    output.push(...leading, ...bodyLines, ...trailing);
+    index = bodyEnd - 1;
+  }
+  return `${output.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+function reconcileDiffContextWhitespace(diff: string, workspaceRoot: string): string {
+  const lines = normalizeUnifiedDiffFormatting(expandPatchContext(stripMarkdownFence(diff), workspaceRoot)).split("\n");
+  const fileLinesCache = new Map<string, string[] | null>();
+  const readFileLines = (relativePath: string): string[] | null => {
+    if (fileLinesCache.has(relativePath)) return fileLinesCache.get(relativePath)!;
+    const fileLines = readWorkspaceFileLines(workspaceRoot, relativePath);
+    fileLinesCache.set(relativePath, fileLines);
+    return fileLines;
+  };
+
+  let currentPath: string | null = null;
+  let oldLine = 0;
+  const output: string[] = [];
+  for (const line of lines) {
+    if (line.startsWith("--- ")) {
+      currentPath = normalizeDiffPath(line.slice(4));
+      output.push(line);
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      if (currentPath === null) currentPath = normalizeDiffPath(line.slice(4));
+      output.push(line);
+      continue;
+    }
+    if (line.startsWith("diff --git ")) {
+      currentPath = null;
+      output.push(line);
+      continue;
+    }
+    const header = line.match(/^@@ -(\d+)(?:,\d+)? \+\d+(?:,\d+)? @@/);
+    if (header) {
+      oldLine = Number.parseInt(header[1], 10);
+      output.push(line);
+      continue;
+    }
+    if (line.startsWith(" ")) {
+      const fileLines = currentPath ? readFileLines(currentPath) : null;
+      const actual = fileLines?.[oldLine - 1];
+      output.push(actual !== undefined && actual.trimEnd() === line.slice(1).trimEnd() ? ` ${actual}` : line);
+      oldLine += 1;
+      continue;
+    }
+    if (line.startsWith("-")) oldLine += 1;
+    output.push(line);
+  }
+  return `${output.join("\n").replace(/\n+$/, "")}\n`;
+}
+
+async function preparePatchForApplication(input: {
+  diff: string;
+  workspaceRoot: string;
+  patchPath: string;
+  cwd: string;
+  directoryArgs: string[];
+  timeoutMs: number;
+}): Promise<string[]> {
+  const standardArgs = ["--whitespace=nowarn", ...input.directoryArgs];
+  const normalized = normalizeUnifiedDiffFormatting(input.diff);
+  await fsp.writeFile(input.patchPath, normalized, "utf8");
+  try {
+    await execFileAsync("git", ["apply", "--check", ...standardArgs, input.patchPath], {
+      cwd: input.cwd,
+      timeout: input.timeoutMs,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    return standardArgs;
+  } catch (error) {
+    // Preserve normal git-apply behavior unless the original model patch is rejected.
+    const recovered = reconcileDiffContextWhitespace(input.diff, input.workspaceRoot);
+    if (recovered === normalized) throw error;
+    const recoveredArgs = ["--ignore-whitespace", "--whitespace=nowarn", ...input.directoryArgs];
+    await fsp.writeFile(input.patchPath, recovered, "utf8");
+    await execFileAsync("git", ["apply", "--check", ...recoveredArgs, input.patchPath], {
+      cwd: input.cwd,
+      timeout: input.timeoutMs,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    return recoveredArgs;
+  }
+}
+
 export function buildBoundedIntegrationAgentContext(input: {
   orchestration: CodingWorkflowOrchestration;
   layerIndex: number;
@@ -512,9 +701,16 @@ export async function validateCombinedPatchInTemporaryWorkspace(input: {
       await fsp.symlink(sourceNodeModules, targetNodeModules, process.platform === "win32" ? "junction" : "dir");
     }
     const patchPath = path.join(temporaryRoot, ".graphcode-integration.patch");
-    await fsp.writeFile(patchPath, normalizeUnifiedDiffFormatting(input.combinedDiff), "utf8");
     try {
-      await execFileAsync("git", ["apply", "--whitespace=nowarn", patchPath], {
+      const applyArgs = await preparePatchForApplication({
+        diff: input.combinedDiff,
+        workspaceRoot: temporaryRoot,
+        patchPath,
+        cwd: temporaryRoot,
+        directoryArgs: [],
+        timeoutMs: input.timeoutMs ?? 120000
+      });
+      await execFileAsync("git", ["apply", ...applyArgs, patchPath], {
         cwd: temporaryRoot,
         timeout: input.timeoutMs ?? 120000,
         maxBuffer: 10 * 1024 * 1024
@@ -548,15 +744,17 @@ export async function applyCombinedPatchToWorkspace(input: {
   const temporaryDirectory = await fsp.mkdtemp(path.join(os.tmpdir(), "graphcode-apply-"));
   const patchPath = path.join(temporaryDirectory, "layer.patch");
   try {
-    await fsp.writeFile(patchPath, normalizeUnifiedDiffFormatting(input.combinedDiff), "utf8");
     const application = await resolveGitApplyContext(workspaceRoot);
     const directoryArgs = application.directory ? [`--directory=${application.directory}`] : [];
-    await execFileAsync("git", ["apply", "--check", "--whitespace=nowarn", ...directoryArgs, patchPath], {
+    const applyArgs = await preparePatchForApplication({
+      diff: input.combinedDiff,
+      workspaceRoot,
+      patchPath,
       cwd: application.cwd,
-      timeout: input.timeoutMs ?? 60000,
-      maxBuffer: 10 * 1024 * 1024
+      directoryArgs,
+      timeoutMs: input.timeoutMs ?? 60000
     });
-    await execFileAsync("git", ["apply", "--whitespace=nowarn", ...directoryArgs, patchPath], {
+    await execFileAsync("git", ["apply", ...applyArgs, patchPath], {
       cwd: application.cwd,
       timeout: input.timeoutMs ?? 60000,
       maxBuffer: 10 * 1024 * 1024

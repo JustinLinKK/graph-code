@@ -509,6 +509,46 @@ describe("SQLite graph repository", () => {
       expect(fs.existsSync(path.join(rootPath, "tests", "generated", "leaf.test.ts"))).toBe(false);
     });
 
+    it("reconciles orphaned running workflows, items, and agent runs on startup", () => {
+      const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-interrupt-"));
+      const project = repo.createProject({ id: "interrupt-project", name: "Interrupt Project", rootPath });
+      repo.createNode({ id: "interrupt-framework", projectId: project.id, kind: "framework", name: "Root", agentStatus: "implemented" });
+      repo.createNode({
+        id: "interrupt-module",
+        projectId: project.id,
+        kind: "module",
+        name: "Module",
+        parentId: "interrupt-framework",
+        sourcePath: "src/module.ts",
+        agentStatus: "planning"
+      });
+      repo.createNode({
+        id: "interrupt-function",
+        projectId: project.id,
+        kind: "function",
+        name: "leaf",
+        parentId: "interrupt-module",
+        sourcePath: "src/module.ts",
+        agentStatus: "planning"
+      });
+
+      const runningWorkflow = repo.createCodingWorkflow(project.id, "interrupt-module", [], "running");
+      const runningItem = runningWorkflow.items.find((item) => item.status === "pending")!;
+      repo.updateCodingWorkflowItem({ itemId: runningItem.id, status: "running" });
+      const runningRun = repo.createAgentRun({ projectId: project.id, agentKind: "coding", targetNodeId: "interrupt-module", status: "running" });
+      const queuedRun = repo.createAgentRun({ projectId: project.id, agentKind: "coding", targetNodeId: "interrupt-module", status: "queued" });
+      const previewWorkflow = repo.createCodingWorkflow(project.id, "interrupt-module", [], "preview");
+      const succeededRun = repo.createAgentRun({ projectId: project.id, agentKind: "coding", targetNodeId: "interrupt-module", status: "succeeded" });
+
+      expect(repo.markInterruptedWork()).toEqual({ workflows: 1, items: 1, agentRuns: 2 });
+      expect(repo.getCodingWorkflow(runningWorkflow.id).status).toBe("failed");
+      expect(repo.getCodingWorkflow(runningWorkflow.id).items.find((item) => item.id === runningItem.id)?.status).toBe("failed");
+      expect(repo.getCodingWorkflow(previewWorkflow.id).status).toBe("preview");
+      expect(repo.getAgentRun(runningRun.id)).toMatchObject({ status: "failed", error: "Interrupted by server restart." });
+      expect(repo.getAgentRun(queuedRun.id)).toMatchObject({ status: "failed", error: "Interrupted by server restart." });
+      expect(repo.getAgentRun(succeededRun.id).status).toBe("succeeded");
+    });
+
     it("rejects unsafe code proposal artifact paths and generated test overwrites", () => {
       const rootPath = fs.mkdtempSync(path.join(os.tmpdir(), "graphcode-artifacts-"));
       const project = repo.createProject({ id: "artifact-project", name: "Artifact Project", rootPath });

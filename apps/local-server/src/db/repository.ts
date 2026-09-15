@@ -2187,6 +2187,24 @@ export class GraphRepository {
     return this.getCodingWorkflow(workflowId);
   }
 
+  markInterruptedWork(): { workflows: number; items: number; agentRuns: number } {
+    const reconcile = this.db.transaction(() => {
+      const items = this.db
+        .prepare("UPDATE coding_workflow_items SET status = 'failed', updated_at = datetime('now') WHERE status = 'running'")
+        .run().changes;
+      const workflows = this.db
+        .prepare("UPDATE coding_workflows SET status = 'failed', updated_at = datetime('now') WHERE status = 'running'")
+        .run().changes;
+      const agentRuns = this.db
+        .prepare(
+          "UPDATE agent_runs SET status = 'failed', error = COALESCE(error, 'Interrupted by server restart.'), updated_at = datetime('now') WHERE status IN ('running', 'queued')"
+        )
+        .run().changes;
+      return { workflows, items, agentRuns };
+    });
+    return reconcile();
+  }
+
   updateCodingWorkflowItem(input: { itemId: string; status?: CodingWorkflowItemStatus; agentRunId?: string | null; proposalId?: string | null; appliedAt?: string | null }): CodingWorkflowItem {
     const existingItem = this.db.prepare("SELECT project_id FROM coding_workflow_items WHERE id = ?").get(input.itemId) as { project_id: string } | undefined;
     if (!existingItem) {
