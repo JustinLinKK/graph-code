@@ -2726,7 +2726,7 @@ async function pickWindowsFolder(): Promise<FolderPickerResult> {
     "$dialog.Description = 'Choose a GraphCode workspace folder'",
     "$dialog.ShowNewFolderButton = $false",
     "$result = $dialog.ShowDialog()",
-    "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath; exit 0 }",
+    "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output ('GRAPHCODE_SELECTED_PATH=' + $dialog.SelectedPath); exit 0 }",
     "exit 2"
   ].join("\n");
   try {
@@ -2735,7 +2735,7 @@ async function pickWindowsFolder(): Promise<FolderPickerResult> {
       windowsHide: false,
       maxBuffer: 1024 * 32
     });
-    const selectedPath = firstOutputLine(stdout);
+    const selectedPath = extractMarkedPath(stdout);
     return {
       supported: true,
       selected: Boolean(selectedPath),
@@ -2833,6 +2833,16 @@ async function pickMacFolder(): Promise<FolderPickerResult> {
       message: cliErrorMessage(error, "macOS folder picker failed. Paste the workspace path manually.")
     };
   }
+}
+
+const FOLDER_PICKER_PATH_MARKER = "GRAPHCODE_SELECTED_PATH=";
+
+function extractMarkedPath(value: unknown): string | null {
+  const line = outputText(value)
+    .split(/\r?\n/)
+    .map((part) => part.trim())
+    .find((part) => part.startsWith(FOLDER_PICKER_PATH_MARKER));
+  return line ? line.slice(FOLDER_PICKER_PATH_MARKER.length) : null;
 }
 
 function firstOutputLine(value: unknown): string | null {
