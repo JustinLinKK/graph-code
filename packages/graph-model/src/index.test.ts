@@ -15,6 +15,7 @@ import {
     codingWorkflowSchema,
     codingWorkflowStartRequestSchema,
     codeProposalArtifactManifestSchema,
+    controlCommandSchema,
     edgeMutationSchema,
     AVAILABLE_EXTENSION_PACKAGES,
     extensionNodeDetailsMutationSchema,
@@ -45,6 +46,7 @@ import {
   nodeTypeStyleSchema,
   openWorkspaceSchema,
       planningChatRequestSchema,
+      positionSchema,
       projectSchema,
     REVIEW_AGENT_MODES,
     reviewAgentConfigSchema,
@@ -593,6 +595,25 @@ describe("graph model enums", () => {
         })
       }).creationMode
     ).toBe("blank");
+  });
+
+  describe("position schema", () => {
+    it("accepts 2d positions without z", () => {
+      expect(positionSchema.parse({ x: 10, y: 20 })).toEqual({ x: 10, y: 20 });
+    });
+
+    it("preserves an optional z coordinate", () => {
+      expect(positionSchema.parse({ x: 10, y: 20, z: 5 })).toEqual({ x: 10, y: 20, z: 5 });
+    });
+  });
+
+  describe("control command schema", () => {
+    it("accepts canvas-mode commands", () => {
+      expect(controlCommandSchema.parse({ kind: "canvas-mode", mode: "3d" })).toEqual({
+        kind: "canvas-mode",
+        mode: "3d"
+      });
+    });
   });
 
   it("accepts project metadata and scanner request context", () => {

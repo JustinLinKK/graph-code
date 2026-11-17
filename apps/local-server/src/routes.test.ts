@@ -1278,6 +1278,79 @@ describe("graph API routes", () => {
   });
 });
 
+describe("voice token endpoint", () => {
+  it("returns 403 from a non-loopback address", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/voice/token",
+      remoteAddress: "10.0.0.5"
+    });
+    expect(response.statusCode).toBe(403);
+    expect(response.json()).toEqual({ error: "forbidden" });
+  });
+
+  it("returns 501 when DEEPGRAM_API_KEY is unset", async () => {
+    vi.stubEnv("DEEPGRAM_API_KEY", "");
+    const response = await app.inject({ method: "POST", url: "/api/voice/token" });
+    expect(response.statusCode).toBe(501);
+    const body = response.json();
+    expect(body.error).toBe("deepgram-not-configured");
+    expect(body.message).toContain("DEEPGRAM_API_KEY");
+  });
+
+  it("configures a runtime Deepgram key through the loopback endpoint", async () => {
+    vi.stubEnv("DEEPGRAM_API_KEY", "");
+    let capturedAuth: string | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init: RequestInit | undefined) => {
+        const headers = init?.headers as Record<string, string> | undefined;
+        capturedAuth = headers?.Authorization;
+        return jsonResponse({ access_token: "dg-token-456", expires_in: 58 });
+      })
+    );
+
+    const configureResponse = await app.inject({
+      method: "POST",
+      url: "/api/voice/configure",
+      payload: { apiKey: "dg-ui-key" }
+    });
+    expect(configureResponse.statusCode).toBe(200);
+    expect(configureResponse.json()).toEqual({ configured: true });
+
+    const tokenResponse = await app.inject({ method: "POST", url: "/api/voice/token" });
+    expect(tokenResponse.statusCode).toBe(200);
+    expect(tokenResponse.json()).toEqual({ configured: true, accessToken: "dg-token-456", expiresIn: 58 });
+    expect(capturedAuth).toBe("Token dg-ui-key");
+
+    // Clean up runtime state for later tests.
+    await app.inject({
+      method: "POST",
+      url: "/api/voice/configure",
+      payload: { apiKey: "" }
+    });
+  });
+
+  it("proxies a Deepgram grant when configured", async () => {
+    vi.stubEnv("DEEPGRAM_API_KEY", "dg-test-key");
+    let capturedAuth: string | undefined;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: unknown, init: RequestInit | undefined) => {
+        const headers = init?.headers as Record<string, string> | undefined;
+        capturedAuth = headers?.Authorization;
+        return jsonResponse({ access_token: "dg-token-123", expires_in: 58 });
+      })
+    );
+
+    const response = await app.inject({ method: "POST", url: "/api/voice/token" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ configured: true, accessToken: "dg-token-123", expiresIn: 58 });
+    expect(capturedAuth).toBe("Token dg-test-key");
+  });
+});
+
 async function fileExists(filePath: string): Promise<boolean> {
   try {
     await fs.promises.access(filePath);

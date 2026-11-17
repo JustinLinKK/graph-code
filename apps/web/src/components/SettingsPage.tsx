@@ -21,13 +21,30 @@ import {
   type ScanningAgentMode,
   type SettingsValidationResult,
   type WorkspaceSettings,
-  type WorkspaceSettingsMutation
+  type WorkspaceSettingsMutation,
+  type VoiceLanguage
   } from "@graphcode/graph-model";
 import { Button } from "@heroui/react";
-import { Bot, CheckCircle2, Boxes, ExternalLink, Github, Monitor, RefreshCw, Save, Terminal, Unplug, X } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
-import { getClaudeModels, getClaudeStatus, getCodexModels, getCodexStatus, installClaudeCli, installCodexCli, startClaudeAuth, startCodexAuth } from "../api";
+import { Bot, CheckCircle2, Boxes, ExternalLink, Github, Mic, Monitor, RefreshCw, Save, Terminal, Unplug, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  getClaudeModels,
+  getClaudeStatus,
+  getCodexModels,
+  getCodexStatus,
+  getDeepgramVoiceToken,
+  configureDeepgramVoiceToken,
+  installClaudeCli,
+  installCodexCli,
+  startClaudeAuth,
+  startCodexAuth
+} from "../api";
 import { agentKindLabel, codingAgentModeLabel, providerLabel, reviewAgentModeLabel, scanningAgentModeLabel } from "../displayLabels";
+import {
+  getStoredVoiceSettings,
+  rememberVoiceSettings,
+  type VoiceEngine
+} from "../voice/voiceSettings";
 
 type SettingsPageProps = {
   project: Project;
@@ -74,8 +91,13 @@ export function SettingsPage({
   onPollGithubDeviceFlow,
   onDisconnectGithub
 }: SettingsPageProps) {
-  const [activeSection, setActiveSection] = useState<"general" | "agents" | "extensions" | "integrations" | "github">("general");
+  const [activeSection, setActiveSection] = useState<"general" | "agents" | "extensions" | "integrations" | "github" | "voice">("general");
   const [draft, setDraft] = useState(() => toMutation(settings));
+  const [voiceSettings, setVoiceSettings] = useState(() => getStoredVoiceSettings());
+  const [deepgramProbe, setDeepgramProbe] = useState<{ configured: boolean; loading: boolean; error?: string }>({ configured: false, loading: false });
+  const [deepgramKeyInput, setDeepgramKeyInput] = useState("");
+  const [deepgramConfiguring, setDeepgramConfiguring] = useState(false);
+  const [deepgramConfigMessage, setDeepgramConfigMessage] = useState("");
   const [readSuccessByField, setReadSuccessByField] = useState<Record<string, string>>({});
   const [deviceFlow, setDeviceFlow] = useState<GithubDeviceStartResponse | null>(null);
   const [githubBusy, setGithubBusy] = useState(false);
@@ -151,6 +173,65 @@ export function SettingsPage({
     void refreshCodex();
     void refreshClaude();
   }, []);
+
+  const runDeepgramProbe = useCallback(async () => {
+    setDeepgramProbe({ configured: false, loading: true });
+    try {
+      const response = await getDeepgramVoiceToken();
+      setDeepgramProbe({ configured: response.configured, loading: false });
+    } catch (probeError) {
+      setDeepgramProbe({
+        configured: false,
+        loading: false,
+        error: probeError instanceof Error ? probeError.message : "Deepgram probe failed."
+      });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSection !== "voice" && voiceSettings.engine !== "deepgram") {
+      return;
+    }
+    void runDeepgramProbe();
+  }, [activeSection, voiceSettings.engine, runDeepgramProbe]);
+
+  const setVoiceEngine = (engine: VoiceEngine) => {
+    setVoiceSettings((current) => {
+      const next = { ...current, engine, engineManuallySet: true };
+      rememberVoiceSettings(next);
+      return next;
+    });
+  };
+
+  const setVoiceLanguage = (language: VoiceLanguage) => {
+    setVoiceSettings((current) => {
+      const next = { ...current, language };
+      rememberVoiceSettings(next);
+      return next;
+    });
+  };
+
+  const configureDeepgramKey = async () => {
+    const key = deepgramKeyInput.trim();
+    if (!key) {
+      setDeepgramConfigMessage("Enter a Deepgram API key first.");
+      return;
+    }
+    setDeepgramConfiguring(true);
+    setDeepgramConfigMessage("");
+    try {
+      await configureDeepgramVoiceToken(key);
+      setDeepgramKeyInput("");
+      // Really probe the key instead of assuming it works — Deepgram may still
+      // reject it (bad credentials or missing grant permissions).
+      await runDeepgramProbe();
+      setDeepgramConfigMessage("Key sent to the local server. See the probe result below.");
+    } catch (error) {
+      setDeepgramConfigMessage(error instanceof Error ? error.message : "Failed to configure Deepgram key.");
+    } finally {
+      setDeepgramConfiguring(false);
+    }
+  };
 
   useEffect(() => {
     const firstModel = codexModels[0];
@@ -748,6 +829,10 @@ export function SettingsPage({
               <Github size={16} />
               GitHub
             </button>
+            <button type="button" id="settings-tab-voice" role="tab" aria-selected={activeSection === "voice"} aria-controls="settings-panel" className={activeSection === "voice" ? "active" : ""} onClick={() => setActiveSection("voice")}>
+              <Mic size={16} />
+              Voice
+            </button>
           </nav>
 
           <main id="settings-panel" className="settings-content" role="tabpanel" aria-labelledby={`settings-tab-${activeSection}`}>
@@ -1316,6 +1401,86 @@ export function SettingsPage({
                   </div>
                 ) : null}
                 {githubMessage ? <p className="settings-note">{githubMessage}</p> : null}
+              </section>
+            ) : null}
+
+            {activeSection === "voice" ? (
+              <section className="settings-section">
+                <h3>Voice</h3>
+                <fieldset className="form-field">
+                  <legend>Recognition Engine</legend>
+                  <label className="inline-control">
+                    <input
+                      type="radio"
+                      name="voice-engine"
+                      value="webspeech"
+                      checked={voiceSettings.engine === "webspeech"}
+                      onChange={() => setVoiceEngine("webspeech")}
+                    />
+                    <span>Web Speech API (no server key required)</span>
+                  </label>
+                  <label className="inline-control">
+                    <input
+                      type="radio"
+                      name="voice-engine"
+                      value="deepgram"
+                      checked={voiceSettings.engine === "deepgram"}
+                      onChange={() => setVoiceEngine("deepgram")}
+                    />
+                    <span>Deepgram Voice Agent</span>
+                  </label>
+                </fieldset>
+
+                <div className="form-field">
+                  <span>Deepgram API Key</span>
+                  <p className="settings-note">
+                    The key is kept only in the local server process memory and is never written to disk or this repository.
+                    You can also set <code>DEEPGRAM_API_KEY</code> as an environment variable before starting the server.
+                  </p>
+                  <div className="deepgram-key-input-row">
+                    <input
+                      type="password"
+                      value={deepgramKeyInput}
+                      onChange={(event) => setDeepgramKeyInput(event.target.value)}
+                      placeholder="Paste Deepgram API key"
+                      autoComplete="new-password"
+                    />
+                    <Button size="sm" variant="secondary" isDisabled={deepgramConfiguring || !deepgramKeyInput.trim()} onPress={() => void configureDeepgramKey()}>
+                      {deepgramConfiguring ? "Setting…" : "Set for this session"}
+                    </Button>
+                  </div>
+                  {deepgramConfigMessage ? <p className={deepgramProbe.configured ? "settings-ok" : "settings-error"}>{deepgramConfigMessage}</p> : null}
+                </div>
+
+                {voiceSettings.engine === "deepgram" ? (
+                  <>
+                    <p className={deepgramProbe.configured ? "settings-ok" : "settings-error"}>
+                      {deepgramProbe.loading
+                        ? "Checking Deepgram configuration…"
+                        : deepgramProbe.configured
+                          ? "Deepgram Voice Agent is available."
+                          : deepgramProbe.error
+                            ? `Deepgram probe failed: ${deepgramProbe.error}`
+                            : "Deepgram is not configured. Set DEEPGRAM_API_KEY on the local server to enable it."}
+                    </p>
+                    {voiceSettings.language === "zh-CN" ? (
+                      <p className="settings-note">
+                        Note: Deepgram’s current TTS voice speaks English; Chinese replies will be pronounced with an English voice.
+                      </p>
+                    ) : null}
+                  </>
+                ) : null}
+
+                <label className="form-field">
+                  <span>Voice Language</span>
+                  <select
+                    value={voiceSettings.language}
+                    onChange={(event) => setVoiceLanguage(event.target.value as VoiceLanguage)}
+                  >
+                    <option value="zh-CN">中文（简体）</option>
+                    <option value="en-US">English (US)</option>
+                  </select>
+                </label>
               </section>
             ) : null}
           </main>

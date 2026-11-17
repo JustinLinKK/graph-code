@@ -1,6 +1,12 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SERVER_PORT, resolveAgentFeatureFlags, resolveDbPath, resolveServerPort } from "./config";
+import {
+  DEFAULT_SERVER_PORT,
+  resolveAgentFeatureFlags,
+  resolveDbPath,
+  resolveDeepgramApiKey,
+  resolveServerPort
+} from "./config";
 
 describe("local server config", () => {
   it("prefers the explicit GraphCode server port and rejects invalid values", () => {
@@ -37,5 +43,12 @@ describe("local server config", () => {
       integrationGate: true
     });
     expect(resolveAgentFeatureFlags({ GRAPHCODE_MODEL_ROUTER_V2: "typo" }).modelRouterV2).toBe(false);
+  });
+
+  it("resolves the Deepgram API key, trimming whitespace and treating blanks as null", () => {
+    expect(resolveDeepgramApiKey("dg-key")).toBe("dg-key");
+    expect(resolveDeepgramApiKey("  dg-key  ")).toBe("dg-key");
+    expect(resolveDeepgramApiKey("")).toBeNull();
+    expect(resolveDeepgramApiKey(undefined)).toBeNull();
   });
 });

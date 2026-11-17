@@ -4,6 +4,7 @@ import type {
   BoundaryUpdate,
   CanvasGraph,
   CodingAgentMode,
+  ControlCommand,
   CodingWorkflow,
   CodingWorkflowExecutionPolicy,
   CodingWorkflowPartitionConstraints,
@@ -29,7 +30,8 @@ import type {
   WorkspaceSettings,
   WorkspaceSettingsMutation,
   SettingsValidationResult,
-  TagAssignment
+  TagAssignment,
+  VoiceLanguage
 } from "@graphcode/graph-model";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -85,14 +87,23 @@ import type { MemberLayout } from "./components/WorkspaceCanvas";
 import { WorkspaceDialog } from "./components/WorkspaceDialog";
 import { SettingsPage } from "./components/SettingsPage";
 import {
+  getStoredCanvasMode,
   getStoredCanvasProjectId,
   getStoredCanvasScope,
   getStoredCanvasViewport,
+  rememberCanvasMode,
   rememberCanvasScope,
   rememberCanvasViewport,
   type CanvasViewport
 } from "./canvasSession";
 import { nodePalette } from "./graphStyles";
+import type { ViewportController } from "./components/WorkspaceCanvas";
+import { contextFeedback } from "./voice/commands";
+import { controlCommandToInvocation } from "./voice/controlCommandMap";
+import { speak } from "./voice/feedback";
+import { requiresProjectByKind } from "./voice/types";
+import { useVoiceControl } from "./voice/useVoiceControl";
+import { runCommand, syncCommandCenter, type CommandResult } from "./commands";
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -148,10 +159,12 @@ export default function App() {
   const [workflowPreviewDirty, setWorkflowPreviewDirty] = useState(false);
   const [gitStatus, setGitStatus] = useState("");
   const [restoreViewport, setRestoreViewport] = useState<CanvasViewport | null | undefined>(undefined);
+  const [canvasMode, setCanvasMode] = useState<"2d" | "3d">(() => getStoredCanvasMode(getStoredCanvasProjectId()) ?? "2d");
   const [undoStack, setUndoStack] = useState<UndoEntry[]>([]);
   const undoStackRef = useRef<UndoEntry[]>([]);
   const undoingRef = useRef(false);
   const scanningRunStatusRef = useRef<string | null>(null);
+  const viewportControllerRef = useRef<ViewportController | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((project) => project.id === selectedProjectId) ?? null,
@@ -1677,6 +1690,80 @@ export default function App() {
     }
   }, [selectedProjectId]);
 
+  const handleViewportControllerReady = useCallback((controller: ViewportController | null) => {
+    viewportControllerRef.current = controller;
+  }, []);
+
+  const handleSetCanvasMode = useCallback((mode: "2d" | "3d") => {
+    setCanvasMode(mode);
+  }, []);
+
+  const handleControlCommand = useCallback(
+    async (command: ControlCommand, ack: string, language: VoiceLanguage): Promise<CommandResult | undefined> => {
+      if (requiresProjectByKind[command.kind] && !selectedProjectId) {
+        speak(contextFeedback.missingProject(language), language);
+        return undefined;
+      }
+      const invocation = controlCommandToInvocation(command);
+      speak(ack, language);
+      const result = await runCommand(invocation.name, invocation.args);
+      speak(result.summary, language);
+      return result;
+    },
+    [selectedProjectId]
+  );
+
+  useEffect(() => {
+    syncCommandCenter(
+      {
+        openWorkspaceRequest: handleOpenWorkspaceRequest,
+        openWorkspacePicker: handleOpenWorkspacePicker,
+        selectNode: handleCanvasNodeSelect,
+        runScanning: handleRunScanning,
+        runPlanning: handleRunPlanning,
+        startCode: handleStartCode,
+        runReview: handleRunReview,
+        applyPlanningPatch: handleApplyPlanningPatch,
+        implementCodeProposal: handleImplementCodeProposal,
+        codingControl: handleCodingWorkflowControl,
+        autoLayout: handleAutoLayout,
+        showFullGraph: handleShowFullGraph,
+        refresh: handleRefresh,
+        openSettings: () => setSettingsOpen(true),
+        resetWorkspace: handleResetSelfWorkspace,
+        setCanvasMode: handleSetCanvasMode,
+        viewport: (action, direction) => {
+          if (action === "show-full") {
+            void handleShowFullGraph();
+          } else if (action === "pan") {
+            viewportControllerRef.current?.pan(direction ?? "up");
+          } else if (action === "zoom-in") {
+            viewportControllerRef.current?.zoomIn();
+          } else if (action === "zoom-out") {
+            viewportControllerRef.current?.zoomOut();
+          } else {
+            viewportControllerRef.current?.fitView();
+          }
+        }
+      },
+      {
+        projectId: selectedProjectId,
+        projectName: canvas?.project.name ?? null,
+        selectedNodeId,
+        scopeNodeId: canvas?.scopeNodeId ?? null,
+        nodes: canvas?.nodes.map((node) => ({ id: node.id, name: node.name })) ?? [],
+        agentRuns,
+        hasActiveCodingWorkflow: !!codingWorkflow
+      }
+    );
+  });
+
+  const voice = useVoiceControl({
+    projectId: selectedProjectId,
+    onCommand: handleControlCommand,
+    shouldStart: () => !isEditableTarget(document.activeElement)
+  });
+
   useEffect(() => {
     void refreshAgentState();
   }, [refreshAgentState]);
@@ -1715,10 +1802,26 @@ export default function App() {
     document.documentElement.dataset.theme = settings?.general.theme ?? "system";
   }, [settings?.general.theme]);
 
+  useEffect(() => {
+    setCanvasMode((current) => getStoredCanvasMode(selectedProjectId) ?? current);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (selectedProjectId) {
+      rememberCanvasMode(selectedProjectId, canvasMode);
+    }
+  }, [canvasMode, selectedProjectId]);
+
+  useEffect(() => {
+    viewportControllerRef.current = null;
+  }, [canvasMode]);
+
   return (
     <>
       <AppShell
         selectedProject={selectedProject}
+        canvasMode={canvasMode}
+        onCanvasModeChange={handleSetCanvasMode}
         indexState={indexState}
         hierarchy={hierarchy}
         canvas={canvas}
@@ -1793,6 +1896,8 @@ export default function App() {
         onRunReview={handleRunReview}
         onRunScanning={handleRunScanning}
         onCancelIndex={() => void handleCancelIndex()}
+        onViewportControllerReady={handleViewportControllerReady}
+        voice={voice}
       />
       {settingsOpen && selectedProject && settings ? (
         <SettingsPage

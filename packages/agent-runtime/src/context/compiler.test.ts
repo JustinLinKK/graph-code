@@ -6,11 +6,34 @@ import {
   type GraphNode,
   type WorkflowRevision
 } from "@graphcode/graph-model";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { compileWorkUnitContext, WorkUnitContextBudgetError, type WorkUnitContextCompilerInput } from "./compiler";
 import { compareWorkUnitContextToLegacy, renderWorkUnitContext, validateActualWriteScopes } from "./render";
 import { validateWorkUnitContextRetrievalRequest, WorkUnitContextEscalationRequiredError } from "./retrieval";
 import { runCodingWorkUnitAgent } from "../index";
+
+// Records one queued response per invoked model call so the work-unit retry behavior can be
+// asserted without a real provider.
+const chatModelMock = vi.hoisted(() => ({
+  responses: [] as string[],
+  transcripts: [] as string[][],
+  reset() {
+    chatModelMock.responses = [];
+    chatModelMock.transcripts = [];
+  }
+}));
+
+vi.mock("@langchain/openai", () => ({
+  ChatOpenAI: vi.fn().mockImplementation(() => ({
+    invoke: vi.fn(async (messages: Array<{ content: unknown }>) => {
+      chatModelMock.transcripts.push(messages.map((message) => String(message.content ?? "")));
+      const response = chatModelMock.responses[chatModelMock.transcripts.length - 1];
+      if (response === undefined) throw new Error("No mocked chat response was queued.");
+      return response;
+    })
+  })),
+  ChatOpenAICompletions: vi.fn().mockImplementation(() => ({ invoke: vi.fn(async () => "") }))
+}));
 
 const revision: WorkflowRevision = {
   indexRevision: "index-1",
@@ -235,6 +258,109 @@ describe("MA-3 isolated work-unit context compiler", () => {
     expect(toolbox.readSourceFile).not.toHaveBeenCalled();
   });
 });
+
+describe("Work-unit coding diff recovery", () => {
+  beforeEach(() => {
+    chatModelMock.reset();
+  });
+
+  const deepseekConfig = {
+    agentKind: "coding",
+    provider: "deepseek",
+    model: "deepseek-chat",
+    cliCommand: "",
+    reasoningEffort: "medium",
+    speedTier: "standard",
+    permissionMode: "ask_for_permission",
+    codexSystemPromptMode: "custom",
+    claudeSystemPromptMode: "custom",
+    parallelLimit: 2,
+    apiKeySource: { type: "manual", value: "test-key" },
+    systemPromptSource: { type: "manual", value: "" }
+  } as const;
+
+  it("retries exactly once with the diff-format spec after an unparseable response", async () => {
+    chatModelMock.responses = [
+      "I rewrote the owned function so it no longer calls halo eagerly.",
+      [
+        "diff --git a/src/owned.ts b/src/owned.ts",
+        "--- a/src/owned.ts",
+        "+++ b/src/owned.ts",
+        "@@ -2,2 +2,2 @@",
+        "-export function owned() {",
+        "-  return halo();",
+        "+export function owned() {",
+        "+  return halo() + 1;"
+      ].join("\n")
+    ];
+    const { context, rendered } = await workUnitFixture();
+    const toolbox = workUnitToolbox();
+
+    await runCodingWorkUnitAgent(
+      { projectId: context.projectId, targetNodeId: "owned", context, rendered },
+      { config: deepseekConfig, runId: "run-work-unit-retry", workspaceRoot: "/tmp/work-unit", toolbox }
+    );
+
+    expect(chatModelMock.transcripts).toHaveLength(2);
+    expect(chatModelMock.transcripts[1].join("\n")).toContain("did not contain a parseable unified diff");
+    expect(chatModelMock.transcripts[1].join("\n")).toContain("@@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@");
+    expect(toolbox.writeCodeProposal).toHaveBeenCalledWith(
+      context.projectId,
+      "run-work-unit-retry",
+      "owned",
+      expect.stringContaining("diff --git a/src/owned.ts b/src/owned.ts"),
+      null,
+      expect.objectContaining({
+        workUnitId: context.workUnit.id,
+        actualWriteScopes: [expect.objectContaining({ path: "src/owned.ts", startLine: 2, endLine: 3, permission: "edit" })]
+      })
+    );
+  });
+
+  it("fails permanently after the single retry instead of looping", async () => {
+    chatModelMock.responses = [
+      "I could not produce a patch for this work unit.",
+      "Here is a description of the change you should make by hand."
+    ];
+    const { context, rendered } = await workUnitFixture();
+    const toolbox = workUnitToolbox();
+
+    await expect(
+      runCodingWorkUnitAgent(
+        { projectId: context.projectId, targetNodeId: "owned", context, rendered },
+        { config: deepseekConfig, runId: "run-work-unit-bounded", workspaceRoot: "/tmp/work-unit", toolbox }
+      )
+    ).rejects.toThrow(/did not contain a parseable unified diff/);
+
+    expect(chatModelMock.transcripts).toHaveLength(2);
+    expect(toolbox.writeCodeProposal).not.toHaveBeenCalled();
+  });
+});
+
+async function workUnitFixture() {
+  const context = await compileWorkUnitContext(compilerInput({ readSource: async (sourcePath) => sourceFiles[sourcePath] ?? null }));
+  return { context, rendered: renderWorkUnitContext(context, { provider: "generic", purpose: "coding" }) };
+}
+
+function workUnitToolbox() {
+  return {
+    readGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
+    getIndexState: vi.fn(),
+    getNodeDetail: vi.fn(),
+    getCanvasGraph: vi.fn(),
+    resolveExecutionMetadata: vi.fn(),
+    setStatuses: vi.fn(async () => undefined),
+    applyGraphPatch: vi.fn(),
+    listScannableFiles: vi.fn(),
+    getScanFileStates: vi.fn(),
+    buildFakeLocalScanOutput: vi.fn(),
+    applyScanResult: vi.fn(),
+    readSourceFile: vi.fn(async () => "should not be read"),
+    writeCodeProposal: vi.fn(async () => undefined),
+    readGitStatus: vi.fn(),
+    refreshCodeGraph: vi.fn()
+  };
+}
 
 function compilerInput(
   overrides: Partial<WorkUnitContextCompilerInput> & { budget?: ContextBudget } = {}

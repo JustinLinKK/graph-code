@@ -52,7 +52,11 @@ import {
   type SettingsValidationResult,
   type WorkspaceSettings,
   type WorkspaceSettingsMutation,
-  type WorkspaceInitialization
+  type WorkspaceInitialization,
+  type ControlCommand,
+  type VoiceInterpretRequest,
+  type VoiceInterpretResponse,
+  type DeepgramVoiceTokenResponse
 } from "@graphcode/graph-model";
 import {
   benchmarkLegacyCodingContexts,
@@ -65,6 +69,7 @@ import {
   runPlanningAgent,
   runReviewAgent,
   runScanningAgent,
+  interpretControlCommand,
   WORK_UNIT_CONTEXT_COMPILER_VERSION,
   type GraphCodeToolbox,
   type RenderedWorkUnitContext,
@@ -80,7 +85,7 @@ import { CodeGraphScanCancelledError, discoverRepositoryFiles, scanRepositoryCod
 import { openDatabase, type GraphDatabase } from "./db/connection";
 import { GraphRepository, validationError } from "./db/repository";
 import { migrate } from "./db/schema";
-import { resolveAgentFeatureFlags, type AgentFeatureFlags } from "./config";
+import { resolveAgentFeatureFlags, resolveDeepgramApiKey, type AgentFeatureFlags } from "./config";
 import { compileStoredWorkUnitContext } from "./services/work-unit-context";
 import { contextBudgetForScale } from "./services/work-unit-preview";
 import { MODEL_ROUTER_FEATURE_VERSION, routeWorkUnit, type ModelRoutingCatalog } from "./services/model-router";
@@ -655,6 +660,74 @@ export class WorkspaceRuntime {
       return run;
     }
     return this.finishAgentRun(run, execute);
+  }
+
+  async interpretVoiceCommand(input: VoiceInterpretRequest): Promise<VoiceInterpretResponse> {
+    if (!input.projectId) {
+      return { command: null, reason: "no-provider" };
+    }
+    let project: Project;
+    try {
+      project = this.repository.getProject(input.projectId);
+    } catch {
+      return { command: null, reason: "no-provider" };
+    }
+    let config;
+    try {
+      config = this.repository.getAgentConfig(input.projectId, "planning");
+    } catch {
+      return { command: null, reason: "no-provider" };
+    }
+    const interpretable =
+      config.provider === "openai" ||
+      config.provider === "deepseek" ||
+      config.provider === "openrouter" ||
+      config.provider === "gemini";
+    if (!interpretable) {
+      return { command: null, reason: "no-provider" };
+    }
+    try {
+      const command = await interpretControlCommand({
+        text: input.text,
+        language: input.language,
+        config,
+        workspaceRoot: project.rootPath
+      });
+      return { command };
+    } catch {
+      return { command: null };
+    }
+  }
+
+  async grantDeepgramVoiceToken(): Promise<DeepgramVoiceTokenResponse> {
+    const apiKey = resolveDeepgramApiKey();
+    if (!apiKey) {
+      return { configured: false };
+    }
+    const response = await fetch("https://api.deepgram.com/v1/auth/grant", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        Authorization: `Token ${apiKey}`
+      },
+      body: JSON.stringify({ ttl_seconds: 60 })
+    });
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => "");
+      // Deepgram error bodies contain only err_code/err_msg, never credentials.
+      console.error(`Deepgram token grant failed: ${response.status} ${errorBody.slice(0, 300)}`);
+      throw validationError(`Deepgram token grant failed: ${response.status} ${errorBody.slice(0, 200)}`);
+    }
+    const body = (await response.json()) as { access_token?: unknown; expires_in?: unknown };
+    if (typeof body.access_token !== "string") {
+      throw validationError("Deepgram did not return a valid token response.");
+    }
+    return {
+      configured: true,
+      accessToken: body.access_token,
+      expiresIn: typeof body.expires_in === "number" ? body.expires_in : 60
+    };
   }
 
   async runCoding(input: CodingAgentRequest, options: { autoReview?: boolean } = {}): Promise<AgentRun> {

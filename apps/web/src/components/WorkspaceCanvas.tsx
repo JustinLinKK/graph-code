@@ -52,6 +52,14 @@ type WorkspaceCanvasProps = {
   onCancelDraw: () => void;
   restoreViewport: CanvasViewport | null | undefined;
   onViewportChange: (viewport: CanvasViewport) => void;
+  onViewportControllerReady?: (controller: ViewportController | null) => void;
+};
+
+export type ViewportController = {
+  zoomIn: () => void;
+  zoomOut: () => void;
+  fitView: () => void;
+  pan: (direction: "up" | "down" | "left" | "right") => void;
 };
 
 const nodeTypes = {
@@ -90,9 +98,10 @@ function WorkspaceCanvasInner({
   onEdgeDraft,
   onCancelDraw,
   restoreViewport,
-  onViewportChange
+  onViewportChange,
+  onViewportControllerReady
 }: WorkspaceCanvasProps) {
-  const { fitView, screenToFlowPosition, setCenter, setViewport } = useReactFlow();
+  const { fitView, screenToFlowPosition, setCenter, setViewport, zoomIn, zoomOut, getViewport } = useReactFlow();
   const resolvedTheme = useResolvedCanvasTheme(theme);
   const canvasColors = canvasThemeColors(resolvedTheme);
   const nodesRef = useRef<Node[]>([]);
@@ -477,6 +486,32 @@ function WorkspaceCanvasInner({
     },
     [onViewportChange]
   );
+
+  const pan = useCallback(
+    (direction: "up" | "down" | "left" | "right") => {
+      const current = getViewport();
+      const step = 200;
+      const dx = direction === "left" ? step : direction === "right" ? -step : 0;
+      const dy = direction === "up" ? step : direction === "down" ? -step : 0;
+      void setViewport({ x: current.x + dx, y: current.y + dy, zoom: current.zoom }, { duration: 200 });
+    },
+    [getViewport, setViewport]
+  );
+
+  const viewportController = useMemo<ViewportController>(
+    () => ({
+      zoomIn: () => void zoomIn(),
+      zoomOut: () => void zoomOut(),
+      fitView: () => void fitView({ padding: 0.2, duration: 320 }),
+      pan
+    }),
+    [fitView, pan, zoomIn, zoomOut]
+  );
+
+  useEffect(() => {
+    onViewportControllerReady?.(viewportController);
+    return () => onViewportControllerReady?.(null);
+  }, [onViewportControllerReady, viewportController]);
 
   if (!canvas) {
     return <div className="canvas-empty">Loading workspace...</div>;

@@ -40,6 +40,21 @@ export function resolveServerHost(input = process.env.GRAPHCODE_SERVER_HOST): st
   return input?.trim() || DEFAULT_SERVER_HOST;
 }
 
+let runtimeDeepgramApiKey: string | null = null;
+
+export function resolveDeepgramApiKey(input = process.env.DEEPGRAM_API_KEY): string | null {
+  const value = input?.trim();
+  if (value) {
+    return value;
+  }
+  return runtimeDeepgramApiKey;
+}
+
+export function setRuntimeDeepgramApiKey(key: string | null): void {
+  const trimmed = key?.trim();
+  runtimeDeepgramApiKey = trimmed ? trimmed : null;
+}
+
 export function resolveRepoRoot(startDir = process.cwd()): string {
   let current = path.resolve(startDir);
 

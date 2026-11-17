@@ -52,7 +52,10 @@ import type {
   WorkspaceSettings,
   WorkspaceSettingsMutation,
   SettingsValidationResult,
-  TagAssignment
+  TagAssignment,
+  VoiceInterpretResponse,
+  VoiceLanguage,
+  DeepgramVoiceTokenResponse
 } from "@graphcode/graph-model";
 import { indexStateSchema } from "@graphcode/graph-model";
 
@@ -450,3 +453,43 @@ export async function seedSelfWorkspace(): Promise<Project> {
     method: "POST"
   });
 }
+
+export async function interpretVoiceCommand(
+  text: string,
+  language: VoiceLanguage,
+  projectId?: string | null
+): Promise<VoiceInterpretResponse> {
+  return request<VoiceInterpretResponse>("/api/voice/interpret", {
+    method: "POST",
+    body: JSON.stringify({ text, language, projectId: projectId ?? undefined })
+  });
+}
+
+export async function getDeepgramVoiceToken(): Promise<DeepgramVoiceTokenResponse> {
+  const response = await fetch(`${API_BASE}/api/voice/token`, { method: "POST" });
+  if (response.status === 501) {
+    return { configured: false };
+  }
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+  return response.json() as Promise<DeepgramVoiceTokenResponse>;
+}
+
+export async function configureDeepgramVoiceToken(apiKey: string | null): Promise<{ configured: boolean }> {
+  const response = await fetch(`${API_BASE}/api/voice/configure`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ apiKey })
+  });
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response));
+  }
+  const result = (await response.json()) as { configured: boolean };
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(DEEPGRAM_CONFIG_CHANGED_EVENT));
+  }
+  return result;
+}
+
+export const DEEPGRAM_CONFIG_CHANGED_EVENT = "graphcode:deepgram-config-changed";

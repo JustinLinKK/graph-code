@@ -18,6 +18,7 @@ import {
   type AgentProvider,
   type AgentRun,
   type AgentStatus,
+  type ControlCommand,
   type BlockExecutionMetadata,
   type CanvasGraph,
   CLAUDE_REASONING_EFFORTS,
@@ -49,6 +50,7 @@ import {
   type ScanningAgentRequest,
   type ScanningAgentConfig,
   type ScanningAgentMode,
+  controlCommandSchema,
   graphEdgeKindSchema,
   graphNodeKindSchema,
   ioKindSchema,
@@ -436,6 +438,70 @@ export async function runPlanningAgent(input: PlanningChatRequest, options: Agen
   });
 }
 
+export async function interpretControlCommand(input: {
+  text: string;
+  language: "zh-CN" | "en-US";
+  config: AgentConfig;
+  workspaceRoot?: string;
+}): Promise<ControlCommand | null> {
+  if (input.config.provider === "fake") {
+    return null;
+  }
+  const provider = createProvider(input.config, input.workspaceRoot);
+  const response = await provider.invoke([
+    {
+      role: "system",
+      content: resolveSystemPrompt(
+        input.config,
+        "Classify the user's spoken command into a structured control command. Respond with ONLY a JSON object and nothing else. If the utterance does not match any supported control, respond with {\"unknown\":true}."
+      )
+    },
+    {
+      role: "user",
+      content: [
+        `Language: ${input.language}`,
+        `Spoken: ${input.text}`,
+        "",
+        "Return exactly one of these JSON shapes:",
+        '{"kind":"viewport","action":"zoom-in"|"zoom-out"|"fit"|"show-full"|"pan","direction":"up"|"down"|"left"|"right"}',
+        '{"kind":"ai-planning","prompt":"the requested plan"}',
+        '{"kind":"ai-scan"}',
+        '{"kind":"ai-review"}',
+        '{"kind":"ai-start-code","prompt":"optional coding instruction"}',
+        '{"kind":"auto-layout"}',
+        '{"kind":"canvas-mode","mode":"2d"|"3d"}',
+        '{"kind":"coding-control","action":"pause"|"resume"|"cancel"}',
+        '{"kind":"system","action":"settings"|"refresh"|"open-workspace"|"reset-workspace"}',
+        '{"unknown":true}'
+      ].join("\n")
+    }
+  ]);
+  const parsed = extractJsonObject(response);
+  if (!parsed || (parsed as { unknown?: boolean }).unknown === true) {
+    return null;
+  }
+  const result = controlCommandSchema.safeParse(parsed);
+  return result.success ? result.data : null;
+}
+
+function extractJsonObject(text: string): unknown {
+  const cleaned = text.trim().replace(/^```(?:json)?/i, "").replace(/```$/i, "").trim();
+  try {
+    return JSON.parse(cleaned);
+  } catch {
+    const start = cleaned.indexOf("{");
+    const end = cleaned.lastIndexOf("}");
+    if (start < 0 || end <= start) {
+      return null;
+    }
+    try {
+      return JSON.parse(cleaned.slice(start, end + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
 export async function runCodingAgent(input: CodingAgentRequest, options: AgentRuntimeOptions): Promise<AgentResult> {
   return runLangGraphTask({
     kind: "coding",
@@ -560,7 +626,7 @@ export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, optio
         context.task,
         context.allowedWrites.map((scope) => scope.path)
       );
-      const response = await provider.invoke([
+      const messages: PromptMessage[] = [
         {
           role: "system",
           content: `${rendered.systemPrompt}${customSystemPrompt}\n\nReturn a unified diff. Append GRAPHCODE_WORK_UNIT_METADATA_JSON followed by JSON containing ${
@@ -568,15 +634,31 @@ export async function runCodingWorkUnitAgent(input: WorkUnitCodingRequest, optio
           }. Optionally append GRAPHCODE_MEMORY_UPDATES_JSON followed by a JSON array of durable memory updates.`
         },
         { role: "user", content: `${rendered.userPrompt}\n\n${formatMemoryContext(memory)}\n\n${memoryUpdateInstructions()}` }
-      ]);
-      throwIfAgentCancelled(options.signal);
-      const { content: responseWithoutMemory, updates: memoryUpdates } = extractMemoryUpdates(response);
-      const { content: responseWithoutMetadata, metadata } = extractWorkUnitProposalMetadata(responseWithoutMemory);
-      const { content: responseWithoutArtifacts, artifactManifest } = extractCodeProposalArtifactManifest(responseWithoutMetadata);
-      const diff =
-        options.config.provider === "fake"
-          ? fakeWorkUnitDiff(context, responseWithoutArtifacts)
-          : normalizeDiff(responseWithoutArtifacts);
+      ];
+      const isFakeProvider = options.config.provider === "fake";
+      let memoryUpdates: MemoryUpdate[] = [];
+      let metadata: z.infer<typeof workUnitProposalMetadataSchema> | null = null;
+      let artifactManifest: CodeProposalArtifactManifest | null = null;
+      let diff = "";
+      let responseWithoutMemory = "";
+      // A response without a parseable diff is retried exactly once with the failure reason
+      // and a minimal diff-format spec, then fails permanently. Never loops indefinitely.
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const response = await provider.invoke(messages);
+        throwIfAgentCancelled(options.signal);
+        const withoutMemory = extractMemoryUpdates(response);
+        responseWithoutMemory = withoutMemory.content;
+        memoryUpdates = withoutMemory.updates;
+        const withoutMetadata = extractWorkUnitProposalMetadata(responseWithoutMemory);
+        metadata = withoutMetadata.metadata;
+        const withoutArtifacts = extractCodeProposalArtifactManifest(withoutMetadata.content);
+        artifactManifest = withoutArtifacts.artifactManifest;
+        diff = isFakeProvider ? fakeWorkUnitDiff(context, withoutArtifacts.content) : tryNormalizeDiff(withoutArtifacts.content, context.allowedWrites[0]?.path);
+        if (diff && extractUnifiedDiffWriteScopes(diff).length > 0) break;
+        if (isFakeProvider || attempt === 1) break;
+        messages.push({ role: "assistant", content: response });
+        messages.push({ role: "user", content: workUnitDiffRetryFeedback(withoutArtifacts.content) });
+      }
       const actualWriteScopes = extractUnifiedDiffWriteScopes(diff);
       if (actualWriteScopes.length === 0) throw new Error("Work-unit coding response did not contain a parseable unified diff.");
       validateActualWriteScopes(context.workUnit, actualWriteScopes);
@@ -650,10 +732,10 @@ export function extractUnifiedDiffWriteScopes(diff: string): CodingWorkUnit["pla
       permission = oldPath === null ? "create" : newPath === null ? "delete" : "edit";
       continue;
     }
-    const hunk = line.match(/^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@/);
+    const hunk = line.match(/^@@\s*-(\d+)(?:,(\d+))?\s*\+(\d+)(?:,(\d+))?\s*@@/);
     if (!hunk || !currentPath) continue;
-    const startLine = Number.parseInt(hunk[1], 10);
-    const count = hunk[2] === undefined ? 1 : Number.parseInt(hunk[2], 10);
+    const startLine = Number.parseInt(hunk[3], 10);
+    const count = hunk[4] === undefined ? 1 : Number.parseInt(hunk[4], 10);
     scopes.push({
       path: currentPath,
       startLine: permission === "edit" ? startLine : null,
@@ -1956,7 +2038,7 @@ export function resolveCodingAgentDiff(input: {
   } else if (input.provider === "fake") {
     diff = fakeStandaloneCodingDiff(input.allowedPath, input.source ?? "", input.response);
   } else {
-    diff = normalizeDiff(input.response);
+    diff = normalizeDiff(input.response, input.allowedPath);
   }
   assertDiffInScope(diff, input.allowedPath);
   assertDiffContainsChanges(diff);
@@ -2421,7 +2503,7 @@ export function extractWorkUnitProposalMetadata(response: string): {
   }
 }
 
-function normalizeDiff(response: string): string {
+function normalizeDiff(response: string, allowedPath?: string | null): string {
   const fencedDiff = [...response.matchAll(/```(?:diff|patch)?\s*\r?\n([\s\S]*?)```/gi)]
     .map((match) => match[1])
     .find((candidate) => candidate.includes("diff --git") || (candidate.includes("--- ") && candidate.includes("+++ ")));
@@ -2429,9 +2511,93 @@ function normalizeDiff(response: string): string {
   const lines = candidate.replace(/\r\n/g, "\n").split("\n");
   const start = lines.findIndex((line, index) => line.startsWith("diff --git ") || (line.startsWith("--- ") && lines[index + 1]?.startsWith("+++ ")));
   if (start < 0) {
-    throw new Error("Coding agent response did not contain a unified diff; no code proposal was recorded.");
+    const wholeFile = extractWholeFile(response);
+    if (wholeFile === null) {
+      throw new Error("Coding agent response did not contain a unified diff; no code proposal was recorded.");
+    }
+    return buildWholeFileDiff(wholeFile, allowedPath);
   }
-  return lines.slice(start).join("\n").trimEnd();
+  return trimDiff(lines, start);
+}
+
+// Keep only the lines that belong to the diff: from `start` through the last header/body
+// line, dropping prose that trails the diff. Never invents lines.
+function trimDiff(lines: string[], start: number): string {
+  let end = start;
+  for (let index = start; index < lines.length; index += 1) {
+    if (isDiffHeaderLine(lines[index]) || isDiffBodyLine(lines[index])) {
+      end = index;
+    }
+  }
+  return lines.slice(start, end + 1).join("\n");
+}
+
+function isDiffHeaderLine(line: string): boolean {
+  return /^(?:diff --git|index |new file mode|deleted file mode|old mode|new mode|rename from|rename to|similarity index|--- |\+\+\+ |@@ )/.test(line);
+}
+
+function isDiffBodyLine(line: string): boolean {
+  return /^[ +\-\\]/.test(line);
+}
+
+// A whole-file rewrite carries no diff markers. Treat it as a full-file replace only when
+// the response clearly contains the full new file. Returns null (unparseable) for prose.
+function extractWholeFile(response: string): string | null {
+  const fenced = [...response.matchAll(/^```([^\s`]*)[ \t]*\r?\n([\s\S]*?)^```[ \t]*$/gm)]
+    .map((match) => ({ language: match[1]?.trim() || null, body: match[2] }));
+  if (fenced.length === 1 && (fenced[0].language ?? "").toLowerCase() !== "diff") {
+    return fenced[0].body.replace(/\n+$/, "");
+  }
+  if (fenced.length > 0) {
+    return null;
+  }
+  const text = response.replace(/\r\n/g, "\n");
+  const trimmed = text.trim();
+  return trimmed && hasSourceCodeShape(trimmed) ? text.replace(/\n+$/, "") : null;
+}
+
+function hasSourceCodeShape(text: string): boolean {
+  const first = text.split("\n").find((line) => line.trim().length > 0) ?? "";
+  return /^(?:\/\/|#!|\/\*|\*|import |from |export |const |let |var |function |class |def |#include|package |use |module |require\(|SELECT |CREATE TABLE)/.test(first.trim());
+}
+
+function buildWholeFileDiff(content: string, allowedPath?: string | null): string {
+  const path = allowedPath ?? "SCOPED_BLOCK.md";
+  const lines = content.split("\n");
+  const count = lines.length;
+  return [
+    `diff --git a/${path} b/${path}`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -1,${count} +1,${count} @@`,
+    ...lines.map((line) => `+${line}`)
+  ].join("\n");
+}
+
+// Wrap `normalizeDiff` so an unparseable response becomes an empty diff (a retry signal)
+// instead of a thrown error, without changing the throw for the standalone coding path.
+function tryNormalizeDiff(response: string, allowedPath?: string | null): string {
+  try {
+    return normalizeDiff(response, allowedPath);
+  } catch {
+    return "";
+  }
+}
+
+function workUnitDiffRetryFeedback(failedContent: string): string {
+  const excerpt = failedContent.replace(/\r\n?/g, "\n").trim().slice(0, 2000);
+  return [
+    "Your previous response did not contain a parseable unified diff.",
+    `Previous response (excerpt):\n${excerpt || "(empty)"}`,
+    "",
+    "Return the corrected response. For every file you change, include a unified diff of exactly this shape:",
+    "  diff --git a/<path> b/<path>",
+    "  --- a/<path>",
+    "  +++ b/<path>",
+    "  @@ -<oldStart>,<oldCount> +<newStart>,<newCount> @@",
+    "followed by unchanged context lines (each prefixed with one space), removed lines (prefixed with -), and added lines (prefixed with +).",
+    "Do not wrap the diff in prose, commentary, or markdown fences. Keep any GRAPHCODE_WORK_UNIT_METADATA_JSON or GRAPHCODE_MEMORY_UPDATES_JSON blocks."
+  ].join("\n");
 }
 
 function fakeStandaloneCodingDiff(allowedPath: string | null | undefined, source: string, response: string): string {

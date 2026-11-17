@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { openWorkspace, pickWorkspaceFolder, seedSelfWorkspace } from "./api";
+import { getDeepgramVoiceToken, openWorkspace, pickWorkspaceFolder, seedSelfWorkspace } from "./api";
 
 describe("API client", () => {
   afterEach(() => {
@@ -34,21 +34,21 @@ describe("API client", () => {
     expect(headerValue(init?.headers, "Content-Type")).toBe("application/json");
   });
 
-  it("surfaces JSON error messages as readable text", async () => {
-    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) =>
-      json(
-        {
-          error: "Request Error",
-          message: "Body cannot be empty when content-type is set to 'application/json'"
-        },
-        400
-      )
-    );
-    vi.stubGlobal("fetch", fetchMock);
+  it("maps a 501 token response to configured=false", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "deepgram-not-configured" }, 501)));
+    const result = await getDeepgramVoiceToken();
+    expect(result).toEqual({ configured: false });
+  });
 
-    await expect(openWorkspace("/tmp/repo")).rejects.toThrow(
-      "Body cannot be empty when content-type is set to 'application/json'"
-    );
+  it("returns the token payload on 200", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ configured: true, accessToken: "dg-token", expiresIn: 58 })));
+    const result = await getDeepgramVoiceToken();
+    expect(result).toEqual({ configured: true, accessToken: "dg-token", expiresIn: 58 });
+  });
+
+  it("throws for other errors", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "forbidden" }, 403)));
+    await expect(getDeepgramVoiceToken()).rejects.toThrow("forbidden");
   });
 });
 

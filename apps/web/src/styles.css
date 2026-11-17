@@ -571,9 +571,73 @@ select {
 
 .canvas-panel {
   position: relative;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
   min-height: 0;
   background: var(--canvas-surface);
+}
+
+.canvas-mode-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  background: var(--canvas-panel-bg);
+  border-bottom: 1px solid var(--canvas-panel-border);
+  z-index: 10;
+}
+
+.canvas-mode-tabs button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 48px;
+  height: 28px;
+  padding: 0 12px;
+  color: var(--canvas-panel-text);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.canvas-mode-tabs button:hover {
+  background: var(--surface-muted);
+}
+
+.canvas-mode-tabs button.active {
+  color: var(--canvas-panel-strong);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
+.workspace-canvas-3d,
+.workspace-canvas-3d-empty,
+.canvas3d-loading {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+}
+
+.workspace-canvas-3d > canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.workspace-canvas-3d-empty,
+.canvas3d-loading {
+  display: grid;
+  place-items: center;
+  gap: 8px;
+  color: var(--canvas-panel-text);
+  background: var(--canvas-surface);
+}
+
+.canvas3d-loading {
+  align-content: center;
 }
 
 .canvas-empty,
@@ -2749,6 +2813,26 @@ select {
   flex: 0 0 auto;
 }
 
+.voice-control-wrap {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.voice-indicator {
+  font-size: 12px;
+  line-height: 1.2;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #526071;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--surface-muted);
+}
+
 .reset-workspace-action {
   color: #9f3a38 !important;
   background: transparent !important;
@@ -2781,6 +2865,240 @@ button:disabled,
   cursor: not-allowed !important;
   filter: saturate(0.35);
   opacity: 0.48 !important;
+}
+
+/* Voice conversation drawer */
+.voice-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.voice-drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.voice-drawer {
+  position: relative;
+  width: min(420px, 100vw);
+  height: 100%;
+  margin-top: 58px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border-left: 1px solid var(--border);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+}
+
+.voice-drawer-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.voice-drawer-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.voice-drawer-status {
+  margin-left: auto;
+  font-size: 12px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  color: var(--muted);
+}
+
+.voice-drawer-status[data-status="listening"],
+.voice-drawer-status[data-status="recognized"] {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.voice-drawer-status[data-status="error"],
+.voice-drawer-status[data-status="unsupported"] {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.voice-drawer-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.voice-drawer-close:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.voice-drawer-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.voice-control-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.voice-control-field select {
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.voice-conversation {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.voice-empty {
+  margin: auto;
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.voice-message {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  line-height: 1.45;
+  max-width: 92%;
+}
+
+.voice-message-user {
+  align-self: flex-end;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--text);
+}
+
+.voice-message-agent {
+  align-self: flex-start;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.voice-message-system {
+  align-self: stretch;
+  background: transparent;
+  border: 1px dashed var(--border);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.voice-message-error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #7f1d1d;
+}
+
+.voice-message-role {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  opacity: 0.7;
+}
+
+.voice-message-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.voice-message-pending {
+  opacity: 0.8;
+}
+
+.voice-drawer-footer {
+  display: flex;
+  gap: 10px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.voice-drawer-footer button {
+  flex: 1 1 auto;
+}
+
+@media (max-width: 480px) {
+  .voice-drawer {
+    width: 100vw;
+    margin-top: 0;
+  }
+
+  .voice-drawer-controls {
+    grid-template-columns: 1fr;
+  }
+}
+
+:root[data-theme="dark"] .voice-message-error {
+  background: #3f1818;
+  border-color: #7f1d1d;
+  color: #fecaca;
+}
+
+:root[data-theme="dark"] .voice-drawer-status[data-status="listening"],
+:root[data-theme="dark"] .voice-drawer-status[data-status="recognized"] {
+  background: #14532d;
+  color: #bbf7d0;
+}
+
+:root[data-theme="dark"] .voice-drawer-status[data-status="error"],
+:root[data-theme="dark"] .voice-drawer-status[data-status="unsupported"] {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.deepgram-key-input-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+
+.deepgram-key-input-row input {
+  flex: 1 1 auto;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
 }
 
 .right-panel-tabs button,

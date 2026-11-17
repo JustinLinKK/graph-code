@@ -4,6 +4,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentConfig, CanvasGraph, GraphEdge, GraphNode, IndexState, NodeDetail } from "@graphcode/graph-model";
 import {
+  extractUnifiedDiffWriteScopes,
   extractWorkUnitProposalMetadata,
   normalizeOpenRouterResponse,
   resolveCodingAgentDiff,
@@ -1259,4 +1260,66 @@ describe("GraphCode agent runtime", () => {
       expect(scopeLeakResult.response).toContain("Review mode: large");
       expect(scopeLeakTools.setStatuses).toHaveBeenCalledWith("project", [expect.objectContaining({ status: "bugged" })]);
     });
+});
+
+describe("GraphCode unified diff normalization", () => {
+  const cleanDiff = [
+    "diff --git a/src/module.ts b/src/module.ts",
+    "--- a/src/module.ts",
+    "+++ b/src/module.ts",
+    "@@ -1,2 +1,2 @@",
+    " const before = 0;",
+    "-export const value = 1;",
+    "+export const value = 2;"
+  ].join("\n");
+
+  const propose = (response: string) =>
+    resolveCodingAgentDiff({ provider: "openai", permissionMode: "ask_for_permission", response, allowedPath: "src/module.ts" });
+
+  it("extracts a diff wrapped in a fenced code block", () => {
+    const result = propose(["Here is the change:", "", "```diff", cleanDiff, "```"].join("\n"));
+    expect(result.diff).toBe(cleanDiff);
+    expect(result.diff).not.toContain("```");
+  });
+
+  it("strips surrounding prose before and after the diff", () => {
+    const result = propose(
+      ["Sure! I updated the value.", "", "Here is the unified diff:", "", cleanDiff, "", "Let me know if you want tests too."].join("\n")
+    );
+    expect(result.diff).toBe(cleanDiff);
+    expect(result.diff).not.toContain("Sure!");
+    expect(result.diff).not.toContain("Let me know");
+  });
+
+  it("normalizes CRLF line endings", () => {
+    const result = propose(cleanDiff.replace(/\n/g, "\r\n"));
+    expect(result.diff).toBe(cleanDiff);
+    expect(result.diff).not.toContain("\r");
+  });
+
+  it("falls back to a full-file replace for an unmarked whole-file rewrite", () => {
+    const result = propose(["```typescript", "export const x = 1;", "export const y = 2;", "```"].join("\n"));
+    expect(result.diff).toContain("diff --git a/src/module.ts b/src/module.ts");
+    expect(result.diff).toContain("@@ -1,2 +1,2 @@");
+    expect(result.diff).toContain("+export const x = 1;");
+    expect(extractUnifiedDiffWriteScopes(result.diff)).toEqual([
+      expect.objectContaining({ path: "src/module.ts", startLine: 1, endLine: 2, permission: "edit" })
+    ]);
+  });
+
+  it("tolerates non-standard whitespace and counts in hunk headers", () => {
+    const diff = [
+      "diff --git a/src/module.ts b/src/module.ts",
+      "--- a/src/module.ts",
+      "+++ b/src/module.ts",
+      "@@  -1,3  +1,4  @@",
+      " const before = 0;",
+      "-export const value = 1;",
+      "+export const value = 2;",
+      "+export const extra = 3;"
+    ].join("\n");
+    expect(extractUnifiedDiffWriteScopes(diff)).toEqual([
+      expect.objectContaining({ path: "src/module.ts", startLine: 1, endLine: 4, permission: "edit" })
+    ]);
+  });
 });

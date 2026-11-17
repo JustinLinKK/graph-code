@@ -27,9 +27,20 @@ import {
   reviewAgentRequestSchema,
   scanningAgentRequestSchema,
   workspaceSettingsMutationSchema,
-  tagAssignmentSchema
+  tagAssignmentSchema,
+  voiceInterpretRequestSchema
 } from "@graphcode/graph-model";
 import type { WorkspaceRuntime } from "./workspace";
+import { setRuntimeDeepgramApiKey } from "./config";
+
+function isLoopbackAddress(ip: string | undefined): boolean {
+  if (!ip) return false;
+  return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+}
+
+const deepgramVoiceConfigureSchema = z.object({
+  apiKey: z.string().optional()
+});
 
 const projectParamsSchema = z.object({
   projectId: z.string().min(1)
@@ -252,6 +263,34 @@ export async function registerApiRoutes(app: FastifyInstance, runtime: Workspace
   app.post("/api/agents/scanning", async (request) => {
     const body = scanningAgentRequestSchema.parse(request.body);
     return runtime.runScanning(body);
+  });
+
+  app.post("/api/voice/interpret", async (request) => {
+    const body = voiceInterpretRequestSchema.parse(request.body);
+    return runtime.interpretVoiceCommand(body);
+  });
+
+  app.post("/api/voice/token", async (request, reply) => {
+    if (!isLoopbackAddress(request.ip)) {
+      return reply.status(403).send({ error: "forbidden" });
+    }
+    const token = await runtime.grantDeepgramVoiceToken();
+    if (!token.configured) {
+      return reply.status(501).send({
+        error: "deepgram-not-configured",
+        message: "Set DEEPGRAM_API_KEY on the local server to enable the Deepgram voice engine."
+      });
+    }
+    return token;
+  });
+
+  app.post("/api/voice/configure", async (request, reply) => {
+    if (!isLoopbackAddress(request.ip)) {
+      return reply.status(403).send({ error: "forbidden" });
+    }
+    const body = deepgramVoiceConfigureSchema.parse(request.body);
+    setRuntimeDeepgramApiKey(body.apiKey ?? null);
+    return { configured: Boolean(body.apiKey?.trim()) };
   });
 
   app.post("/api/projects/:projectId/layout/auto", async (request) => {

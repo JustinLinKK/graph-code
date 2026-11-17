@@ -25,16 +25,23 @@ import {
   Undo2,
   X
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, lazy, Suspense } from "react";
 import type { CSSProperties, PointerEvent as ReactPointerEvent } from "react";
 import type { CanvasViewport } from "../canvasSession";
 import { agentKindLabel, codingAgentModeLabel, reviewAgentModeLabel } from "../displayLabels";
 import { HierarchyTree } from "./HierarchyTree";
 import { Inspector } from "./Inspector";
-import { WorkspaceCanvas, type MemberLayout } from "./WorkspaceCanvas";
+import { WorkspaceCanvas, type MemberLayout, type ViewportController } from "./WorkspaceCanvas";
+
+const WorkspaceCanvas3D = lazy(() => import("../canvas3d/WorkspaceCanvas3D"));
+import { VoiceControlButton } from "../voice/VoiceControlButton";
+import { VoiceConversationPanel } from "../voice/VoiceConversationPanel";
+import type { VoiceControlState } from "../voice/useVoiceControl";
 
 type AppShellProps = {
   selectedProject: Project | null;
+  canvasMode: "2d" | "3d";
+  onCanvasModeChange: (mode: "2d" | "3d") => void;
   indexState: IndexState | null;
   hierarchy: HierarchyNode[];
   canvas: CanvasGraph | null;
@@ -114,10 +121,14 @@ type AppShellProps = {
   onRunReview: (runId: string) => void;
   onRunScanning: () => void;
   onCancelIndex: () => void;
+  onViewportControllerReady: (controller: ViewportController | null) => void;
+  voice: VoiceControlState;
 };
 
 export function AppShell({
   selectedProject,
+  canvasMode,
+  onCanvasModeChange,
   indexState,
   hierarchy,
   canvas,
@@ -191,7 +202,9 @@ export function AppShell({
   onCloseCodingWorkflow,
   onRunReview,
   onRunScanning,
-  onCancelIndex
+  onCancelIndex,
+  onViewportControllerReady,
+  voice
 }: AppShellProps) {
   const [query, setQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
@@ -200,6 +213,7 @@ export function AppShell({
   const [resizingLeftPanel, setResizingLeftPanel] = useState(false);
   const [resizingRightPanel, setResizingRightPanel] = useState(false);
   const [rightPanelMode, setRightPanelMode] = useState<"details" | "planning">("details");
+  const [voicePanelOpen, setVoicePanelOpen] = useState(false);
   const resizeStartRef = useRef({ x: 0, width: DEFAULT_LEFT_PANEL_WIDTH });
   const rightResizeStartRef = useRef({ x: 0, width: DEFAULT_RIGHT_PANEL_WIDTH });
   const title = selectedProject?.name ?? "GraphCode";
@@ -325,6 +339,17 @@ export function AppShell({
               <FolderOpen size={16} />
               <span className="toolbar-label">Open workspace</span>
             </Button>
+          </span>
+          <span title="Voice control">
+            <VoiceControlButton
+              supported={voice.supported}
+              status={voice.status}
+              transcript={voice.transcript}
+              onToggle={() => {
+                voice.toggle();
+                setVoicePanelOpen(true);
+              }}
+            />
           </span>
           {selectedProject ? (
             <>
@@ -491,27 +516,72 @@ export function AppShell({
             </Button>
           </div>
         ) : (
-          <WorkspaceCanvas
-            canvas={canvas}
-            codingWorkflow={codingWorkflow}
-            theme={theme}
-            selectedNodeId={selectedNodeId}
-            selectedEdgeId={selectedEdgeId}
-            selectedBoundaryId={selectedBoundaryId}
-            drawBoundaryMode={drawBoundaryMode}
-            drawEdgeMode={drawEdgeMode}
-            onSelectNode={onCanvasNodeSelect}
-            onSelectEdge={onCanvasEdgeSelect}
-            onSelectBoundary={onCanvasBoundarySelect}
-            onOpenNode={onCanvasNodeOpen}
-            onPersistLayout={onPersistLayout}
-            onPersistBoundaryLayout={onPersistBoundaryLayout}
-            restoreViewport={restoreViewport}
-            onViewportChange={onCanvasViewportChange}
-            onBoundaryDraft={onBoundaryDraft}
-            onEdgeDraft={onEdgeDraft}
-            onCancelDraw={onCancelDraw}
-          />
+          <>
+            <div className="canvas-mode-tabs" role="tablist" aria-label="Canvas mode">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={canvasMode === "2d"}
+                className={canvasMode === "2d" ? "active" : ""}
+                onClick={() => onCanvasModeChange("2d")}
+              >
+                2D
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={canvasMode === "3d"}
+                className={canvasMode === "3d" ? "active" : ""}
+                onClick={() => onCanvasModeChange("3d")}
+              >
+                3D
+              </button>
+            </div>
+            {canvasMode === "2d" ? (
+              <WorkspaceCanvas
+                canvas={canvas}
+                codingWorkflow={codingWorkflow}
+                theme={theme}
+                selectedNodeId={selectedNodeId}
+                selectedEdgeId={selectedEdgeId}
+                selectedBoundaryId={selectedBoundaryId}
+                drawBoundaryMode={drawBoundaryMode}
+                drawEdgeMode={drawEdgeMode}
+                onSelectNode={onCanvasNodeSelect}
+                onSelectEdge={onCanvasEdgeSelect}
+                onSelectBoundary={onCanvasBoundarySelect}
+                onOpenNode={onCanvasNodeOpen}
+                onPersistLayout={onPersistLayout}
+                onPersistBoundaryLayout={onPersistBoundaryLayout}
+                restoreViewport={restoreViewport}
+                onViewportChange={onCanvasViewportChange}
+                onBoundaryDraft={onBoundaryDraft}
+                onEdgeDraft={onEdgeDraft}
+                onCancelDraw={onCancelDraw}
+                onViewportControllerReady={onViewportControllerReady}
+              />
+            ) : (
+              <Suspense
+                fallback={
+                  <div className="canvas3d-loading">
+                    <Spinner size="sm" />
+                    <span>Loading 3D scene...</span>
+                  </div>
+                }
+              >
+                <WorkspaceCanvas3D
+                  canvas={canvas}
+                  theme={theme}
+                  selectedNodeId={selectedNodeId}
+                  selectedEdgeId={selectedEdgeId}
+                  onSelectNode={onCanvasNodeSelect}
+                  onOpenNode={onCanvasNodeOpen}
+                  onPersistLayout={onPersistLayout}
+                  onViewportControllerReady={onViewportControllerReady}
+                />
+              </Suspense>
+            )}
+          </>
         )}
       </main>
 
@@ -629,6 +699,26 @@ export function AppShell({
           </div>
         )}
       </aside>
+      <VoiceConversationPanel
+        open={voicePanelOpen}
+        onClose={() => {
+          setVoicePanelOpen(false);
+          voice.stop();
+        }}
+        supported={voice.supported}
+        status={voice.status}
+        transcript={voice.transcript}
+        listening={voice.listening}
+        conversation={voice.conversation}
+        clearConversation={voice.clearConversation}
+        toggle={voice.toggle}
+        stop={voice.stop}
+        engine={voice.engine}
+        setEngine={voice.setEngine}
+        deepgramConfigured={voice.deepgramConfigured}
+        language={voice.language}
+        setLanguage={voice.setLanguage}
+      />
     </div>
   );
 }

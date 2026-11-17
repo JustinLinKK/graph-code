@@ -126,3 +126,36 @@ function isViewport(value: unknown): value is CanvasViewport {
 function scopeKey(scopeNodeId: string | null): string {
   return scopeNodeId ?? NULL_SCOPE_KEY;
 }
+
+const CANVAS_MODE_KEY = "graphcode.canvasMode.v1";
+
+export function getStoredCanvasMode(projectId: string | null): "2d" | "3d" | null {
+  if (!projectId || typeof window === "undefined") {
+    return null;
+  }
+  try {
+    const raw = window.localStorage.getItem(CANVAS_MODE_KEY);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    const value = parsed[projectId];
+    return value === "2d" || value === "3d" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function rememberCanvasMode(projectId: string | null, mode: "2d" | "3d"): void {
+  if (!projectId || typeof window === "undefined") {
+    return;
+  }
+  try {
+    const raw = window.localStorage.getItem(CANVAS_MODE_KEY) ?? "{}";
+    const parsed = JSON.parse(raw) as Record<string, string>;
+    parsed[projectId] = mode;
+    window.localStorage.setItem(CANVAS_MODE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Canvas mode persistence should never block graph editing.
+  }
+}

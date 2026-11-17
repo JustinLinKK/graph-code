@@ -1,5 +1,6 @@
 import { AVAILABLE_EXTENSION_PACKAGES, type AgentRun, type CanvasGraph, type GraphBoundary, type GraphEdge, type GraphNode, type HierarchyNode, type NodeDetail, type Project } from "@graphcode/graph-model";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import React from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 
@@ -201,6 +202,10 @@ vi.mock("@xyflow/react", async () => ({
     setCenter: reactFlowMock.setCenter,
     setViewport: reactFlowMock.setViewport
   })
+}));
+
+vi.mock("./canvas3d/WorkspaceCanvas3D", () => ({
+  default: () => React.createElement("div", { "data-testid": "workspace-canvas-3d" }, "3D scene")
 }));
 
 const project: Project = {
@@ -1294,6 +1299,19 @@ describe("GraphCode app shell", () => {
     expect(await canvas.findByText("Web Workspace")).toBeInTheDocument();
     expect(canvas.queryByText("GraphCode Workspace")).not.toBeInTheDocument();
     expect(screen.getByText("Index complete · 10/10")).toBeInTheDocument();
+  });
+
+  it("switches to the 3D canvas tab", async () => {
+    render(<App />);
+
+    await screen.findByTestId("react-flow");
+    fireEvent.click(screen.getByRole("tab", { name: "3D" }));
+    expect(await screen.findByTestId("workspace-canvas-3d")).toBeInTheDocument();
+    expect(screen.queryByTestId("react-flow")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "2D" }));
+    expect(await screen.findByTestId("react-flow")).toBeInTheDocument();
+    expect(screen.queryByTestId("workspace-canvas-3d")).not.toBeInTheDocument();
   });
 
   it("shows boundary groups and member labels in the hierarchy", async () => {
